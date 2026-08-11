@@ -166,24 +166,42 @@ def simuler(fichier, ecritures, feuille=FEUILLE_COMMANDES) -> list:
     entetes = lire_entetes(fichier, feuille)
     _verifier_colonnes(ecritures, entetes)
 
+    # Une seule passe séquentielle sur la feuille : en mode read_only,
+    # ws.cell(row=, column=) ré-analyse le flux XML depuis le début à
+    # CHAQUE appel (accès aléatoire non prévu par openpyxl en read_only) —
+    # sur ~5 900 lignes, des dizaines d'écritures rendaient ça minutes,
+    # voire jamais fini. On collecte donc d'abord {ligne -> {colonne: idx}}
+    # demandées, puis on ne lit qu'une fois chaque ligne concernée.
+    lignes_demandees = {}
+    for e in ecritures:
+        lignes_demandees.setdefault(e.ligne, set()).add(entetes[e.colonne])
+
+    derniere_ligne = max(lignes_demandees)
+    valeurs_lues = {}  # (ligne, idx_colonne) -> valeur actuelle
     wb = load_workbook(fichier, read_only=True, data_only=True)
     try:
         ws = wb[feuille]
-        rapport = []
-        for e in ecritures:
-            idx = entetes[e.colonne]
-            ancienne = ws.cell(row=e.ligne, column=idx).value
-            rapport.append(
-                {
-                    "ligne": e.ligne,
-                    "colonne": e.colonne,
-                    "ancienne_valeur": ancienne,
-                    "nouvelle_valeur": e.valeur,
-                }
-            )
-        return rapport
+        for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            if i in lignes_demandees:
+                for idx in lignes_demandees[i]:
+                    valeurs_lues[(i, idx)] = row[idx - 1] if idx - 1 < len(row) else None
+            if i >= derniere_ligne:
+                break
     finally:
         wb.close()
+
+    rapport = []
+    for e in ecritures:
+        idx = entetes[e.colonne]
+        rapport.append(
+            {
+                "ligne": e.ligne,
+                "colonne": e.colonne,
+                "ancienne_valeur": valeurs_lues.get((e.ligne, idx)),
+                "nouvelle_valeur": e.valeur,
+            }
+        )
+    return rapport
 
 
 def appliquer(fichier, ecritures, dossier_backups, feuille=FEUILLE_COMMANDES) -> Path:

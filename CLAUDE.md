@@ -352,6 +352,58 @@ rapports/                    rapports de rapprochement générés (R2+)
 backups/                     sauvegardes horodatées du Suivi commandes avant chaque écriture (rotation 30 jours)
 ```
 
+**Fichier vivant du Suivi commandes** : PAS celui à la racine du dépôt
+(qui n'est qu'un export ponctuel, potentiellement périmé) mais
+`X:\1.3. Logistique et approvisionnement\1.3.0. Commandes\1.3.0.1. Commandes
+courantes\1.3.0.1. Suivi commandes - 2026.xlsx` — en-têtes/formules
+vérifiés identiques à la copie testée par `ecriture.py`, donc le socle
+s'applique tel quel. Deux autres fichiers à côté à ne PAS confondre :
+`1.3.0.1. Suivi nouveau - à utiliser v4.xlsx` (nature à clarifier avec
+l'acheteur avant R2 — refonte en préparation ?) et une `copie ...xlsx`
+(sauvegarde manuelle antérieure).
+
+**Flux réel, constaté sur 22 vrais BL papier de l'acheteur** (session R1,
+dossier `a_traiter/BL/`, ex-dossier "Traitement" fusionné dedans à la
+demande de l'acheteur) :
+
+- **Les BL arrivent en PAPIER, numérisés par l'acheteur elle-même ; les
+  factures arrivent des deux façons (PDF email ET relevé papier
+  numérisé).** Le point de dépôt des scans aujourd'hui est `Z:\` (partage
+  réseau généraliste, pas dédié — mélangé avec des documents admin/RH sans
+  rapport). `a_traiter/BL/` et `a_traiter/Factures/` sont le point de dépôt
+  CIBLE pour Rapprochement AI, pas encore le point de dépôt réel.
+- **OCR OBLIGATOIRE, découverte cette session** : les 22 BL réels (dont 2
+  `.jpg`) sont TOUS des scans image PURS, zéro caractère de texte
+  extractible (vérifié avec `moteur.lecture_pdf.lire_pdf()` sur chacun —
+  0 caractère à chaque fois). Toute l'infrastructure de parsing existante
+  (regex sur texte PyMuPDF) est donc inapplicable aux BL sans une étape
+  d'OCR préalable — à ajouter aux dépendances du projet en R2 (aucune lib
+  OCR actuellement dans `requirements.txt`).
+- **Numéro de commande présent et lisible sur 12/12 documents examinés**
+  (rendu image + lecture visuelle, pas d'OCR encore) — meilleure nouvelle
+  que redouté au vu de la réponse "normalement oui, mais pas tout le
+  temps" de l'acheteur. Libellé différent par fournisseur (jamais deviné,
+  toujours lu sur pièce réelle) :
+
+  | Fournisseur | Libellé du n° commande sur le BL | Prix présent | Remarque |
+  |---|---|---|---|
+  | 109 Distribution (4 BL vus) | "N°Réf.Client" | Oui, systématique | Format identique au Suivi (ex. `123.096`) |
+  | COREDIME (3 BL vus) | "Référence COMMANDE N°" | **Pas toujours** (`M2.16.011` : "Ref à livrer directement", 0 prix) | Prix réglé à la facture dans ce cas — la Qté livrée reste renseignable, pas le Tarif BL |
+  | COMINTER / COMINTER OUEST (2 BL vus) | "Référence" | Oui | Structure proche du gabarit devis déjà existant (`moteur/fournisseurs/cominter.py`), probablement adaptable |
+  | SAGEES (1 BL vu) | "V/Ref" | Oui | Pas de colonne Référence article (cohérent avec le format "V0" déjà documenté) |
+  | DEM (1 BL vu) | "V/REF" | Oui, au cent (`/c`) | Cohérent avec `moteur/fournisseurs/dem.py` |
+  | TOP Océan Indien (1 BL vu) | "N° de commande" | Oui | **Fournisseur PONCTUEL, confirmé par l'acheteur — ne pas ajouter de parser dédié.** Format de commande `C70244`, différent des autres (le préfixe "C..." existe bien dans le Suivi : 75 lignes réelles) |
+
+  GMR et RAVATE : aucun BL réel vu cette session, à couvrir dès que des
+  pièces réelles seront disponibles (règle d'or : jamais de gabarit sans
+  PDF réel).
+- **Carnets manuels des "gars"** : confirmé par l'acheteur, une commande
+  peut être passée sur un carnet papier terrain avec un numéro
+  `BC24.XXXX` — vérifié réel dans le Suivi (171 lignes au format `BC...`),
+  distinct du format `C26.001` classique (75 lignes). Le n° de commande
+  du BL ne matche donc pas toujours une ligne "propre" du Suivi — cas à
+  gérer en R2, pas encore résolu.
+
 ## Tests
 
     py -3 -m pytest          # tout le socle
