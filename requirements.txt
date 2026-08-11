@@ -1,0 +1,10 @@
+# Dépendances d'exécution de Consultation AI.
+#
+# Normalement inutile à installer à la main : moteur/dependances.py les
+# installe automatiquement, dans l'interpréteur qui lance le programme, au
+# premier démarrage (voir CLAUDE.md). Ce fichier sert de filet standard
+# (ex. "pip install -r requirements.txt" après un clone) et documente les
+# versions minimales attendues.
+
+openpyxl>=3.1
+PyMuPDF>=1.24

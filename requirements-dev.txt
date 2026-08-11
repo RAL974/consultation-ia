@@ -1,0 +1,4 @@
+# Dépendances supplémentaires pour lancer les tests (py -3 -m pytest).
+-r requirements.txt
+
+pytest>=8.0

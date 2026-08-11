@@ -1,0 +1,18 @@
+Désignation	Référence	Qté
+Coffret XL³ 160 classe II 2 rangées;	401802;	9
+Bornes de raccordement pour peigne universel;	404905;	6
+Peigne pour 13 appareils 1P+N;	404926;	13
+Inter sect DX³-IS 2P 32A manette grise;	406434;	8
+Inter sect DX³-IS 4P 125A manette grise;	406490;	1
+Disj DNX³ 4500/6kA 1P+N C 10A;	406773;	33
+Disj DNX³ 4500/6kA 1P+N C 16A;	406774;	21
+Disj DNX³ 4500/6kA 1P+N C 25A;	406776;	8
+Disj diff DX³ 4500/6kA 1P+N C 10A 30mA Type AC;	410704;	1
+Disj diff DX³ 4500/6kA 1P+N C 16A 30mA Type AC;	410705;	4
+Disj diff DX³ 4500/6kA 1P+N C 25A 30mA Type AC;	410707;	1
+Inter diff DX³ 2P 25A 300mA Type AC;	411524;	1
+Inter diff DX³ 2P 40A 300mA Type AC;	411525;	1
+Inter diff DX³ 2P 25A 300mA Type AC Peignable;	411613;	11
+Télécommande standard jusqu'à 300 blocs;	3901;	1
+Obturateurs 24 modules;	20051;	12
+Porte galbée pleine métal H450;	20252;	9

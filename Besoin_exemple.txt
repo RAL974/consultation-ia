@@ -1,0 +1,8 @@
+# Demande d'origine ; Reference ; Quantite
+# Une ligne par article. Separateur = point-virgule.
+# Colonne 1 = texte du demandeur (affiche en tete du comparatif)
+# Colonne 2 = reference Legrand/fabricant (pour le rapprochement)
+# Colonne 3 = quantite
+100 douilles pour DCL encastree ; 710100 ; 100
+15 DX3-ID 2P 63A type A 30mA 2 modules ; 411651 ; 15
+20 peignes d'alimentation P+N 13 modules ; 404926 ; 20

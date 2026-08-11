@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Config Claude Code locale (chemins/session propres à ce poste)
+.claude/settings.local.json
+
+# Journaux et erreurs générés au lancement (regénérés à chaque exécution)
+lancement.log
+gui_erreur.log
+
+# Fichier de l'acheteur (pas du dépôt, cf. CLAUDE.md), renouvelé chaque année
+1.3.0.1. Suivi commandes*.xlsx
+
+# Dossiers de consultation réels : devis clients et résultats (données
+# métier/commerciales en cours, pas du code) — la structure des dossiers
+# n'est pas versionnée pour autant, seul leur contenu l'est.
+consultations/*/devis/
+consultations/*/resultats/
+
+# Devis bruts en attente d'affectation à une consultation (voir CLAUDE.md)
+devis/Pour DB/
+devis/Thumbs.db
+
+# Ancien dossier partagé (conservé vide en repli, plus alimenté)
+resultats/
+
+# Générés à l'exécution, reconstruits depuis base/BDD_articles.csv
+base/consultation.db
+moteur/articles.db
+
+# Rapprochements proposés / graine d'apprentissage (générés à chaque exécution)
+referentiel/A_confirmer.xlsx
+referentiel/exports/

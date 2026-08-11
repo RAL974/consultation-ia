@@ -1,0 +1,15 @@
+# Composés manuels : un besoin qui se décompose en plusieurs références
+# (ex. "coffret" = coffret nu + porte, deux articles à commander pour une
+# seule ligne de besoin).
+#
+# Format (séparateur ; comme les autres fichiers du projet) :
+#   Cle_besoin;Membre;Quantite
+#     Cle_besoin  la référence (ou clé) telle qu'utilisée dans le fichier besoin
+#     Membre      la référence (ou clé) d'un composant, une ligne par membre
+#     Quantite    quantité de ce membre pour 1 unité du besoin (1 si omis)
+#
+# Exemple (à adapter/décommenter — aucune donnée n'est pré-remplie, ce
+# fichier est vide tant que tu n'y as rien déclaré) :
+#   980100;980100;1
+#   980100;980101;1
+Cle_besoin;Membre;Quantite
