@@ -77,13 +77,28 @@ def cle_matching(ref: str) -> str:
 
 
 def _to_float(valeur) -> float:
+    """Nombre en tête de la valeur, unité éventuellement collée ignorée
+    (ex. " 99m" -> 99.0, cas réel : besoin exprimé en mètres de câble)."""
     if valeur is None or valeur == "":
         return 0.0
-    return float(str(valeur).replace(" ", "").replace(",", "."))
+    m = re.match(r"[-+]?[\d\s]+(?:[.,]\d+)?", str(valeur).strip())
+    if not m:
+        return 0.0
+    return float(m.group(0).replace(" ", "").replace(",", "."))
 
 
 def _identifier_colonnes(entetes):
-    """Repère les colonnes demande / référence / quantité par leur en-tête."""
+    """Repère les colonnes demande / référence / quantité par leur en-tête.
+
+    La colonne référence est FACULTATIVE : certains besoins (ex. bordereaux
+    de type architecte "Type A1 - Suspension circulaire...") ne décrivent
+    les articles que par désignation, sans aucune référence fabricant.
+
+    "Besoin" est ambigu selon les fichiers : synonyme de désignation
+    ("Demande d'origine" — convention historique de ce projet) OU nom
+    littéral de la colonne quantité (cas réel : "Article" / "Besoin", ce
+    2e sens n'entre en jeu que si "Besoin" n'a pas déjà servi de
+    désignation sur une colonne précédente, ex. "Article")."""
 
     col_dem = col_ref = col_qte = None
 
@@ -92,14 +107,14 @@ def _identifier_colonnes(entetes):
         e = e.upper()
 
         if col_dem is None and e.startswith(
-            ("DEMAND", "BESOIN", "DÉSIGNATION D", "DESIGNATION D", "LIBELL")
+            ("DEMAND", "BESOIN", "ARTICLE", "DÉSIGNATION", "DESIGNATION", "LIBELL")
         ):
             col_dem = i
 
         elif col_ref is None and e.startswith(("REF", "RÉF")):
             col_ref = i
 
-        elif col_qte is None and e.startswith(("QT", "QUANT")):
+        elif col_qte is None and e.startswith(("QT", "QUANT", "BESOIN")):
             col_qte = i
 
     return col_dem, col_ref, col_qte
@@ -119,12 +134,16 @@ def _lire_xlsx(fichier: Path) -> list[LigneBesoin]:
 
     col_dem, col_ref, col_qte = _identifier_colonnes(entetes)
 
-    debut = 1
-
-    # Aucun en-tête reconnu : on suppose Demande | Référence | Quantité
-    if col_dem is None and col_ref is None:
+    # Au moins UNE colonne reconnue par son en-tête -> la ligne 1 est bien
+    # un en-tête, à ne pas lire comme une ligne de besoin (ex. réf. absente
+    # mais Qté reconnue : "Article" / "Quantité" seuls, cas réel Cosinus).
+    # Sinon (rien reconnu), on suppose l'ancien format positionnel
+    # Demande | Référence | Quantité, sans en-tête.
+    if col_dem is None and col_ref is None and col_qte is None:
         col_dem, col_ref, col_qte = 0, 1, 2
         debut = 0
+    else:
+        debut = 1
 
     besoin = []
 

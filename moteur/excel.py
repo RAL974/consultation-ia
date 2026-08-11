@@ -72,7 +72,7 @@ def _largeurs(ws, maxi=42):
 
 
 def exporter_comparatif(
-    articles, dossier_projet, besoin=None, base=None, besoin_brut=None,
+    articles, dossier_projet, besoin=None, base=None,
     nom_chantier="", referentiel=None, dossier_resultats=None,
 ):
 
@@ -338,18 +338,6 @@ def exporter_comparatif(
             ])
         ws3.freeze_panes = "A2"
         _largeurs(ws3)
-
-    # ------------------------------------------------------------------
-    # Onglet "Besoin" (demande d'origine) quand elle n'a pas servi au tri
-    # ------------------------------------------------------------------
-    if besoin_brut:
-        wsb = wb.create_sheet("Besoin")
-        wsb.append(["Demande d'origine", "Quantité", "Référence (à compléter)"])
-        _entete(wsb)
-        for b in besoin_brut:
-            wsb.append([b.designation, b.quantite, b.reference])
-        wsb.freeze_panes = "A2"
-        _largeurs(wsb)
 
     # ------------------------------------------------------------------
     # Enregistrement

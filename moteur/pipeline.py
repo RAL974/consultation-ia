@@ -68,8 +68,18 @@ def generer_comparatif(dossier_projet, fichier_besoin, dossier_devis, dossier_re
         if not besoin:
             print("Aucune ligne de besoin lue : comparaison de toutes les lignes des devis.")
         elif not besoin_avec_ref:
-            print("Besoin sans références : comparaison de toutes les offres.")
-            print("  -> Ajoute une référence par ligne pour un rapprochement ligne à ligne.")
+            # Aucune ligne n'a de référence (ex. bordereau architecte
+            # "Type A1 - Suspension circulaire..." face à des fournisseurs
+            # qui proposent chacun leur fabricant, sans référence commune).
+            # Le besoin est quand même transmis normalement au comparateur :
+            # chaque ligne tente un rapprochement par DÉSIGNATION (quantité
+            # en indice), proposé dans A_confirmer.xlsx — jamais fusionné
+            # tant que l'acheteur ne l'a pas confirmé (voir
+            # moteur/referentiel.py proposer_correspondances_designation).
+            print(
+                "Besoin sans références : rapprochement proposé par "
+                "ressemblance de désignation, à confirmer (voir A_confirmer.xlsx)."
+            )
 
         articles = analyser_devis(dossier_devis)
 
@@ -80,17 +90,10 @@ def generer_comparatif(dossier_projet, fichier_besoin, dossier_devis, dossier_re
         else:
             base.enrichir_depuis_devis(articles)
 
-            if besoin and not besoin_avec_ref:
-                comparatif = exporter_comparatif(
-                    articles, dossier_projet, None, base,
-                    besoin_brut=besoin, nom_chantier=chantier, referentiel=referentiel,
-                    dossier_resultats=dossier_resultats,
-                )
-            else:
-                comparatif = exporter_comparatif(
-                    articles, dossier_projet, besoin, base, nom_chantier=chantier,
-                    referentiel=referentiel, dossier_resultats=dossier_resultats,
-                )
+            comparatif = exporter_comparatif(
+                articles, dossier_projet, besoin or None, base, nom_chantier=chantier,
+                referentiel=referentiel, dossier_resultats=dossier_resultats,
+            )
 
         referentiel.exporter_apprentissage(dossier_referentiel)
         referentiel.ecrire_a_confirmer(dossier_referentiel)

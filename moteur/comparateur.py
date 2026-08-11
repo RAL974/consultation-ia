@@ -24,11 +24,14 @@ from moteur.besoin import cle_matching
 from moteur.base import coeur_numerique
 from moteur.modele import LigneBesoin
 from moteur.normalisation import prix_normalise, code_interne_auto
+from moteur.referentiel import cle_designation
 
 
-def _cle(ref, base, referentiel=None, designation=""):
+def _cle(ref, base, referentiel=None, designation="", fournisseur="", devis=""):
     if referentiel is not None:
-        cle, statut = referentiel.resoudre(ref, designation=designation)
+        cle, statut = referentiel.resoudre(
+            ref, designation=designation, fournisseur=fournisseur, devis=devis,
+        )
         if statut == "connu":
             return f"REF:{cle}"
     return base.groupe(ref, designation) if base is not None else cle_matching(ref)
@@ -81,13 +84,25 @@ def _codes_compatibles(code_besoin, code_offre):
     Deux codes internes autorisent-ils la consolidation d'offres qui
     partagent déjà le même cœur numérique que la référence du besoin ?
 
-      - identiques                       -> oui ;
+      - identiques (à la casse près)     -> oui ;
       - une commodité d'un seul côté     -> NON (faux amis, cf. _COMMODITES) ;
       - l'un des deux vide               -> oui (aucune contradiction) ;
       - même famille, mêmes segments     -> oui, « ? » sert de joker
         (INTERDIFF_1P+N_25A_?_30MA ~ INTERDIFF_1P+N_25A_AC_30MA) ;
       - sinon                            -> non (type A ≠ AC, DISJ ≠ GOULOTTE...).
+
+    Comparaison insensible à la casse : `code_interne_auto()` écrit
+    toujours le pouvoir de coupure en "kA" (k minuscule, ex.
+    DISJ_1P+N_C25A_6kA), mais moteur/base.py MAJUSCULE le "Code interne"
+    saisi à la main dans base/BDD_articles.csv à l'import (nécessaire pour
+    d'autres colonnes, ex. les sections de câble "x"/"X" incohérentes dans
+    la BDD) — un même article donnait donc "...6KA" via la BDD et
+    "...6kA" via l'auto-calcul, jamais reconnus identiques, et une offre
+    pourtant demandée finissait en "Hors besoin" (cas réel : 406773/
+    406774/406776 chez COMINTER/Electric Plus, préfixés "L"/"LEG").
     """
+    code_besoin = (code_besoin or "").upper()
+    code_offre = (code_offre or "").upper()
     if code_besoin == code_offre:
         return True
     for code in (code_besoin, code_offre):
@@ -111,7 +126,10 @@ def comparer(articles, besoin=None, base=None, referentiel=None):
 
     for article in articles:
 
-        cle = _cle(article.reference_fournisseur, base, referentiel, article.designation)
+        cle = _cle(
+            article.reference_fournisseur, base, referentiel, article.designation,
+            fournisseur=article.fournisseur, devis=article.devis,
+        )
 
         if not cle:
             continue
@@ -174,9 +192,49 @@ def comparer(articles, besoin=None, base=None, referentiel=None):
 
         for ligne_besoin in besoin:
 
-            cle = _cle(ligne_besoin.reference, base, referentiel)
+            sans_reference = not ligne_besoin.reference.strip()
+
+            if sans_reference and referentiel is not None:
+                # Besoin SANS référence (ex. bordereau architecte "Type A1
+                # - Suspension circulaire..." — aucune référence fabricant,
+                # seulement une désignation) : rien à résoudre par
+                # référence des deux côtés. La clé est dérivée directement
+                # de la désignation du besoin (cle_designation) — la MÊME
+                # que celle proposée comme cible par
+                # proposer_correspondances_designation() ci-dessous, pour
+                # qu'une correspondance CONFIRMÉE une fois (A_confirmer.xlsx
+                # -> alias, voir referentiel.appliquer_confirmations) fasse
+                # matcher cette ligne dès l'exécution suivante, exactement
+                # comme un rapprochement par référence — sans traitement
+                # spécial supplémentaire ici.
+                cle = f"REF:{cle_designation(ligne_besoin.designation)}"
+            else:
+                cle = _cle(ligne_besoin.reference, base, referentiel)
 
             entree = index.get(cle)
+
+            # Toujours sans offre après résolution directe : on PROPOSE
+            # (jamais on ne fusionne) un rapprochement par ressemblance de
+            # désignation, quantité en indice — à confirmer par l'acheteur
+            # dans A_confirmer.xlsx avant de compter au prochain
+            # rapprochement. Cette ligne reste "AUCUNE OFFRE" dans CE
+            # comparatif, comme toute proposition non confirmée.
+            if entree is None and sans_reference and referentiel is not None:
+                candidats = [
+                    {
+                        "fournisseur": fournisseur,
+                        "reference": offre["reference"],
+                        "designation": autre["designation"],
+                        "quantite": offre["quantite"],
+                        "devis": offre["devis"],
+                    }
+                    for autre_cle, autre in index.items()
+                    if autre_cle not in utilisees
+                    for fournisseur, offre in autre["offres"].items()
+                ]
+                referentiel.proposer_correspondances_designation(
+                    ligne_besoin.designation, ligne_besoin.quantite, candidats,
+                )
 
             # Consolidation par cœur : la RÉFÉRENCE du besoin fait autorité.
             # Un groupe resté isolé (le plus souvent par un code interne

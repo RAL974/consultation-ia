@@ -2,12 +2,24 @@
 Parser Stand 64 (STAND 64, luminaires - prescription).
 
 Format difficile : la référence est souvent un placeholder (ZARTICLENP =
-article non prédéfini, ZARTICLETVA = éco-contribution). Le produit réel
-n'est décrit que dans le texte. Colonnes en ordre inversé, nombre de
-colonnes numériques variable (éco-part présente ou non).
+article non prédéfini par le commercial, absent du catalogue fournisseur ;
+ZARTICLETVA = éco-contribution). Le produit réel n'est décrit que dans le
+texte. Colonnes en ordre inversé, nombre de colonnes numériques variable
+(éco-part présente ou non).
 
 Ancre fiable : après la description viennent, dans l'ordre,
     Qté, code TVA (C0/C1/C4/C7), Total HT, P.U Net, [autres nombres], Référence
+
+**Placeholder ZARTICLENP/"Alternative:ZARTICLENP" : la vraie référence
+fabricant, quand elle existe, est alors donnée SEULEMENT entre parenthèses
+en fin de désignation** (ex. "...SD-WOOD RING SUSPENSION ... IP20 BOIS
+(KUBIA-ART00031180)"), pas dans le champ référence — cas réel, chantier
+Cosinus (`tests/fixtures/stand64_cosinus.pdf`). Sans extraire ce code, TOUTES
+les lignes personnalisées d'un même devis partagent la même "référence" et
+s'écrasent entre elles au comparateur (34 lignes -> 5 conservées, constaté
+sur ce PDF) : `_reference_reelle()` la récupère quand le champ référence
+imprimé est un tel placeholder ; sinon la référence imprimée fait foi, comme
+avant.
 
 PARSER MEILLEUR EFFORT : à contrôler visuellement. Les lignes
 "ECO CONTRIBUTION" (ZARTICLETVA) sont ignorées. Un garde-fou
@@ -22,6 +34,19 @@ from moteur.outils import to_float, lignes_propres
 _NUM = re.compile(r"^\s*\d[\d\s]*,\d{2}\s*$")
 _TVA = re.compile(r"^C\d$")
 _MARQUEUR = re.compile(r"^(REPERE|REPRE|VARIANTE|DETECTEUR|PRIX NETS)", re.I)
+_CODE_INTEGRE = re.compile(r"\(([A-Z0-9][A-Z0-9\-\.]{2,})\)\s*$")
+
+
+def _reference_reelle(ref: str, designation: str) -> str:
+    """Récupère le code fabricant intégré en fin de désignation quand la
+    référence imprimée est un placeholder générique ("ZARTICLENP",
+    "Alternative:ZARTICLENP"...) — sinon la référence imprimée telle quelle."""
+
+    if "ZARTICLE" not in ref.upper():
+        return ref
+
+    m = _CODE_INTEGRE.search(designation)
+    return m.group(1) if m else ref
 
 
 def parse_stand64(texte: str) -> list[Article]:
@@ -98,7 +123,7 @@ def parse_stand64(texte: str) -> list[Article]:
                     Article(
                         fournisseur="STAND 64",
                         devis=devis,
-                        reference_fournisseur=ref,
+                        reference_fournisseur=_reference_reelle(ref, designation),
                         reference_distributeur="",
                         designation=designation,
                         quantite=quantite,

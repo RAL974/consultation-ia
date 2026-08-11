@@ -19,6 +19,7 @@ from moteur.modele import Article, LigneBesoin
 from moteur.comparateur import comparer, _codes_compatibles
 from moteur.normalisation import code_interne_auto
 from moteur.base import BaseArticles
+from moteur.referentiel import Referentiel
 
 from conftest import ROOT
 
@@ -105,6 +106,49 @@ def test_consolidation_par_coeur_v19():
     assert resultat["hors_besoin"] == []
 
 
+def test_consolidation_par_coeur_casse_code_interne_bdd(tmp_path):
+    """
+    Régression réelle (chantier Doujani, cf. test_codes_compatibles_
+    insensible_a_la_casse) rejouée via comparer() de bout en bout, avec le
+    même partage des rôles que le pipeline réel :
+    - RAVATE (référence nue "406776") est rapproché par le RÉFÉRENTIEL
+      (alias exact importé de la BDD) -> "REF:406776", sans jamais passer
+      par base.groupe() ;
+    - Electric Plus (référence préfixée "LEG406776", pas un alias exact
+      connu) retombe sur base.groupe() -> "CI:DISJ_1P+N_C25A_6KA" (le
+      "Code interne" de la BDD, MAJUSCULÉ à l'import par moteur/base.py).
+    Deux clés différentes, dont une "kA"/"KA" ne diffèrent QUE par la
+    casse : sans le fix, l'offre Electric Plus finissait en "Hors besoin"
+    au lieu de rejoindre la ligne "406776" du besoin.
+    """
+    csv_bdd = tmp_path / "BDD_articles.csv"
+    csv_bdd.write_text(
+        "Référence;Désignation;Fournisseur;Fabricant;Catégorie;"
+        "Tarif approximatif;CONCAT;Clé_Réf;Code interne\n"
+        "406776;Disj DNX3 4500/6kA 1P+N C 25A;COMINTER;Legrand;"
+        "Disjoncteurs;9,68;406776;406776;DISJ_1P+N_C25A_6kA\n",
+        encoding="utf-8-sig",
+    )
+    base = BaseArticles(tmp_path / "base")
+    base.importer_bdd(csv_bdd)
+
+    referentiel = Referentiel(tmp_path / "moteur")
+    referentiel.importer_bdd(csv_bdd)
+
+    articles = [
+        _art("RAVATE", "406776", "DNX3 1P+NG C25 4500A/6KA", 6.30),
+        _art("ELECTRIC PLUS", "LEG406776", "DNX3 1P+NG C25 4500A/6KA", 6.30),
+    ]
+    besoin = [LigneBesoin(
+        designation="Disj DNX³ 4500/6kA 1P+N C 25A", reference="406776", quantite=8)]
+
+    resultat = comparer(articles, besoin, base, referentiel)
+    referentiel.fermer()
+
+    assert sorted(resultat["lignes"][0]["offres"]) == ["ELECTRIC PLUS", "RAVATE"]
+    assert resultat["hors_besoin"] == []
+
+
 def test_codes_compatibles_garde_fous():
     # A (type) jamais confondu avec AC
     assert not _codes_compatibles("INTERDIFF_2P_63A_AC_30MA", "INTERDIFF_2P_63A_A_30MA")
@@ -114,3 +158,17 @@ def test_codes_compatibles_garde_fous():
     assert not _codes_compatibles("", "AMP_LED_E27_4000K")
     # familles différentes : jamais compatibles
     assert not _codes_compatibles("DISJ_1P+N_C16A", "EMBOUT_16")
+
+
+def test_codes_compatibles_insensible_a_la_casse():
+    # Régression réelle (chantier Doujani) : code_interne_auto() écrit
+    # toujours le pouvoir de coupure en "kA" minuscule, mais moteur/base.py
+    # MAJUSCULE le "Code interne" saisi dans base/BDD_articles.csv à
+    # l'import -> "...6KA" (BDD) contre "...6kA" (auto) pour le MÊME
+    # article. Sans insensibilité à la casse, les offres 406773/406774/
+    # 406776 de COMINTER ("L406773"...) et Electric Plus ("LEG406776")
+    # étaient rejetées de la ligne de besoin et finissaient en "Hors besoin"
+    # alors que RAVATE (référence nue, rapprochée via le référentiel) y
+    # apparaissait normalement.
+    assert _codes_compatibles("DISJ_1P+N_C25A_6kA", "DISJ_1P+N_C25A_6KA")
+    assert _codes_compatibles("DISJ_1P+N_C25A_6KA", "DISJ_1P+N_C25A_6kA")

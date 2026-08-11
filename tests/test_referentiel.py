@@ -12,7 +12,7 @@ import csv as csv_module
 
 import pytest
 
-from moteur.referentiel import Referentiel, deduire_prefixes
+from moteur.referentiel import Referentiel, deduire_prefixes, cle_designation, _etiquette_type
 from moteur.base import BaseArticles
 from moteur.comparateur import comparer
 from moteur.modele import Article, LigneBesoin
@@ -199,6 +199,135 @@ def test_comparateur_reference_inconnue_sans_coeur_numerique_matche_quand_meme(t
 
 
 # ------------------------------------------------------------------
+# Rapprochement par désignation (besoin SANS référence, ex. bordereau
+# architecte "Type A1 - Suspension circulaire..." — chantier Cosinus)
+# ------------------------------------------------------------------
+def test_cle_designation():
+    assert cle_designation("Type A1 - Suspension circulaire Open space") \
+        == "DESC:TYPE_A1_SUSPENSION_CIRCULAIRE_OPEN_SPACE"
+    # Insensible aux accents/casse : deux désignations "identiques" au
+    # sens humain doivent donner la MÊME clé.
+    assert cle_designation("type a1 suspension circulaire open space  ") \
+        == "DESC:TYPE_A1_SUSPENSION_CIRCULAIRE_OPEN_SPACE"
+    assert cle_designation("") == ""
+    assert cle_designation("   ") == ""
+
+
+def test_etiquette_type():
+    assert _etiquette_type("Type A1 - Suspension circulaire Open space") == "A1"
+    assert _etiquette_type("TYPE A1 - SUSPENSION CIRCULAIRE : SD-WOOD RING...") == "A1"
+    assert _etiquette_type("Type L1 - Module de jonction T et L") == "L1"
+    assert _etiquette_type("Coffret XL³ 160 classe II 2 rangées") is None
+
+
+def test_proposer_correspondances_designation_etiquette_type_rattrape_score_faible(referentiel):
+    # Régression réelle (chantier Cosinus) : le texte technique environnant
+    # dilue le score Jaccard sous le seuil (~0.24 observé) malgré une
+    # étiquette "Type A1" identique des deux côtés -> doit quand même être
+    # proposé.
+    candidats = [
+        {"fournisseur": "STAND 64", "reference": "KUBIA-ART00031180",
+         "designation": (
+             "TYPE A1 - SUSPENSION CIRCULAIRE : SD-WOOD RING SUSPENSION "
+             "Ø700MM 70W 8000LM 4000°K IP20 BOIS (KUBIA-ART00031180)"
+         ), "quantite": 3},
+    ]
+    retenus = referentiel.proposer_correspondances_designation(
+        "Type A1 - Suspension circulaire Open space", 3, candidats,
+    )
+    assert len(retenus) == 1
+    assert retenus[0]["reference"] == "KUBIA-ART00031180"
+    assert retenus[0]["score"] >= 0.9
+
+
+def test_proposer_correspondances_designation_meilleur_par_fournisseur(referentiel):
+    candidats = [
+        {"fournisseur": "CLAREO", "reference": "DOW.105942",
+         "designation": "Downlight WC Sanitaire Douche CLAREO 19W Diffuseur Opale", "quantite": 9},
+        {"fournisseur": "STAND 64", "reference": "ACB-A2033070B",
+         "designation": "KOWA APPLIQUE LED applique murale 136x100mm", "quantite": 4},
+        # Bruit total (aucun rapport) : ne doit jamais être proposé.
+        {"fournisseur": "DEM", "reference": "TUBFF3G6",
+         "designation": "FF 3G6 RGE B V/J C50", "quantite": 200},
+    ]
+
+    retenus = referentiel.proposer_correspondances_designation(
+        "Type A4 - Downlight - WC, Sanitaire, Douche", 9, candidats,
+    )
+
+    fournisseurs_retenus = {c["fournisseur"] for c in retenus}
+    assert fournisseurs_retenus == {"CLAREO"}
+    assert "DOW105942" in referentiel._propositions
+    p = referentiel._propositions["DOW105942"]
+    assert p["fournisseur"] == "CLAREO"
+    assert p["cle"] == "DESC:TYPE_A4_DOWNLIGHT_WC_SANITAIRE_DOUCHE"
+    assert p["designation_candidat"] == "Type A4 - Downlight - WC, Sanitaire, Douche"
+    assert p["qte_devis"] == 9
+    assert p["qte_besoin"] == 9
+    assert "TUBFF3G6" not in referentiel._propositions
+
+
+def test_proposer_correspondances_designation_ne_fusionne_jamais(referentiel):
+    """Une proposition par désignation ne doit JAMAIS apparaître comme une
+    offre dans comparer() tant qu'elle n'est pas confirmée — même avec un
+    score élevé."""
+    base = BaseArticles(referentiel.dossier.parent / "base")
+
+    articles = [
+        Article(fournisseur="CLAREO", devis="D1", reference_fournisseur="DOW.105942",
+                reference_distributeur="", designation="Downlight WC Sanitaire Douche",
+                quantite=9, unite="UN", prix_brut=45.0, prix_net=45.0, montant=405.0),
+    ]
+    besoin = [LigneBesoin(
+        reference="", quantite=9, designation="Type A4 - Downlight - WC, Sanitaire, Douche")]
+
+    resultat = comparer(articles, besoin, base, referentiel)
+
+    assert resultat["lignes"][0]["offres"] == {}
+    assert "DOW105942" in referentiel._propositions
+
+
+def test_comparateur_besoin_sans_reference_confirme_ensuite_matche(tmp_path, referentiel):
+    """Cycle complet : proposition par désignation -> confirmation acheteur
+    (A_confirmer.xlsx) -> la ligne de besoin se rapproche normalement, EXACTEMENT
+    comme une proposition par référence (aucun traitement spécial ensuite)."""
+    dossier_referentiel = tmp_path / "referentiel"
+    base = BaseArticles(tmp_path / "base_besoin_sans_ref")
+
+    articles = [
+        Article(fournisseur="CLAREO", devis="D1", reference_fournisseur="DOW.105942",
+                reference_distributeur="", designation="Downlight WC Sanitaire Douche",
+                quantite=9, unite="UN", prix_brut=45.0, prix_net=45.0, montant=405.0),
+    ]
+    besoin = [LigneBesoin(
+        reference="", quantite=9, designation="Type A4 - Downlight - WC, Sanitaire, Douche")]
+
+    resultat = comparer(articles, besoin, base, referentiel)
+    assert resultat["lignes"][0]["offres"] == {}
+
+    fichier = referentiel.ecrire_a_confirmer(dossier_referentiel)
+    assert fichier is not None
+
+    from openpyxl import load_workbook
+    wb = load_workbook(fichier)
+    ws = wb.active
+    entetes = [c.value for c in ws[1]]
+    col_ref = entetes.index("Référence détectée")
+    col_decision = entetes.index("Décision")
+    for row in ws.iter_rows(min_row=2):
+        if row[col_ref].value == "DOW.105942":
+            row[col_decision].value = "OUI"
+    wb.save(fichier)
+
+    referentiel.appliquer_confirmations(dossier_referentiel / "A_confirmer.xlsx")
+
+    # Prochaine exécution (même processus ou un nouveau) : la ligne de
+    # besoin matche normalement, sans repasser par la désignation.
+    resultat2 = comparer(articles, besoin, base, referentiel)
+    assert resultat2["lignes"][0]["offres"].get("CLAREO") is not None
+
+
+# ------------------------------------------------------------------
 # Cycle de confirmation (fichier Excel aller-retour)
 # ------------------------------------------------------------------
 def test_cycle_confirmation(tmp_path, referentiel):
@@ -216,9 +345,10 @@ def test_cycle_confirmation(tmp_path, referentiel):
     wb = load_workbook(fichier)
     ws = wb.active
     entetes = [c.value for c in ws[1]]
+    col_ref = entetes.index("Référence détectée")
     col_decision = entetes.index("Décision")
     for row in ws.iter_rows(min_row=2):
-        if row[0].value == "406774-LEG":
+        if row[col_ref].value == "406774-LEG":
             row[col_decision].value = "OUI"
     wb.save(fichier)
 
@@ -239,9 +369,10 @@ def test_confirmation_non_devient_sa_propre_cle(tmp_path, referentiel):
     wb = load_workbook(fichier)
     ws = wb.active
     entetes = [c.value for c in ws[1]]
+    col_ref = entetes.index("Référence détectée")
     col_decision = entetes.index("Décision")
     for row in ws.iter_rows(min_row=2):
-        if row[0].value == "406774-LEG":
+        if row[col_ref].value == "406774-LEG":
             row[col_decision].value = "NON"
     wb.save(fichier)
 

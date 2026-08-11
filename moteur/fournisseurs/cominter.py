@@ -1,16 +1,22 @@
 """
 Parser COMINTER (et COMINTER MAYOTTE).
 
-Le texte extrait du PDF est éclaté : chaque champ sur sa propre ligne,
-dans l'ordre :
-    Référence
-    Désignation (1 à 2 lignes)
-    Montant HT €
-    Quantité
-    Prix Unit € [remise %]
-    Code TVA (chiffre)
-    Prix Net €
-    Conditionnement (Unité / Boîte de 1 / Sachet de / Barre)
+TROIS formats réels coexistent chez ce fournisseur (le texte extrait du
+PDF éclate chaque champ sur sa propre ligne, mais pas dans le même ordre) :
+
+v1 : Référence, Désignation (1-2 lignes), Montant HT €, Quantité,
+     Prix Unit € [remise %], Code TVA (chiffre), Prix Net €,
+     Conditionnement (Unité / Boîte de 1 / Sachet de / Barre).
+
+v2 : Qté, Px unitaire, Montant HT€, [code TVA], Désignation (1-2 lignes),
+     Cdt (Unité/Barre...), Référence — la référence vient APRÈS le Cdt.
+
+v3 (chantier Kanopée CDC, devis DV121328/DV124395) : Qté, Px unitaire,
+     Montant HT€, Rem% (1 chiffre), Référence, Désignation (1-2 lignes),
+     Cdt — la référence vient AVANT la désignation, contrairement à v2.
+     parse_cominter() essaie les trois et garde le plus complet ; sur ces
+     2 PDF réels, le total extrait retombe exactement sur le Total HT
+     affiché (6 010,49€ et 9 515,39€).
 """
 
 import re
@@ -58,7 +64,9 @@ def _parse_cominter_v1(texte: str) -> list[Article]:
 
     devis = ""
 
-    m = re.search(r"Devis\s*:\s*([A-Z]{3}\d+)", texte)
+    # 3 lettres habituellement ("ODE270211"), mais 2 sur les PDF v3
+    # ("DV121328") — cas réel, chantier Kanopée CDC.
+    m = re.search(r"Devis\s*:\s*([A-Z]{2,4}\d+)", texte)
 
     if m:
         devis = m.group(1)
@@ -143,7 +151,7 @@ def _parse_cominter_v2(texte: str) -> list[Article]:
     """
     articles = []
 
-    m = re.search(r"Devis\s*:\s*([A-Z]{3}\d+)", texte)
+    m = re.search(r"Devis\s*:\s*([A-Z]{2,4}\d+)", texte)
     devis = m.group(1) if m else ""
 
     lignes = [l.rstrip() for l in texte.splitlines()]
@@ -204,11 +212,82 @@ def _parse_cominter_v2(texte: str) -> list[Article]:
     return articles
 
 
+def _parse_cominter_v3(texte: str) -> list[Article]:
+    """
+    3e format Cominter réel (chantier Kanopée CDC, devis DV121328/DV124395) :
+    par article, ordre
+        Qté, Px unitaire, Montant HT€, Rem% (1 chiffre), Référence,
+        Désignation (1-2 lignes), Cdt (Unité/Barre...)
+    — la référence vient AVANT la désignation (contrairement à v2, où elle
+    vient après le Cdt). On s'ancre sur la ligne Cdt et on remonte : la
+    désignation (1 à 2 lignes) jusqu'à la référence, puis le bloc prix.
+    """
+    articles = []
+
+    m = re.search(r"Devis\s*:\s*([A-Z]{2,4}\d+)", texte)
+    devis = m.group(1) if m else ""
+
+    lignes = [l.rstrip() for l in texte.splitlines()]
+    n = len(lignes)
+
+    for i, l in enumerate(lignes):
+
+        if l.strip() not in _CDT and not l.strip().startswith(("Boîte", "Sachet", "Barre", "Unité", "Rouleau")):
+            continue
+
+        # Remonter jusqu'à la référence (1 à 2 lignes de désignation)
+        j = i - 1
+        design = []
+        while j >= 0 and j > i - 4 and not _REF.match(lignes[j].strip()):
+            design.insert(0, lignes[j].strip())
+            j -= 1
+
+        if j < 0 or not _REF.match(lignes[j].strip()) or lignes[j].strip().startswith("ECO"):
+            continue
+
+        ref = lignes[j].strip()
+
+        # Avant la référence : Rem% (1 chiffre), Montant€, Px unitaire, Qté
+        if j < 4:
+            continue
+
+        code_rem = lignes[j - 1].strip()
+        if not re.fullmatch(r"\d+%?", code_rem):
+            continue
+
+        try:
+            if not _MONEY.match(lignes[j - 2].strip()):
+                continue
+            montant = _f(lignes[j - 2].strip())
+            prix = _f(lignes[j - 3].strip())
+            quantite = _f(lignes[j - 4].strip())
+        except (ValueError, IndexError):
+            continue
+
+        articles.append(
+            Article(
+                fournisseur="COMINTER",
+                devis=devis,
+                reference_fournisseur=ref,
+                reference_distributeur="",
+                designation=" ".join(design),
+                quantite=quantite,
+                unite=_unite(lignes[i]),
+                prix_brut=prix,
+                prix_net=prix,
+                montant=montant,
+            )
+        )
+
+    return articles
+
+
 def parse_cominter(texte: str) -> list[Article]:
-    """Essaie les deux formats et retourne le plus complet."""
+    """Essaie les trois formats et retourne le plus complet."""
     v1 = _parse_cominter_v1(texte)
     v2 = _parse_cominter_v2(texte)
-    return v1 if len(v1) >= len(v2) else v2
+    v3 = _parse_cominter_v3(texte)
+    return max((v1, v2, v3), key=len)
 
 
 

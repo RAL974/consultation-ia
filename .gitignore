@@ -33,3 +33,12 @@ moteur/articles.db
 # Rapprochements proposés / graine d'apprentissage (générés à chaque exécution)
 referentiel/A_confirmer.xlsx
 referentiel/exports/
+
+# Rapprochement AI (branche dédiée, voir CLAUDE.md) : BL/factures déposés
+# par l'acheteur, archives horodatées, rapports générés, sauvegardes du
+# Suivi commandes avant écriture — données métier vivantes, jamais du dépôt.
+a_traiter/
+rapproches/
+rapports/
+backups/
+Traitement/

@@ -34,7 +34,11 @@ _FOURNISSEURS = [
     ("COMINTER", r"COMINTER"),
     ("ELECTRIC PLUS", r"ELECTRIC\s+PLUS"),
     ("GMR", r"\bGMR\b"),
-    ("109 DISTRIBUTION", r"109\s+DISTRIBUTION"),
+    # "109 Holding" : gabarit plus récent du même fournisseur (109 Est/
+    # Sud/Nord/Ouest) qui ne contient JAMAIS le mot "DISTRIBUTION" dans
+    # le corps du devis — seulement dans le pied de page légal
+    # ("Siège social : 109 Holding..."). Cas réel, chantier Kanopée CDC.
+    ("109 DISTRIBUTION", r"109\s+DISTRIBUTION|109\s+HOLDING"),
     ("EDOI", r"\bEDOI\b"),
     ("STAND 64", r"STAND\s*64"),
     ("IMPORELEC", r"IMPORELEC"),

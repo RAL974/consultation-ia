@@ -7,7 +7,9 @@ depuis Excel (tabulations, "Désignation / Référence / Qté") en tête d'un
 .txt était lue comme une ligne de besoin fantôme (qté 0, sans référence).
 """
 
-from moteur.besoin import _lire_txt, _est_ligne_entete, lire_fichier_besoin
+from openpyxl import Workbook
+
+from moteur.besoin import _lire_txt, _lire_xlsx, _est_ligne_entete, lire_fichier_besoin
 
 
 def test_ligne_entete_detectee():
@@ -54,3 +56,24 @@ def test_lire_txt_sans_entete_toujours_ok(tmp_path):
     assert len(besoin) == 2
     assert besoin[0].reference == "710100"
     assert besoin[0].quantite == 100
+
+
+def test_lire_xlsx_colonne_besoin_comme_quantite_avec_unite_collee(tmp_path):
+    # Cas réel (chantier Kanopée CDC) : en-têtes "Article" / "Besoin" (pas
+    # "Qté"), et des valeurs avec l'unité collée pour les câbles ("99m")
+    # mais un nombre nu pour d'autres articles (313) dans la MÊME colonne.
+    fichier = tmp_path / "Besoin Test.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Article", "Besoin"])
+    ws.append(["Chemin de câble PVC 100X50", " 99m"])
+    ws.append(["Consoles en C 100", 313])
+    wb.save(fichier)
+
+    besoin = _lire_xlsx(fichier)
+
+    assert len(besoin) == 2
+    assert besoin[0].designation == "Chemin de câble PVC 100X50"
+    assert besoin[0].quantite == 99.0
+    assert besoin[1].designation == "Consoles en C 100"
+    assert besoin[1].quantite == 313.0

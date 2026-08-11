@@ -56,6 +56,8 @@ moteur/
   excel.py                   génère Comparatif.xlsx (document de décision, voir bandeau du fichier)
   panier.py                  génère resultats/Panier_<chantier>_<date>.xlsx à partir des décisions de l'acheteur, voir section dédiée
   audit.py                   génère Audit_BDD.xlsx (qualité de la base d'équivalences)
+  rapprochement/
+    ecriture.py               écriture sécurisée dans le Suivi commandes (patch XML chirurgical, jamais openpyxl.save() sur le classeur vivant), voir section dédiée
 consultations/
   <NomConsultation>/          une consultation = un dossier autonome et rejouable, voir section dédiée
     Besoin ....txt|xlsx        fichier besoin (facultatif)
@@ -69,6 +71,10 @@ referentiel/
   A_confirmer.xlsx            généré à chaque exécution : rapprochements proposés en attente de décision (voir section dédiée)
   exports/                    généré à chaque exécution : graine CSV du futur référentiel Appro-Tracker
 1.3.0.1. Suivi commandes - <année>.xlsx   fichier de l'acheteur (pas du dépôt, gitignore), export de la feuille "Commandes" utilisé par panier.py pour caler colonnes/fournisseurs/chantiers — voir section dédiée
+a_traiter/                  Rapprochement AI : dépôt des BL/Factures PDF à traiter (BL/, Factures/), gitignoré, voir section dédiée
+rapproches/                  Rapprochement AI : archive des PDF traités par fournisseur/mois, gitignoré
+rapports/                    Rapprochement AI : rapports de rapprochement générés, gitignoré
+backups/                     Rapprochement AI : sauvegardes horodatées du Suivi commandes avant écriture, gitignoré
 installer.py                bundle de distribution autonome (copie base64 du projet) — outil de déploiement, PAS le moteur ; devient obsolète à chaque évolution du code, à régénérer séparément si besoin (hors périmètre courant)
 README.md                   prise en main non-développeur (installer, utiliser, légende des couleurs, journal en cas de souci)
 requirements.txt / requirements-dev.txt   filet standard en plus de l'auto-installation de moteur/dependances.py
@@ -79,6 +85,7 @@ tests/
   test_parsers_clareo_importer_stand64.py, test_parsers_imporelec.py
   test_detecteur.py, test_comparateur.py, test_autocontrole.py, test_referentiel.py
   test_besoin.py, test_normalisation.py, test_panier.py, test_consultation.py, test_lecture_pdf.py
+  test_rapprochement_ecriture.py  socle d'écriture sécurisée (Rapprochement AI), voir section dédiée
 ```
 
 ## Dossiers de consultation (moteur/consultation.py)
@@ -265,6 +272,85 @@ jamais de code deviné au hasard.
 "Fournisseur retenu" est vide/ne correspond à aucune offre (faute de
 frappe), n'entrent pas dans le panier commandable mais sont listées dans
 l'onglet "Non commandées" avec le motif.
+
+## Rapprochement AI (moteur/rapprochement/) — branche en cours
+
+Extension de Consultation AI, même dépôt : rapprocher automatiquement les BL
+(quotidien) et les factures fournisseurs (PDF, hebdomadaire) contre le
+classeur `1.3.0.1. Suivi commandes - <année>.xlsx` (feuille "Commandes",
+~5 900 lignes). Objectif : résorber les lignes au statut
+"🚚 Reçue (Attente Facture)" (**4 289 lignes constatées le 2026-08-11**,
+~73 % de la feuille) sans jamais migrer le Suivi ailleurs — il reste le
+pivot, on écrit dedans. Cible d'usage : dépôt des BL du jour dans
+`a_traiter/BL/`, dépôt des factures de la semaine dans `a_traiter/Factures/`,
+quelques confirmations, Suivi à jour.
+
+**Session R1 (cadrage + socle d'écriture) : fait.** R2+ (rapprochement PDF
+réel par fournisseur) : pas commencé.
+
+**Seules 3 colonnes de la feuille "Commandes" sont de vraies données
+saisies** (vérifié cellule par cellule sur le vrai classeur, pas supposé) :
+"Date de livraison", "Qté livrée", "Tarif BL" — plus "Note" (texte libre
+utilisé comme valeur "magique" par plusieurs formules : "Rupture
+fournisseur", "Reliquat soldé", "Commande annulée"). **Tout le reste de la
+feuille est une FORMULE calculée à partir de ces colonnes** — notamment
+"Statut commande" (XLOOKUP/IF en cascade), "Reliquat", "RAL", "Soldé",
+"Reste à facturer", "Facturé BL" (qui, malgré son nom, est le MONTANT
+facturé calculé = Tarif BL × Qté livrée, pas un indicateur "facture
+reçue"). Conséquence directe pour tout code futur de cette branche :
+**n'écrire QUE dans ces 3+1 colonnes** ; le Statut/Reliquat/Soldé se
+recalculent seuls à la prochaine ouverture Excel. Comment le rapprochement
+factures (étape hebdomadaire) doit se traduire concrètement sur cette
+feuille — puisqu'il n'existe aucune colonne "facture reçue" explicite à
+cocher — reste une question ouverte pour l'acheteur (voir session R1,
+tableau de flux) : probablement une correction de "Tarif BL" si la facture
+diffère du BL, à confirmer.
+
+**Écriture sécurisée (`moteur/rapprochement/ecriture.py`)** : openpyxl
+(`load_workbook()` + `save()`) a été essayé en premier sur une COPIE du
+vrai Suivi commandes et écarté — même sans toucher qu'à une seule cellule,
+la réécriture complète fait disparaître `xl/calcChain.xml`,
+`xl/metadata.xml`, `customXml/*`, les `printerSettings/*.bin`, et dégrade
+des validations de données (avertissement obtenu sur le classeur réel :
+*"Data Validation extension is not supported and will be removed"*) —
+inacceptable sur un fichier vivant riche en formules, 16 Excel Tables et
+validations. Le module patche donc directement la partie XML de la feuille
+visée DANS LE ZIP (.xlsx = zip OOXML), sans passer par le sérialiseur
+openpyxl : chaque autre partie du zip (styles, tableaux, validations,
+calcChain, sharedStrings, customXml, printerSettings...) est recopiée
+octet pour octet. Prouvé sur une copie du vrai classeur
+(`tests/test_rapprochement_ecriture.py::test_ecriture_chirurgicale_sur_le_vrai_suivi_commandes`,
+ignoré si le fichier est absent du poste, même pattern que
+`test_panier.py`) : seule la partie `xl/worksheets/sheet1.xml` change,
+tout le reste est identique bit à bit.
+
+Trois garde-fous dans `appliquer()`, dans cet ordre :
+1. **Verrou Excel** (`est_verrouille()`) : présence d'un fichier `~$<nom>`
+   à côté du classeur -> `ClasseurVerrouille` levée, jamais d'écriture en
+   force.
+2. **Sauvegarde horodatée** (`sauvegarder()`) dans `backups/` AVANT toute
+   écriture, rotation à 30 jours (`RETENTION_BACKUPS_JOURS`).
+3. **Liste blanche de colonnes** (`COLONNES_MODIFIABLES`) : toute
+   `Ecriture` visant une colonne hors de cette liste lève
+   `ColonneNonModifiable` — jamais de compromis, voir ci-dessus.
+
+**Mode simulation par défaut** : `simuler()` retourne le rapport
+ligne/colonne/ancienne valeur/nouvelle valeur SANS rien modifier ;
+`appliquer()` (l'écriture réelle) est un appel explicite séparé — à tout
+futur code GUI/CLI de cette branche d'imposer l'affichage du rapport de
+simulation avant de proposer `appliquer()`.
+
+**Structure de dossiers** (créée cette session, gitignorée — données
+métier vivantes, jamais du dépôt) :
+```
+a_traiter/
+  BL/                        dépôt quotidien des BL PDF, par l'acheteur
+  Factures/                  dépôt hebdomadaire des factures PDF
+rapproches/
+  <fournisseur>/<AAAA-MM>/    archive des PDF traités, renommés "<date> - <fournisseur> - <n° doc> - BC <n°>" (R2+, pas encore implémenté)
+rapports/                    rapports de rapprochement générés (R2+)
+backups/                     sauvegardes horodatées du Suivi commandes avant chaque écriture (rotation 30 jours)
+```
 
 ## Tests
 

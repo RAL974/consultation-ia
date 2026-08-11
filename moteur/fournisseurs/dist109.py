@@ -45,7 +45,11 @@ OFFSETS_DEVIS_BPU = {
     "pu_net_affiche": 2,
     "reference_fournisseur": 3,
 }
-MOTIF_REF_DEVIS_BPU = re.compile(r"^[A-Z0-9./]{5,15}$")  # ex. "LK4288", "CR1/3G2.5"
+# ex. "LK4288", "CR1/3G2.5", "M-160101" (tiret), "GOUJON 8X70" (espace) —
+# ces deux derniers manquaient silencieusement (0 anomalie levée à tort)
+# tant que le contrôle Total HT du PDF n'a pas signalé l'écart (cas réel,
+# chantier Kanopée CDC).
+MOTIF_REF_DEVIS_BPU = re.compile(r"^[A-Z0-9./\-\s]{5,15}$")
 
 MOTIF_DEVIS = r"(?:Commande client|Devis) n[°o]\s*([\d\s]+?)\s+du"
 MOTIF_TOTAL_HT = r"Total HT\s*\n\s*([\d\s]+,\d{2})\s*(?:EUR|€)"
