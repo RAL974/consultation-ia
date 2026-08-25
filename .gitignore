@@ -35,9 +35,9 @@ referentiel/A_confirmer.xlsx
 referentiel/exports/
 
 # Rapprochement AI (branche dédiée, voir CLAUDE.md) : BL/factures déposés
-# par l'acheteur, archives horodatées, rapports générés, sauvegardes du
-# Suivi commandes avant écriture — données métier vivantes, jamais du dépôt.
+# par l'acheteur (a_traiter/BL/ et son sous-dossier Traités/), rapports
+# générés, sauvegardes du Suivi commandes avant écriture — données métier
+# vivantes, jamais du dépôt.
 a_traiter/
-rapproches/
 rapports/
 backups/

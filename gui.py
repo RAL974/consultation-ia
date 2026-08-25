@@ -59,6 +59,7 @@ try:
     from moteur.consultation import (
         dossier_devis_de, dossier_resultats_de, fichier_besoin_de,
     )
+    from gui_rapprochement import FenetreRapprochementBL
 except Exception:
     _consigner_erreur_fatale(traceback.format_exc())
     sys.exit(1)
@@ -152,6 +153,19 @@ class ConsultationGUI:
             height=2, command=self._lancer_generation_panier,
         )
         self.bouton_panier.pack(fill="x", **marge)
+
+        tk.Label(
+            self.root,
+            text="3. Rapprochement BL (109 Distribution pour l'instant) — dépose les BL dans a_traiter/BL/ :",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", padx=10, pady=(6, 0))
+
+        self.bouton_rapprochement = tk.Button(
+            self.root, text="Rapprocher les BL",
+            font=("Segoe UI", 11, "bold"), bg="#8250df", fg="white",
+            height=2, command=self._ouvrir_rapprochement_bl,
+        )
+        self.bouton_rapprochement.pack(fill="x", **marge)
 
         tk.Label(self.root, text="Journal :").pack(anchor="w", padx=10)
 
@@ -475,6 +489,15 @@ class ConsultationGUI:
                 )
         except Exception as e:
             messagebox.showerror("Impossible d'ouvrir le fichier", str(e))
+
+    # ------------------------------------------------------------------
+    # Rapprochement BL (étape 3, Rapprochement AI)
+    # ------------------------------------------------------------------
+    def _ouvrir_rapprochement_bl(self):
+        try:
+            FenetreRapprochementBL(self.root, DOSSIER_PROJET)
+        except Exception as e:
+            messagebox.showerror("Impossible d'ouvrir la fenêtre de rapprochement", str(e))
 
 
 def main():

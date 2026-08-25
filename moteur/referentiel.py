@@ -255,8 +255,16 @@ class Referentiel:
         self.cx.executemany(
             "INSERT INTO articles VALUES (?,?,?,?,?,?,?,?)", lignes_articles
         )
+        # INSERT OR REPLACE (pas un simple INSERT) : une référence de la
+        # BDD peut avoir été redirigée par une équivalence BL manuelle
+        # (voir importer_equivalences_bl(), origine='manuel', appelée
+        # APRÈS importer_bdd() dans moteur.rapprochement.pipeline_bl —
+        # l'ordre remet toujours la BDD "propre" en premier, l'équivalence
+        # manuelle la re-surcharge ensuite) — sans ce remplacement, un
+        # ré-import de la BDD plantait (UNIQUE constraint) sur CETTE seule
+        # référence au lieu de simplement reprendre sa valeur d'origine.
         self.cx.executemany(
-            "INSERT INTO alias VALUES (?,?,?)",
+            "INSERT OR REPLACE INTO alias VALUES (?,?,?)",
             [(ref_brute, cle, "import") for ref_brute, cle in lignes_alias.items()],
         )
         self.cx.commit()
@@ -301,6 +309,82 @@ class Referentiel:
 
         if n:
             print(f"Composés manuels importés : {n} membre(s)")
+
+        return n
+
+    def importer_equivalences_bl(self, csv_path) -> int:
+        """
+        (Ré)importe referentiel/equivalences_bl.csv (Reference_1;
+        Reference_2;Note), optionnel — demande explicite de l'acheteur
+        pour le rapprochement des BL (moteur.rapprochement.matching) :
+        "il faut créer une base des équivalences, ce genre de cas va se
+        présenter très souvent" (cas réel : le fournisseur livre "59210"
+        pour la ligne Suivi "CFF1BIS", même article "colliers à embase
+        16/32 boîte de 100" — RIEN de commun textuellement ni
+        numériquement entre les deux références, donc `resoudre()` ne
+        peut PAS le proposer tout seul via préfixe marque/cœur numérique,
+        contrairement à un simple écart de préfixe déjà couvert par
+        ailleurs — la seule façon fiable de les rapprocher est qu'un
+        humain le dise une fois).
+
+        Contrairement à A_confirmer_BL.xlsx (propositions AUTOMATIQUES
+        d'un candidat plausible, qu'il faut valider), ce fichier est
+        rempli DIRECTEMENT par l'acheteur (ou par une session Claude Code
+        en son nom, quand elle explique une substitution en cours de
+        travail) — aucune proposition préalable n'est nécessaire, chaque
+        ligne est une équivalence déjà tranchée. Réutilise `alias` : les
+        DEUX références sont aliasées l'une vers l'autre (`Reference_1`
+        fait foi comme clé canonique — à choisir de préférence comme la
+        référence déjà connue de la BDD achats quand l'une des deux
+        l'est, pour ne pas faire dériver le groupement des lignes de
+        DEVIS existantes vers une clé synthétique) avec origine='manuel' — même statut
+        "connu" que les alias confirmés dans A_confirmer.xlsx, reconnu
+        automatiquement pour toujours dès le prochain rapprochement, sans
+        jamais redemander confirmation. Remplace les équivalences
+        d'origine 'manuel' à chaque import (idempotent), comme
+        importer_composes().
+        """
+        csv_path = Path(csv_path)
+
+        self.cx.execute("DELETE FROM alias WHERE origine='manuel'")
+
+        if not csv_path.exists():
+            self.cx.commit()
+            return 0
+
+        n = 0
+
+        with open(csv_path, encoding="utf-8-sig") as f:
+            # Lignes de commentaire ("# ...", en tête de fichier pour
+            # documenter le format) ignorées avant de passer la 1re ligne
+            # utile à csv.DictReader comme en-tête — sans ce filtre, un
+            # commentaire pris à tort pour l'en-tête aurait fait échouer
+            # la lecture de TOUTES les lignes de données (aucun champ
+            # "Reference_1"/"Reference_2" reconnu).
+            lignes_utiles = (l for l in f if not l.lstrip().startswith("#"))
+            for r in csv.DictReader(lignes_utiles, delimiter=";"):
+
+                ref1 = (r.get("Reference_1") or "").strip()
+                ref2 = (r.get("Reference_2") or "").strip()
+
+                if not ref1 or not ref2:
+                    continue
+
+                cle = normaliser_ref(ref1)
+
+                for ref in (ref1, ref2):
+                    self.cx.execute(
+                        "INSERT INTO alias VALUES (?,?,?) "
+                        "ON CONFLICT(reference_brute) DO UPDATE SET "
+                        "cle_normalisee=excluded.cle_normalisee, origine=excluded.origine",
+                        (normaliser_ref(ref), cle, "manuel"),
+                    )
+                n += 1
+
+        self.cx.commit()
+
+        if n:
+            print(f"Équivalences BL importées : {n} paire(s)")
 
         return n
 
@@ -611,12 +695,17 @@ class Referentiel:
     # ------------------------------------------------------------------
     # Sorties
     # ------------------------------------------------------------------
-    def ecrire_a_confirmer(self, dossier_referentiel) -> Path | None:
+    def ecrire_a_confirmer(self, dossier_referentiel, nom_fichier: str = "A_confirmer.xlsx") -> Path | None:
         """
-        Régénère referentiel/A_confirmer.xlsx avec les propositions de
-        cette exécution qui ne sont toujours pas tranchées dans `alias`
-        (une proposition déjà confirmée à une exécution précédente n'y
-        réapparaît pas : elle est passée en "connu").
+        Régénère referentiel/A_confirmer.xlsx (ou `nom_fichier`, ex.
+        "A_confirmer_BL.xlsx" pour le rapprochement des BL — voir
+        moteur.rapprochement.pipeline_bl — un fichier À PART pour ne pas
+        écraser les propositions de l'autre flux, chacun régénérant le
+        sien à chaque exécution avec SES SEULES propositions en attente)
+        avec les propositions de cette exécution qui ne sont toujours pas
+        tranchées dans `alias` (une proposition déjà confirmée à une
+        exécution précédente n'y réapparaît pas : elle est passée en
+        "connu").
 
         Fournisseur/N° devis en tête de ligne : sans ça, l'acheteur n'a
         aucun moyen de savoir dans quel PDF chercher pour vérifier une
@@ -624,7 +713,7 @@ class Referentiel:
         """
         dossier = Path(dossier_referentiel)
         dossier.mkdir(exist_ok=True)
-        fichier = dossier / "A_confirmer.xlsx"
+        fichier = dossier / nom_fichier
 
         en_attente = []
         for ref_norm, p in self._propositions.items():

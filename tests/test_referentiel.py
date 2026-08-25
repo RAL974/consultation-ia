@@ -425,3 +425,36 @@ def test_comparateur_expansion_composes(tmp_path, referentiel):
             assert ligne["qte_besoin"] == 1
 
     base.fermer()
+
+
+# ------------------------------------------------------------------
+# Équivalences BL (moteur/rapprochement/matching.py) — demande explicite
+# de l'acheteur, cas réel 59210/CFF1BIS (substitution fournisseur, aucun
+# rapport textuel ni numérique entre les deux références).
+# ------------------------------------------------------------------
+def test_importer_equivalences_bl_alias_les_deux_sens(tmp_path, referentiel):
+    fichier = tmp_path / "equivalences_bl.csv"
+    fichier.write_text(
+        "# commentaire d'en-tête, doit être ignoré\n"
+        "Reference_1;Reference_2;Note\n"
+        "59210;CFF1BIS;colliers embase 16/32 boîte de 100\n",
+        encoding="utf-8-sig",
+    )
+
+    n = referentiel.importer_equivalences_bl(fichier)
+    assert n == 1
+
+    cle1, statut1 = referentiel.resoudre("59210")
+    cle2, statut2 = referentiel.resoudre("CFF1BIS")
+    assert statut1 == statut2 == "connu"
+    assert cle1 == cle2
+
+
+def test_importer_equivalences_bl_idempotent_et_vide_sans_fichier(tmp_path, referentiel):
+    absent = tmp_path / "n_existe_pas.csv"
+    assert referentiel.importer_equivalences_bl(absent) == 0
+
+    fichier = tmp_path / "equivalences_bl.csv"
+    fichier.write_text("Reference_1;Reference_2;Note\nA;B;\n", encoding="utf-8-sig")
+    assert referentiel.importer_equivalences_bl(fichier) == 1
+    assert referentiel.importer_equivalences_bl(fichier) == 1  # ré-import : pas de doublon

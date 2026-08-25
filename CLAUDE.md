@@ -71,8 +71,7 @@ referentiel/
   A_confirmer.xlsx            généré à chaque exécution : rapprochements proposés en attente de décision (voir section dédiée)
   exports/                    généré à chaque exécution : graine CSV du futur référentiel Appro-Tracker
 1.3.0.1. Suivi commandes - <année>.xlsx   fichier de l'acheteur (pas du dépôt, gitignore), export de la feuille "Commandes" utilisé par panier.py pour caler colonnes/fournisseurs/chantiers — voir section dédiée
-a_traiter/                  Rapprochement AI : dépôt des BL/Factures PDF à traiter (BL/, Factures/), gitignoré, voir section dédiée
-rapproches/                  Rapprochement AI : archive des PDF traités par fournisseur/mois, gitignoré
+a_traiter/                  Rapprochement AI : dépôt des BL/Factures PDF à traiter (BL/, BL/Traités/, Factures/), gitignoré, voir section dédiée
 rapports/                    Rapprochement AI : rapports de rapprochement générés, gitignoré
 backups/                     Rapprochement AI : sauvegardes horodatées du Suivi commandes avant écriture, gitignoré
 installer.py                bundle de distribution autonome (copie base64 du projet) — outil de déploiement, PAS le moteur ; devient obsolète à chaque évolution du code, à régénérer séparément si besoin (hors périmètre courant)
@@ -285,8 +284,1248 @@ pivot, on écrit dedans. Cible d'usage : dépôt des BL du jour dans
 `a_traiter/BL/`, dépôt des factures de la semaine dans `a_traiter/Factures/`,
 quelques confirmations, Suivi à jour.
 
-**Session R1 (cadrage + socle d'écriture) : fait.** R2+ (rapprochement PDF
-réel par fournisseur) : pas commencé.
+**Session R1 (cadrage + socle d'écriture) : fait.** Session R2 : 109
+Distribution, Coredime, Electric Plus/GMR et Cominter Ouest couverts et
+recettés sur écriture réelle contre le vrai classeur vivant (voir
+sous-sections dédiées ci-dessous, dans l'ordre où ils ont été traités).
+Fournisseurs restants (Sagees, DEM, Ravatelec, TOP Océan Indien exclu —
+ponctuel, cf. tableau de flux R1) : pas commencés, en attente de pièces
+réelles (règle d'or : jamais de gabarit sans PDF réel).
+
+**Session R2 — 109 Distribution, extraction + matching (fait) :**
+
+- **OCR ajouté au projet** (`moteur/ocr.py`, dépendance `rapidocr-onnxruntime`
+  dans `moteur/dependances.py`/`requirements.txt`) : choisi plutôt que
+  Tesseract (binaire externe à installer à la main sur chaque poste, casse
+  l'auto-installation) ou EasyOCR (trop lourd, PyTorch). Pip pur, ~100 Mo
+  avec dépendances (numpy/opencv/onnxruntime), ~7s/page en régime établi
+  sur ce poste (~25s au tout premier appel, chargement des modèles).
+  `regrouper_lignes()`/`lignes_ocr()` reconstruisent, à partir des mots OCR
+  positionnés, une structure en lignes/cellules réutilisable par les
+  gabarits fournisseurs (même esprit que le texte PDF natif).
+- **`moteur/detecteur.py`** : motif "109 DISTRIBUTION" élargi pour
+  reconnaître aussi les 4 blocs d'agence d'en-tête ("109 Est/Sud/Ouest/
+  Nord", toujours présents) — plus fiables à l'OCR que "109 DISTRIBUTION"
+  qui ressort souvent déformé dans le pied de page légal du BL.
+- **Nouveau module `moteur/rapprochement/`** : `modele_bl.py` (LigneBL,
+  BonLivraison), `parsers_bl.py` (registre auto, même principe que
+  `moteur/parsers.py` : un fournisseur expose `parse_bl` + `FOURNISSEURS`),
+  `lecture_bl.py` (scan de dossier, tolérant aux pannes, même principe que
+  `moteur/lecture_pdf.py`), `matching.py` (rapprochement BL <-> Suivi).
+- **Gabarit BL 109 Distribution** (`moteur/fournisseurs/dist109.py`,
+  `parse_bl_109`) : structure procédurale (pas `scan_ancre` à décalage
+  fixe comme pour le devis du même fournisseur) car l'OCR "rate" parfois
+  UNE cellule sans faire basculer la ligne pour autant, ce qui décale tous
+  les offsets suivants si on suppose un nombre de cellules fixe par ligne
+  (constaté réellement : la case à cocher "livré" imprimée dans la
+  cellule Qté est parfois lue comme un chiffre collé au vrai nombre — "32"
+  devient "327" — et parfois la cellule Qté disparaît carrément de l'OCR).
+  Seules DEUX positions se sont révélées fiables sur CHAQUE ligne des 4
+  vrais BL testés, relatives au code TVA (ancre, "C0".."C9" + "CO" car
+  l'OCR confond 0/O) : le P.U.Net juste avant, le Total juste après. La
+  quantité livrée est donc TOUJOURS déduite de Total / P.U.Net, jamais lue
+  directement dans la cellule Qté — c'est ce qui a sauvé la ligne du 3e BL
+  testé (aucune cellule Qté détectée du tout par l'OCR sur cette ligne).
+  Autocontrôle Total HT (comme le devis du même fournisseur) : silencieux
+  sur les 4 BL testés (aucun euro perdu).
+- **Matching** (`moteur/rapprochement/matching.py`) : n° de commande lu
+  sur le BL ("N°Réf.Client") -> lignes du Suivi pour ce fournisseur + cette
+  commande (colonne "N° de commande", format identique, ex. "123.096").
+  Appariement ligne à ligne par référence normalisée, en réutilisant
+  `moteur.base.coeur_numerique` (déjà éprouvé côté devis) plutôt que
+  d'inventer une nouvelle règle — nécessaire car le Suivi et le BL
+  n'utilisent pas toujours EXACTEMENT la même graphie de référence (cas
+  réels : "086101L" au Suivi vs "86101L" au BL, ou "EUR52302" vs "52302").
+  Un seul candidat sûr requis ; 0 ou plusieurs -> bac "inconnu", jamais de
+  choix au hasard. **Idempotence intégrée dès le matching** (pas une
+  couche à part) : si la ligne Suivi a DÉJÀ la même quantité livrée, le
+  même tarif BL et une date de livraison renseignée, la correspondance
+  ressort "déjà à jour" et RIEN n'est proposé à l'écriture — double
+  traitement du même BL détecté et neutralisé sans intervention.
+- **Recette (partielle) faite cette session** : les 4 seuls vrais BL 109
+  Distribution disponibles (`a_traiter/BL/`, copiés dans
+  `tests/fixtures/bl_dist109_{1..4}.pdf`) ont été passés en lecture seule
+  contre le VRAI Suivi commandes vivant (chemin ci-dessus). **Découverte
+  importante** : les 7 lignes de ces 4 BL étaient TOUTES déjà saisies à la
+  main par l'acheteur avant cette session (même qté, même tarif, statut
+  déjà "🚚 Reçue"/"🟠 Partielle") — le matching les a TOUTES retrouvées
+  correctement et TOUTES classées "déjà à jour", preuve concrète que le
+  rapprochement ET l'idempotence fonctionnent sur données réelles. En
+  revanche, cela veut dire qu'AUCUNE vraie écriture n'a encore pu être
+  démontrée sur le classeur vivant faute de BL "frais" restants dans
+  `a_traiter/BL/` pour 109 Distribution — à refaire dès qu'un nouveau BL
+  109 Distribution réel sera déposé.
+- **Interaction : bouton GUI** (choix de l'acheteur, pas la console) —
+  `gui.py` a un 3e bouton « Rapprocher les BL » qui ouvre
+  `gui_rapprochement.py` (`FenetreRapprochementBL`, `moteur/rapprochement/
+  pipeline_bl.py` pour l'orchestration). Toujours en 2 temps : lecture
+  seule d'abord (OCR + matching, rien n'est modifié, tourne dans un thread
+  pour ne pas geler la fenêtre), listes à cocher (sûres cochées par
+  défaut, à confirmer décochées) + listes en lecture seule (déjà à jour,
+  inconnues, fichiers non traités) ; écriture seulement après clic sur le
+  bouton dédié ET confirmation dans une boîte de dialogue récapitulant le
+  nombre de lignes et le fichier cible. `appliquer_et_archiver()` écrit
+  (verrou/sauvegarde/patch chirurgical du socle R1), puis archive dans
+  `a_traiter/BL/Traités/` (renommé "<date> - <fournisseur> - <n° BL> - BC
+  <n° commande>" — dossier créé par l'acheteur elle-même, pas par la
+  session : elle y agrafe ensuite le BdC et le BL papier correspondants et
+  archive dans les classeurs physiques) CHAQUE BL dont TOUTES les lignes sont
+  résolues (écrites ou déjà à jour) — jamais un BL avec une ligne "à
+  confirmer" non cochée ou "inconnue" encore dedans, qui reste dans
+  `a_traiter/BL/` pour un prochain passage. Rapport texte horodaté dans
+  `rapports/` à chaque écriture. Logique testée unitairement (sans OCR ni
+  fichier réel) dans `tests/test_rapprochement_pipeline_bl.py` ; fenêtre
+  vérifiée par un test de fumée manuel (ouverture, thread de lecture, pas
+  de crash) — pas encore de clic réel "Écrire" recetté par l'acheteur sur
+  le vrai classeur (voir point suivant).
+- **Recette réelle du clic « Écrire » faite cette session (suite), sur 4
+  vrais BL 109 Distribution FRAIS** (jamais saisis avant, déposés par
+  l'acheteur dans `a_traiter/BL/`) : **succès**. Détail :
+  - 4 lignes réellement nouvelles ont été écrites dans le VRAI classeur
+    vivant (Qté livrée, Tarif BL, Date de livraison), vérifiées relues
+    après coup — correctes.
+  - 3 lignes ressorties "déjà à jour" à raison (déjà saisies par ailleurs)
+    — pas de doublon écrit.
+  - 1 ligne ("GOUJON8X75") ressortie "inconnue" à raison : elle ne
+    correspond à AUCUNE ligne de la commande 131.157 dans le Suivi (donc
+    probablement pas encore ajoutée côté achat) — laissée pour vérification
+    manuelle, son BL n'a PAS été archivé (2 de ses 3 lignes ont bien été
+    écrites, mais un BL n'est archivé que si TOUTES ses lignes sont
+    résolues).
+  - 7 BL au total déplacés vers `a_traiter/BL/Traités/` automatiquement
+    (voir juste en dessous — CHANGEMENT DE DESTINATION D'ARCHIVAGE), 1
+    laissé dans `a_traiter/BL/` (celui avec la ligne inconnue).
+  - **Bug réel trouvé et corrigé pendant la recette** : `MOTIF_COMMANDE_BL`
+    (`moteur/fournisseurs/dist109.py`) n'acceptait que le format "123.096"
+    (2 groupes numériques) — un des 4 BL frais portait un n° de commande
+    au format "M3.14.353" (préfixe lettre + 3 groupes, code chantier), pas
+    reconnu du tout -> anomalie "N° de commande introuvable". Motif
+    élargi (`^([A-Z]?\d{1,4}(?:[.\-]\d{1,4}){1,2})$`, capture le motif
+    entier plutôt que 2 groupes fixes) ; fixture réelle ajoutée
+    (`tests/fixtures/bl_dist109_5.pdf`,
+    `test_parse_bl_dist109_5_numero_commande_code_chantier`). Après
+    correction, cette ligne s'est appariée et écrite correctement (Suivi
+    ligne 5731).
+  - **IMPORTANT, bug trouvé AVANT la recette (donc jamais écrit dans le
+    mauvais fichier, mais à retenir)** : `pipeline_bl.py` utilisait
+    `moteur.panier.trouver_fichier_suivi()` (cherche à la racine du
+    dépôt) pour localiser le Suivi à rapprocher — hors CLAUDE.md documente
+    depuis la session R1 que ce fichier racine n'est qu'un export
+    ponctuel PÉRIMÉ, pas le classeur vivant (vérifié : les deux fichiers
+    diffèrent réellement, celui à la racine datait de la veille). Corrigé
+    par `trouver_fichier_suivi_vivant()` (nouveau, dans `pipeline_bl.py`)
+    qui cherche dans le dossier frère "1.3.0.1. Commandes courantes" (à
+    côté du dossier projet), en excluant les copies manuelles ("copie
+    ...xlsx") et le classeur en refonte ("Suivi nouveau...").
+  - **Le verrou fonctionne comme prévu** : testé en conditions réelles
+    (l'acheteur a rouvert puis refermé le Suivi dans Excel pendant cette
+    session) — l'écriture attend bien que le fichier soit fermé.
+- **Dossier d'archivage changé sur demande explicite de l'acheteur** :
+  PAS `rapproches/<fournisseur>/<AAAA-MM>/` (imaginé au cadrage R1, jamais
+  implémenté tel quel) mais `a_traiter/BL/Traités/` — un dossier qu'elle a
+  créé elle-même à côté de `a_traiter/BL/`, pour y retrouver les BL
+  numérisés déjà rapprochés, agrafer le BdC et le BL papier
+  correspondants, et archiver dans les classeurs physiques. Toujours
+  renommés "<date> - <fournisseur> - <n° BL> - BC <n° commande>". Retenir
+  pour la suite : préférer un dossier que l'acheteur demande concrètement
+  à un nom de dossier imaginé au cadrage, même documenté dans CLAUDE.md.
+- **Cas "GOUJON8X75 inconnu" résolu (pas un bug)** : vérifié directement
+  dans le Suivi, la ligne "GOUJON 8X70" existe bien pour la commande
+  131.157, mais le BL réel affiche "GOUJON8X75" — un vrai écart de 5mm
+  (70 vs 75), pas une erreur de lecture. Confirmé par l'acheteur :
+  probablement une rupture chez 109 Distribution ou une substitution faite
+  par le chargé de travaux sur place — volontairement jamais rapproché
+  automatiquement (voir dossier "À vérifier" ci-dessous).
+- **Procédure d'utilisation écrite dans README.md** (demandée explicitement
+  par l'acheteur), section "Rapprocher les BL (bons de livraison)" — répond
+  notamment à sa question : le Suivi doit être FERMÉ pour l'étape
+  "Écrire", pas pour la lecture (l'outil le vérifie et refuse d'écrire
+  sinon, testé en conditions réelles cette session).
+- **Nouveau dossier `a_traiter/BL/À vérifier/`** (demande explicite de
+  l'acheteur, faite pendant la recette Coredime) : tout BL LU mais avec au
+  moins une ligne "inconnue" ou "à confirmer" non cochée (ex. le cas
+  GOUJON8X75/GOUJON8X70 ci-dessus) y est déplacé automatiquement par
+  `appliquer_et_archiver()` — jamais laissé mélangé avec les BL pas encore
+  traités du tout, pour repérer d'un coup d'œil ceux qui attendent une
+  décision humaine. Fichier gardé tel quel (pas renommé, contrairement à
+  l'archivage dans `Traités/`). Testé (`test_appliquer_et_archiver_
+  deplace_les_bl_a_confirmer_vers_a_verifier`).
+- **Bug de robustesse trouvé et corrigé en conditions réelles** : un
+  archivage qui échoue (fichier verrouillé par autre chose — antivirus,
+  réseau, Explorer... constaté réellement sur `BL M2.16.011.pdf`, resté
+  verrouillé sans raison identifiée après un `shutil.move` interrompu en
+  plein milieu — copie faite, suppression de la source échouée) faisait
+  planter TOUTE la fonction `appliquer_et_archiver()`, perdant le résumé
+  de l'écriture Suivi (déjà réussie à ce stade !) et empêchant le rapport
+  final. Corrigé : chaque déplacement (archivage ou "à vérifier") est
+  maintenant entouré d'un `try/except OSError` individuel, collecté dans
+  `resume["archivage_echoue"]`, sans jamais bloquer le reste du lot ni le
+  rapport. Testé (`test_appliquer_et_archiver_une_archive_qui_echoue_
+  nempeche_pas_le_reste`).
+
+**Session R2 suite — Coredime, fournisseur n°2 (fait) :**
+
+- **Piège signalé par l'acheteur AVANT tout code, décisif** : Coredime
+  livre souvent en plusieurs fois ; un même BL peut lister les articles
+  LIVRÉS et les articles NON livrés ("reste à livrer") — implémenté par
+  prudence (`MOTIF_RESTE_A_LIVRER_COREDIME` dans
+  `moteur/fournisseurs/coredime.py`, tout ce qui suit cette mention est
+  exclu de la quantité livrée) mais **jamais rencontré sur un vrai PDF à
+  ce jour** — à valider dès qu'un cas réel se présente. Ne pas confondre
+  avec "Ref à livrer directement" (déjà vu, 1 vrai PDF) : ces articles-là
+  SONT bien livrés, seul le prix est différé à la facture.
+- **Ces BL n'affichent QUASIMENT JAMAIS de prix** (réglé à la facture) :
+  pas d'autocontrôle Total HT possible comme pour 109 Distribution : la
+  quantité livrée est le seul champ vraiment critique. `matching.py`
+  corrigé en conséquence (voir plus bas) : l'idempotence ne doit plus
+  dépendre d'une comparaison de tarif quand le BL n'en affiche aucun,
+  sinon aucune ligne Coredime ne pourrait jamais ressortir "déjà à jour".
+- **6 vrais BL testés** (`tests/fixtures/bl_coredime_1..6.pdf`,
+  `tests/test_parsers_bl_coredime.py`), 3 bugs réels trouvés et corrigés
+  en les confrontant : référence trop stricte pour un code comme
+  "LBCLASTD02" (8 lettres + 2 chiffres — élargi à tout alphanumérique
+  5-15 caractères avec au moins un chiffre, sans ponctuation, ce qui
+  exclut naturellement les codes ECO-taxe et les bouts de désignation qui
+  débordent) ; désignation débordant sur une 2e ligne AVANT ou APRÈS la
+  cellule Qté selon les cas (raccord de cellules si la ligne courante n'a
+  pas de quantité exploitable et que la suivante ne commence pas par une
+  référence valide) ; quantité "1" lue "i" minuscule par l'OCR (remplacé
+  en mot entier uniquement, `\bi\b`, pour ne pas abîmer "unite").
+- **Format de n° de commande Coredime** : "BC 131.153" / "COMMANDE N°
+  129.049" / "COMMANDE N° M2.16.011" (préfixe lettre + code chantier,
+  comme le cas 109 Distribution trouvé juste avant) — et 1 cas réel où
+  l'OCR a perdu le séparateur ("BC123097" au lieu de "BC 123.097"), repli
+  dédié avec découpage 3+3.
+- **Recette réelle sur 6 vrais BL Coredime (dont 4 déjà dans
+  `a_traiter/BL/` avant la session)** : 4 lignes écrites pour de vrai dans
+  le classeur vivant, 8 lignes déjà à jour (rien réécrit), 1 ligne
+  confirmée par l'acheteur malgré une "sur-livraison" apparente (voir
+  point suivant), 1 ligne inconnue (GOUJON8X75, cf. plus haut, déplacée
+  vers "À vérifier").
+- **Découverte importante confirmée par l'acheteur, à garder en tête pour
+  la suite** : l'écart "qté commandée très inférieure à qté livrée" n'est
+  PAS toujours une erreur — cas réel, Suivi "3" (boîtes) vs BL "300"
+  (pièces, 3 boîtes de 100). Unités de vente (boîte) vs unités de
+  commande/livraison (pièce) diffèrent couramment chez ce type de
+  fournisseur. Le garde-fou sur-livraison de `matching.py` continue de
+  classer ça "à confirmer" à raison (jamais deviner un facteur de
+  conversion, il varie par article) — c'est à l'acheteur de trancher au
+  cas par cas via la case à cocher, PAS un cas à automatiser.
+
+**Session R2 suite — Electric Plus / GMR, fournisseur n°3 (fait) :**
+
+- **GMR n'envoie PAS de bon de livraison séparé** (confirmé par
+  l'acheteur) : "Electric Plus" est l'enseigne grand public, "GMR" sa
+  branche grands comptes pros — même structure documentaire, le
+  rapprochement se fait directement à partir de ses FACTURES (marquées
+  "DUPLICATA"). `moteur/fournisseurs/electricplus.py::parse_bl_electricplus`
+  réutilise la même ancre "PF" que le devis de ce fournisseur (juste
+  au-dessus dans le même fichier), mais la désignation est ici éclatée en
+  plusieurs cellules OCR (un mot chacune) au lieu d'une seule — la
+  quantité livrée est déduite de Montant / P.U. net (comme 109
+  Distribution) plutôt que lue directement. "Total HT" affiché en pied de
+  page -> autocontrôle possible (contrairement à Coredime, qui n'affiche
+  jamais de prix).
+- **Bug le plus important trouvé cette session, silencieux et total** :
+  `BonLivraison.fournisseur` vaut "ELECTRIC PLUS" (nom détecteur), mais le
+  Suivi écrit "GMR" dans sa colonne Fournisseur — sans conversion,
+  `lire_lignes_commande()` ne retrouvait JAMAIS aucune ligne pour AUCUNE
+  commande Electric Plus (0 sûr, 0 à confirmer, 0 déjà à jour, 0 inconnu
+  sur 7 vraies factures alors que les 14 lignes existaient bien dans le
+  Suivi). Corrigé en réutilisant `moteur.panier.MAPPING_FOURNISSEURS`
+  (déjà la source de vérité pour cette conversion côté Panier) au lieu
+  d'un mapping dupliqué — **tout futur fournisseur dont le nom détecteur
+  diffère du nom Suivi doit passer par ce même mapping, pas en inventer un
+  nouveau.** Testé
+  (`test_lire_lignes_commande_convertit_nom_fournisseur_electric_plus_gmr`).
+- **`moteur/detecteur.py` corrigé** : "ELECTRIC PLUS" ne matchait que
+  `ELECTRIC\s+PLUS` (espace obligatoire) — l'OCR colle parfois "Electric
+  Plus" en "ElectricPlus" sur les factures scannées (contrairement au
+  devis, où le texte natif garde toujours l'espace). Motif élargi à
+  `ELECTRIC\s*PLUS`.
+- **2 bugs OCR réels corrigés, même famille que ceux déjà vus chez 109
+  Distribution/Coredime** : le motif date+n°facture utilisait `\D+` (puis
+  `[^\d\n]+`) entre les 3 cellules consécutives "date/date échéance/n°
+  facture" — mais ces cellules n'ont RIEN entre elles une fois aplaties
+  (juste un saut de ligne), donc `numero_bl`/`date_bl` ressortaient
+  TOUJOURS vides ; corrigé avec `[^\d]{0,3}` (borné, pour ne jamais dériver
+  vers un nombre lointain sans rapport — même prudence que le bug de
+  séparateur `\s` chez Coredime). Et l'ancre de prix "<prix> PF" ratait
+  toute ligne où l'OCR lit "0,53" en "O,53" (lettre O) — repli O/0 ajouté,
+  a sauvé une ligne entière sur 1 facture testée.
+- **Recette réelle sur 7 vraies factures** (2 déjà dans `a_traiter/BL/`
+  avant la session + 5 ajoutées pendant) : 9 lignes écrites pour de vrai
+  dans le classeur vivant, 8 déjà à jour (rien réécrit), 0 à confirmer,
+  0 inconnue — toutes les quantités correspondent exactement aux quantités
+  commandées (aucune sur-livraison, aucun écart de référence cette fois).
+  Les 7 factures ont été archivées dans `a_traiter/BL/Traités/`.
+
+**Session R2 suite — Cominter Ouest, fournisseur n°4 (fait) :**
+
+- **Piège signalé par l'acheteur AVANT tout code, décisif** : un même
+  fichier PDF peut contenir PLUSIEURS BL scannés à la suite (jusqu'à 8 vus
+  en session) — mais un même BL peut aussi déborder sur 2 pages (tableau
+  d'articles page 1, totaux page 2, MÊME n° "OBL......" sur les deux).
+  Nouvelle fonction générique `moteur.ocr.grouper_pages_par_identifiant()`
+  (testée isolément dans `tests/test_ocr.py`) : regroupe les pages par
+  identifiant AVANT tout parsing — une page sans identifiant détecté
+  (le pied de page qui déborde) rejoint le groupe précédent au lieu d'ouvrir
+  un nouveau groupe à tort. Comparaison sur le GROUPE CAPTANT du motif
+  (les chiffres), pas le texte entier du match : l'OCR lit tantôt "OBL"
+  tantôt "0BL" (O confondu avec 0) pour le MÊME numéro sur des pages
+  différentes du même document — comparer le texte brut aurait coupé un
+  même BL en deux groupes à tort (bug réel trouvé et corrigé en recette).
+  **Conséquence sur l'architecture** : `parse_bl` peut désormais retourner
+  une LISTE de BonLivraison (pas un seul) — `lecture_bl.lire_bl()` et
+  `analyser_dossier()` adaptés pour normaliser en liste dans tous les cas
+  (les autres fournisseurs continuent de retourner un seul objet, normalisé
+  automatiquement).
+- **Structure de ligne la plus irrégulière rencontrée jusqu'ici** : contrairement
+  aux fournisseurs précédents, la cellule "Px net" peut carrément DISPARAÎTRE
+  de l'OCR (remplacée par le seul taux de remise, ex. "30%") ou être COLLÉE
+  au taux dans une seule cellule ("30% 110,67" — le vrai Px net est là, après
+  le %). `_prix_net_bl_cominter()` gère les 3 cas réels rencontrés, dans cet
+  ordre : (1) taux+prix collés dans la même cellule -> prix repris tel quel ;
+  (2) taux seul -> prix net reconstruit à partir du Px unitaire et du taux
+  (vérifié exact sur un cas réel : 26,78 × 0,70 = 18,746, 3 × 18,746 = 56,24
+  = montant affiché) ; (3) cellule Px net normale -> lue directement. Comme
+  pour les fournisseurs précédents, la quantité livrée est déduite de
+  Montant / Px net plutôt que lue dans la cellule Qté+Unité (souvent collée
+  en une seule cellule ici, ex. "22,00 Unité").
+- **Pas d'autocontrôle Total HT** (comme Coredime, contrairement à 109
+  Distribution/Electric Plus) : le tableau de répartition TVA en pied de
+  page a une structure trop irrégulière (colonnes qui se décalent selon le
+  nombre de taux de TVA présents sur le document) pour en extraire la
+  valeur de façon fiable avec les exemples actuels — laissé de côté plutôt
+  que de calculer un total faux.
+- **Bug réel corrigé (recette utilisateur, voir "correctifs critiques
+  post-recette" ci-dessous) : référence renvoyée sur sa PROPRE ligne**
+  ("PLW11643") : sur un article à désignation longue, l'OCR sépare parfois
+  la référence de la ligne désignation+prix qui la précède — l'ordre
+  inverse du cas Coredime déjà géré (désignation qui déborde APRÈS). Un
+  raccord (lookahead d'une ligne) la récupère désormais au lieu de
+  l'ignorer silencieusement — voir `_parse_un_bl_cominter()`, testé
+  (`test_parse_bl_cominter_6_commande_m4_260_quantites_entieres_et_ligne_recuperee`).
+- **Nouveau garde-fou, trouvé en confrontant deux fichiers du même lot à la
+  recette** : le même BL papier ("BL M3.23.030 MABOOC.pdf", déjà présent
+  d'une session précédente) et un nouveau scan du même document
+  (`doc07136020260813090605.pdf`, même n° OBL108106) se sont retrouvés
+  ensemble dans `a_traiter/BL/` au moment de la recette. Sans protection,
+  les deux auraient chacun proposé une écriture "sûre" indépendante vers
+  la MÊME ligne du Suivi, empilant deux fois la même quantité. Nouvelle
+  fonction `_desamorcer_conflits_meme_ligne_suivi()` dans `pipeline_bl.py`,
+  appelée en fin de `rapprocher_dossier()` : si deux BL de fichiers
+  DIFFÉRENTS visent la même ligne Suivi côté "sûr", seul le premier reste
+  "sûr" — l'autre bascule "à confirmer" avec le nom du fichier concurrent
+  en raison. Protège aussi bien contre un doublon de scan que contre une
+  vraie livraison fractionnée mal enchaînée. Testé
+  (`test_desamorcer_conflits_meme_ligne_suivi_deux_fichiers_meme_cible`).
+- **Recette réelle sur les vrais BL disponibles** : 8 lignes écrites pour
+  de vrai dans le classeur vivant (dont les 8 BL scannés dans un seul
+  fichier), 4 BL entièrement archivés. 5 BL déplacés vers "À vérifier"
+  (4 à cause du doublon de scan ci-dessus, 1 pour une référence "L405205"
+  introuvable dans le Suivi). **À signaler à l'acheteur** : les anciens
+  fichiers `BL M3.23.030 MABOOC.pdf` / `BL M3.23.030.1 MABOOC.pdf` /
+  `BL M3.23.034 MABOOC.pdf` (présents avant cette session) sont des scans
+  du MÊME BL que certains fichiers `doc...pdf` déposés cette session (même
+  n° OBL) — à nettoyer manuellement de `a_traiter/BL/`/`À vérifier/` pour
+  éviter la confusion, le garde-fou ci-dessus empêche juste la double
+  écriture, il ne fait pas le ménage.
+
+**Session R2 suite — Cominter Ouest, correctifs critiques post-recette
+(fait) :** la 1ère recette Cominter (ci-dessus) a été jugée **dangereuse**
+par l'acheteur — quantités livrées non entières écrites dans le VRAI
+classeur vivant (ex. 29,96 sur un article à l'unité), une ligne
+totalement disparue (qté écrite à 0), et un fichier de 8 BL archivé sous
+le nom du premier BL du lot sans indiquer qu'il en contenait d'autres.
+Deux correctifs :
+
+1. **Quantité livrée : cellule Qté imprimée préférée à la division
+   Montant/Px net** (`_quantite_bl_cominter()`, `moteur/fournisseurs/
+   cominter.py`) — la division introduisait du bruit d'arrondi sur les
+   lignes remisées (prix net affiché déjà arrondi à 2 décimales, contrairement
+   au calcul interne), d'où les quantités non entières. La cellule Qté
+   n'est utilisée qu'en repli quand elle est absente de l'OCR (comme
+   avant). Verrouillé par
+   `test_parse_bl_cominter_6_commande_m4_260_quantites_entieres_et_ligne_recuperee`
+   (30,0 et non 29,96 ; 150,0 et non 149,89).
+2. **Archivage par BL individuel** (pas par fichier entier) — voir la
+   section dédiée juste en dessous : c'est le fond du problème "8 BL dans
+   1 fichier, 1 seul traité au final".
+
+**Session suivante — archivage par BL individuel + rapprochement de
+repli désignation (fait), suite à un 2e signalement critique de
+l'acheteur** (avec capture d'écran d'un vrai BL papier, référence
+"L4052[trou de perforateur]9") : deux défauts distincts, mêmes correctifs
+réutilisables pour tout futur fournisseur multi-BL/scans papier abîmés.
+
+- **Archivage par BL individuel** (`BonLivraison.pages`,
+  `moteur.ocr.pages_par_identifiant()`, `moteur/rapprochement/
+  pipeline_bl.py`) : jusqu'ici, un fichier Cominter à plusieurs BL n'était
+  archivé qu'en BLOC — dès qu'UN seul de ses BL restait non résolu (n° de
+  commande introuvable, référence litigieuse...), TOUS les autres du même
+  fichier restaient bloqués avec lui dans `a_traiter/BL/` (constaté
+  réellement : sur 8 BL scannés dans un fichier, un seul avait fini
+  correctement traité et renommé). `parse_bl_cominter()` renseigne
+  désormais `bl.pages` (indices de page 0-based occupés par CE BL dans le
+  fichier source, via la nouvelle `moteur.ocr.pages_par_identifiant()` —
+  même regroupement que `grouper_pages_par_identifiant()`, mais en indices
+  plutôt qu'en mots OCR, factorisé pour éviter toute divergence entre les
+  deux). `regrouper_par_bl()` (pipeline_bl.py) groupe désormais par
+  **objet BL (`id(bl)`)**, plus par nom de fichier (bug latent corrigé au
+  passage : grouper par fichier fusionnait à tort les lignes de plusieurs
+  BL d'un même fichier dans un seul groupe). Pour un fichier à PLUSIEURS
+  BL, chaque BL résolu est extrait via `fitz` (découpage de pages, pas
+  `openpyxl` : PDF, pas Excel) vers `Traités/` ou `À vérifier/`
+  individuellement (`_extraire_bl_vers()`), puis le fichier source est
+  réduit aux pages pas encore redistribuées (`_reecrire_avec_pages()`) ou
+  supprimé si tout a pu être extrait — jamais laissé intact avec la
+  totalité de ses pages (sinon relu en entier, pour rien, à la prochaine
+  exécution). Les fichiers à UN SEUL BL (tous les fournisseurs sauf
+  Cominter Ouest) gardent le comportement historique — fichier entier
+  déplacé tel quel, aucune réécriture PDF inutile. Les anomalies
+  "n° de commande introuvable"/"commande absente du Suivi" (avant :
+  bloquaient tout le fichier via `anomalies_lecture`) sont désormais
+  rattachées au `BonLivraison` concerné (`rapport.anomalies_bl`, nouveau
+  champ) — seul CE BL est affecté, pas ses frères du même fichier.
+  `anomalies_lecture` reste réservé aux échecs de lecture TOTAUX (aucun
+  objet BL n'existe encore : fournisseur non reconnu, pas de parser, PDF
+  illisible), qui bloquent forcément le fichier entier faute de pouvoir le
+  découper. Testé sur le VRAI fixture 8 pages
+  (`test_appliquer_et_archiver_fichier_multi_bl_archive_le_resolu_sans_attendre_ses_freres`,
+  `test_appliquer_et_archiver_fichier_multi_bl_supprime_la_source_une_fois_tout_redistribue`).
+  **Piège pour tout futur appel direct hors GUI** : `appliquer_et_archiver()`
+  suppose que `dossier_a_traiter` est TOUJOURS `a_traiter/BL/` lui-même
+  (parent direct de `Traités/` et `À vérifier/`), jamais un de ses
+  sous-dossiers — un appel de test manuel pointé par erreur sur
+  `a_traiter/BL/À vérifier/` a créé des sous-dossiers imbriqués
+  `À vérifier/Traités/` et `À vérifier/À vérifier/` au lieu des dossiers
+  attendus (repéré et corrigé à la main dans la foulée, aucune perte de
+  données — juste un mauvais rangement). `rapprocher_dossier()` (lecture
+  seule) peut, lui, être pointé sur n'importe quel dossier sans risque
+  (c'est ce qui permet de tester "À vérifier" isolément) — seul
+  `appliquer_et_archiver()` a cette contrainte.
+- **Rapprochement de repli sur référence proche + désignation**
+  (`_repli_reference_proche()`, `moteur/rapprochement/matching.py`) : cas
+  réel signalé — un trou de perforateur sur le BL PAPIER abîme un chiffre
+  de la référence imprimée AVANT le scan (ex. "405209" devient "L405205"
+  à l'OCR, un seul chiffre différent) — l'acheteur confirme que ce type de
+  dommage physique est **quotidien**, pas un cas rare. Avant ce correctif,
+  0 candidat de référence exacte -> bac "inconnu" direct, la ligne
+  disparaissait du rapprochement alors que l'article existait bien dans le
+  Suivi. Quand `apparier()` ne trouve AUCUNE référence exacte pour une
+  commande, un repli cherche désormais une ligne Suivi dont le cœur
+  numérique (`moteur.base.coeur_numerique`) est à **exactement 1
+  caractère d'écart** (`_distance_courte()`, longueur + caractères
+  différents) — n'accepte que s'il existe UNE SEULE ligne candidate à
+  cette distance (jamais de choix au hasard). La désignation n'est PAS un
+  filtre bloquant (elle varie trop entre BL et Suivi pour servir de seuil
+  fiable — mesuré sur des paires réellement correctes : similarité
+  `difflib.SequenceMatcher` de 0,267 à 1,0) mais est affichée en clair
+  dans la raison, pour que l'acheteur tranche d'un coup d'œil. Statut
+  TOUJOURS "à confirmer" **sauf un cas** (voir bug ci-dessous), jamais
+  "sûr" — un rapprochement de repli n'est jamais écrit automatiquement.
+  Validé manuellement sur le vrai cas signalé (`bl_cominter_3.pdf`,
+  L405205 -> 405209) puis testé
+  (`tests/test_rapprochement_matching.py::test_apparier_repli_reference_proche_*`).
+- **BUG RÉEL CRITIQUE trouvé lors du 1er vrai passage d'écriture avec ce
+  repli, corrigé dans la foulée** : la toute première utilisation réelle
+  du repli (ligne 405209, commande M3.23.034) visait une ligne du Suivi
+  DÉJÀ à 3 livrées/3 commandées, même tarif, date déjà renseignée — un cas
+  "déjà à jour" en tout point (`_comparer()` l'avait bien détecté), sauf
+  que le code d'`apparier()` forçait alors TOUJOURS `Statut.A_CONFIRMER`
+  pour toute correspondance de repli, sans jamais regarder ce que
+  `_comparer()` avait réellement conclu. Résultat concret, écrit pour de
+  vrai dans le classeur vivant avant d'être repéré et corrigé
+  manuellement (voir sauvegardes horodatées) : `qte_livree_cumulee` a
+  calculé 3 (déjà) + 3 (BL) = **6 pour 3 commandées** — une sur-livraison
+  fantôme, sur un article qui n'avait en réalité RIEN de nouveau à
+  enregistrer. Corrigé à deux niveaux : (1) `apparier()` ne force
+  "à confirmer" que si `_comparer()` n'a PAS conclu "déjà à jour" ; un
+  repli vers une ligne déjà à jour ressort désormais `Statut.DEJA_A_JOUR`
+  (avec la raison du repli conservée, pour que l'acheteur comprenne
+  pourquoi cette ligne apparaît sans rien à faire) — donc plus JAMAIS de
+  cumul sur une quantité déjà exacte ; (2) garde-fou en profondeur ajouté
+  dans `ecritures_pour()` (`pipeline_bl.py`) : ignore explicitement toute
+  correspondance `DEJA_A_JOUR` même si elle se retrouvait par erreur dans
+  la liste à écrire. Testés
+  (`test_apparier_repli_reference_proche_deja_a_jour_ne_cumule_jamais`,
+  `test_ecritures_pour_ignore_les_correspondances_deja_a_jour`). **Leçon
+  générale pour tout futur code de repli/rapprochement approximatif** :
+  ne jamais court-circuiter le statut renvoyé par `_comparer()` sans
+  vérifier s'il s'agit d'un "déjà à jour" — sinon un rapprochement
+  approximatif peut transformer une ligne parfaitement à jour en
+  sur-livraison fantôme.
+- **BUG RÉEL DE FOND trouvé par l'acheteur juste après, distinct du
+  précédent : "déjà à jour" ne vérifie JAMAIS que la date enregistrée est
+  la BONNE date** — seulement que qté/tarif correspondent et qu'UNE date
+  (n'importe laquelle) est présente (`_comparer()`, condition
+  `ligne_suivi.date_livraison is not None`). Conséquence concrète : des
+  lignes écrites AVANT que l'extraction de date_bl soit corrigée (Cominter,
+  voir plus haut — `date_bl` valait `""`, secours sur `date.today()` dans
+  `ecritures_pour()`) sont restées bloquées avec la date du JOUR DU
+  TRAITEMENT au lieu de la vraie date du BL, et aucun passage suivant ne
+  les corrige jamais puisqu'elles ressortent "déjà à jour" à chaque fois
+  (qté/tarif, eux, étaient corrects). Repéré par l'acheteur en ouvrant le
+  1er BL archivé (108.271) : Suivi affichait 13/08 (date du traitement)
+  alors que le vrai BL est daté du 15/07 (et **signé** le 16/07 — voir
+  règle ci-dessous). **Audit en lecture seule** mené sur les 30 fichiers
+  déjà dans `a_traiter/BL/Traités/` (re-OCR de chacun, comparaison
+  `bl.date_bl` réel vs `Date de livraison` actuelle du Suivi pour la ligne
+  correspondante) : **9 écarts trouvés**, tous des lignes Cominter/Coredime
+  écrites tôt dans la session, corrigés un par un après revue avec
+  l'acheteur (voir sauvegarde
+  `1.3.0.1. Suivi commandes - 2026_20260813_203412.xlsx`). Un 10e cas (109
+  Distribution, commande 132.008) a une date imprimée illisible même à
+  l'OCR ("108/2026") — laissé tel quel, à relever manuellement sur le
+  papier si besoin, pas un cas automatisable.
+  **Règle donnée par l'acheteur, à respecter pour toute date de
+  livraison future** : c'est la date de LA SIGNATURE sur le BL papier qui
+  fait foi si elle est présente (constaté : parfois un jour après la date
+  imprimée du document, ex. 108.271 imprimé 15/07 mais signé 16/07) ;
+  à défaut de signature, la date imprimée du BL. **L'OCR de ce projet
+  n'extrait que la date IMPRIMÉE, jamais une date manuscrite** (RapidOCR
+  n'est pas validé pour la reconnaissance d'écriture manuscrite ici) — donc
+  même une date "correcte" au sens du code peut être fausse au sens de
+  cette règle si une signature datée existe et diffère. Pas de solution
+  automatisée à ce stade ; à garder en tête pour toute future recette
+  (comparer visuellement la zone de signature, pas seulement la date
+  imprimée en haut du document).
+- **Correctif structurel demandé par l'acheteur juste après l'audit** :
+  "déjà à jour" vérifie désormais aussi la COHÉRENCE de la date, pas
+  seulement sa présence — pour que ce type de ligne bloquée avec une
+  mauvaise date pour toujours (voir juste au-dessus) ne puisse plus se
+  reproduire silencieusement, même pour des fournisseurs pas encore
+  audités. `apparier()`/`_comparer()` (`matching.py`) acceptent désormais
+  un paramètre `date_bl_reelle` (date déjà extraite par l'appelant, ou
+  `None` si illisible/non fournie — comportement inchangé dans ce cas,
+  rétrocompatible) : si qté/tarif sont déjà identiques mais que la date
+  enregistrée diffère de `date_bl_reelle`, la ligne ressort "à confirmer"
+  (jamais silencieusement "déjà à jour") avec la date correcte donnée en
+  clair dans la raison. **Piège évité** : une ligne dans ce cas a sa
+  quantité DÉJÀ correcte — la traiter comme une correspondance normale
+  aurait recalculé `qte_livree_cumulee = déjà + BL` et doublé la quantité
+  (exactement le bug de sur-livraison fantôme trouvé juste avant). Nouveau
+  champ `Correspondance.qte_deja_incluse` (défaut `False`) : quand `True`,
+  `qte_livree_cumulee` retourne la quantité déjà enregistrée SANS jamais
+  la recumuler — utilisé ici et propagé aussi par le chemin du repli
+  référence-proche. `pipeline_bl.rapprocher_dossier()` calcule
+  `date_bl_reelle` une fois par BL (`_parser_date_bl(bl.date_bl)`) et le
+  passe à `apparier()`. Testé
+  (`test_apparier_date_suivi_incoherente_devient_a_confirmer_sans_recumuler`,
+  `test_apparier_date_suivi_coherente_avec_date_bl_reelle_reste_deja_a_jour`,
+  `test_apparier_sans_date_bl_reelle_comportement_inchange`).
+
+**Session suivante — nouveau lot de BL déposés, 3 échecs d'extraction
+corrigés (109 Distribution ×2, Electric Plus ×1) :** l'acheteur a déposé un
+nouveau lot dans `a_traiter/BL/` ; le rapprochement en lecture seule a
+signalé 3 fichiers à 0 ligne extraite (ou total incohérent) malgré un Total
+HT affiché — creusé et corrigé sur les vrais PDF
+(`tests/fixtures/bl_dist109_6.pdf`, `bl_dist109_7.pdf`,
+`bl_electricplus_8.pdf`) :
+- **`bl_dist109_6.pdf` — en-tête de tableau avec accent** : l'OCR a lu
+  "Reférencearticle" AVEC un é (donc "RÉFÉRENCEARTICLE" après `.upper()`)
+  au lieu de la forme sans accent habituelle — `MOTIF_ENTETE_TABLEAU_BL`
+  ("REFERENCEARTICLE", sans gestion d'accent) ne matchait jamais, faisant
+  disparaître TOUT le tableau (0 ligne pour un Total HT de 1750€ affiché).
+  `_sans_espaces()` (`dist109.py`) normalise désormais les accents
+  (`unicodedata.normalize("NFKD", ...).encode("ascii", "ignore")`) avant
+  toute comparaison, pour les deux graphies. Confirme au passage que la
+  quantité réelle de cette ligne est 10 (175€ × 10 = 1750€), pas 1.
+- **`bl_dist109_7.pdf` — cellule Eco-part intercalée + lignes sans code
+  TVA** : sur ce document, 2 défauts distincts. (1) Une cellule "Eco-part"
+  (2 décimales) s'intercale parfois entre le vrai P.U.Net (TOUJOURS 5
+  décimales sur ce gabarit, ex. "22,00000") et le code TVA — l'ancien code
+  prenait systématiquement "la cellule juste avant le code TVA" pour le
+  P.U.Net, donnant une quantité totalement fausse quand c'était en fait
+  l'éco-part (104,76 au lieu de 3 sur la ligne 302304). (2) 3 lignes sur 7
+  n'ont AUCUNE cellule de code TVA lue par l'OCR — silencieusement
+  ignorées avant ce correctif. Nouveau `MOTIF_PU_NET_BL` (`^\d+[,.]\d{5}$`)
+  : le nombre de décimales sert désormais de signal pour (a) vérifier que
+  la cellule juste avant le code TVA EST bien le P.U.Net, sinon reculer
+  d'une cellule de plus (repli 1), et (b) retrouver le P.U.Net directement
+  quand aucun code TVA n'a été détecté sur la ligne, le Total restant
+  alors la DERNIÈRE cellule de la ligne (repli 2, vérifié exact sur les 3
+  lignes concernées). Les 7 lignes retombent maintenant exactement sur le
+  Total HT affiché (136,96€).
+- **`bl_electricplus_8.pdf` — confusion OCR "PF" → "PR"** : l'ancre de
+  prix (`MOTIF_PF_ELECTRICPLUS`) attendait strictement une cellule finissant
+  par "PF" — l'OCR a lu "PR" (F confondu avec R) sur ce document, ancre
+  jamais trouvée, TOUTE la facture ressortait à 0 ligne malgré un Total HT
+  de 482,50€ affiché. Même famille que la tolérance O/0 déjà en place sur
+  cette ancre (session R2 suite) : motif élargi à `P[FR]`. **Gap restant,
+  volontairement non corrigé (un seul exemple, règle d'or)** : sur ce même
+  fichier, `numero_bl`/`date_bl` restent vides — l'ordre des colonnes
+  facture/date est INVERSÉ par rapport aux autres factures Electric Plus
+  déjà vues (ici "FACTURE" puis "DATE" dans le flux OCR, `MOTIF_FACTURE_
+  DATE_ELECTRICPLUS` suppose l'inverse) — à reprendre si un 2e exemple
+  réel avec ce même ordre se présente.
+Testé (`test_parse_bl_dist109_6_entete_avec_accent`,
+`test_parse_bl_dist109_7_eco_part_intercalee_et_lignes_sans_code_tva`,
+`test_parse_bl_electricplus_8_prix_r_confondu_avec_f`).
+
+**Session suivante — 109 Distribution, découpage multi-BL (fait), suite à
+un nouveau lot avec "scans en masse" :** l'acheteur a prévenu qu'elle avait
+déposé des scans individuels ET des scans groupés. Un fichier
+(`doc07149020260814105344.pdf`, 8 pages) contenait effectivement 8 BL 109
+Distribution différents — jamais rencontré avant chez ce fournisseur
+(seul Cominter Ouest avait ce besoin jusqu'ici). `parse_bl_109()` retourne
+désormais une LISTE (comme `parse_bl_cominter()`), en réutilisant
+directement `MOTIF_BL_NUMERO_DATE` (numéro de BL, déjà existant) comme
+identifiant pour `moteur.ocr.pages_par_identifiant()` — aucun nouveau
+motif nécessaire, le regroupement par page est immédiat. `bl.pages` est
+renseigné pour chaque BL du groupe, ce qui active automatiquement
+l'archivage par BL individuel (déjà généralisé dans `pipeline_bl.py` pour
+tout fournisseur qui renseigne `pages`, pas seulement Cominter).
+**2e bug trouvé en creusant les 2 BL du lot encore à 0 ligne après le
+découpage** : le repère de fin de tableau `MOTIF_PIED_TABLEAU_BL`
+("Total Eco-part HT") est lui aussi sujet à erreur OCR ("Tatal Eco-part
+HT", voire pire) — repli ajouté sur "Total HT" juste après, qui est resté
+fiable sur TOUS les documents 109 Distribution vus jusqu'ici (utilisé par
+ailleurs pour l'autocontrôle de total). Les 8 BL du fichier retombent
+maintenant exactement sur leur Total HT respectif. Fixture réelle ajoutée
+(`tests/fixtures/bl_dist109_8_multi_bl_8pages.pdf`,
+`test_parse_bl_dist109_8_multi_bl_8pages`) ; les 7 tests existants ont dû
+être adaptés au nouveau type de retour (`[bl] = parse_bl_109(...)` au lieu
+de `bl = parse_bl_109(...)`), aucun autre appelant dans le code (la
+normalisation liste/objet unique se fait déjà dans `lecture_bl.lire_bl()`,
+comme pour Cominter).
+
+**Session suivante — recette jugée insatisfaisante par l'acheteur (seulement
+5 BL rapprochés sur 16), deux correctifs de fond (fait) :** message direct
+de l'acheteur : "Cette session n'a pas du tout été satisfaisante [...] en
+l'état ce n'est pas du tout intéressant et utile." Deux causes concrètes
+identifiées à partir de 2 exemples qu'elle a pointés du doigt.
+
+- **Cause du BL "123.098" non rapproché malgré une seule ligne de chaque
+  côté, même désignation, même tarif** : la référence Suivi est
+  "ALB69894", le BL a extrait "9894" — **pas un chiffre abîmé (déjà
+  couvert par le repli existant), un chiffre de tête ENTIÈREMENT
+  disparu**. Explication de l'acheteur : "les gars de l'atelier percent
+  les BL pour les classer dans un classeur" — même famille que le trou de
+  perforateur déjà connu, mais qui efface parfois complètement 1-2
+  chiffres du DÉBUT plutôt que d'en abîmer un au milieu. Nouvelle fonction
+  `_chiffres_tete_manquants()` (`matching.py`) : accepte qu'une référence
+  soit un SUFFIXE de l'autre avec 1 ou 2 chiffres d'écart de tête,
+  intégrée à `_repli_reference_proche()` à côté du repli existant (1
+  seule ligne candidate exigée entre les deux critères combinés, jamais un
+  choix au hasard). Toujours "à confirmer", jamais "sûr". Testé
+  (`test_apparier_repli_chiffre_de_tete_manquant*`).
+- **Déduction de commande par signature de contenu** (nouvelle fonction
+  `deduire_commande_par_contenu()`, `matching.py`) : l'acheteur a
+  explicitement demandé cette fonctionnalité — quand le n° de commande
+  n'est pas lisible sur le BL (même cause : trou de perforateur, mais sur
+  la zone du n° cette fois), chercher dans TOUTES les lignes du Suivi pour
+  ce fournisseur (nouvelle `lire_lignes_fournisseur()`, contrairement à
+  `lire_lignes_commande()` qui filtre déjà par commande) la commande dont
+  le plus de lignes concordent EXACTEMENT (référence ET quantité
+  commandée) avec celles du BL — une empreinte de contenu plutôt qu'un
+  numéro illisible. Validé sur les 3 vrais BL Cominter signalés par
+  l'acheteur (`OBL108110`->135.039 avec 3/6 lignes concordantes,
+  `OBL108186`->142.032 avec 4/5, `OBL108367`->M3.14.361 avec 4/4 — le
+  meilleur candidat avait systématiquement 3 à 4x plus de lignes
+  concordantes que le 2e). Garde-fous stricts : au moins 2 lignes
+  concordantes (jamais une coïncidence sur 1 seule référence, souvent
+  générique/réutilisée), et un score STRICTEMENT meilleur que tout autre
+  candidat (égalité -> aucune déduction). `LigneSuivi` a un nouveau champ
+  `numero_commande` (défaut `""`, uniquement renseigné par
+  `lire_lignes_fournisseur()`) pour pouvoir grouper les lignes par
+  commande après coup. **Un n° de commande DÉDUIT n'est JAMAIS utilisé
+  pour un rapprochement "sûr" automatique** — `rapprocher_dossier()`
+  (`pipeline_bl.py`) force chaque correspondance obtenue via une commande
+  déduite à "à confirmer" (même si `_comparer()` l'aurait autrement jugée
+  "sûre"), avec la déduction expliquée en clair dans la raison. Testé
+  (`test_deduire_commande_par_contenu_*`).
+- **Repli référence proche sur écart alphanumérique final** (cas réel
+  commande 142.033) : BL "H07VK16BL" vs Suivi "H07VK16B" (un "L" en trop
+  en fin de référence) — le cœur numérique des deux ("716") est trop
+  court (< 4 chiffres, seuil de `coeur_numerique`) pour les replis
+  existants, qui ne comparent que la partie numérique. Nouvelle fonction
+  `_cle_brute()` (`matching.py`, texte alphanumérique brut, garde les
+  lettres) : repli supplémentaire dans `_repli_reference_proche()` quand
+  le cœur numérique est absent d'au moins un côté, même critère 1
+  caractère d'écart appliqué au texte brut. Testé
+  (`test_apparier_repli_reference_courte_ecart_alphanumerique_final`).
+- **Bons de retour 109 Distribution reconnus comme un type de document
+  distinct (fait), suite à un signalement critique de l'acheteur** : ce
+  fournisseur envoie aussi des "Retour n° X du date" — un document qui
+  ANNULE une ligne d'un BL précédent (cas réel : article listé sur le BL
+  737760 (commande M3.10.175, article R9PRA263) mais dont la case "livré"
+  n'était PAS cochée à réception ; le fournisseur envoie le Retour
+  n°25894 qui référence ce BL, puis le BL 737851 livre l'article
+  conformément le lendemain). **Bug réel trouvé AVANT toute écriture,
+  potentiellement grave** : `MOTIF_BL_NUMERO_DATE` matchait à tort la
+  référence "Bon de livraison n° 737760" présente DANS LE CORPS du retour
+  (un retour cite toujours le BL qu'il annule), faisant fusionner le
+  retour comme une "page supplémentaire" du BL 737760 par
+  `moteur.ocr.pages_par_identifiant` — si ça n'avait pas été repéré, le
+  retour aurait été traité comme une 2e livraison de R9PRA263, doublant
+  la quantité (même famille de bug que la sur-livraison fantôme
+  documentée plus haut, mais sur un document qui n'est même pas une
+  livraison). Corrections dans `moteur/fournisseurs/dist109.py` :
+  - `MOTIF_RETOUR_NUMERO_DATE` : détecte l'identité PROPRE d'un retour
+    ("Retour n° X du date") — vérifié EN PREMIER, avant
+    `MOTIF_BL_NUMERO_DATE`, sur le texte de la page.
+  - `MOTIF_IDENTIFIANT_PAGE_BL` : reconnaît "Retour n°" OU "livraison n°"
+    pour le regroupement de pages (`pages_par_identifiant`) — une page de
+    retour ne se fusionne plus jamais avec le BL qu'elle référence dans
+    son corps, puisque "Retour n°25894" apparaît AVANT la référence au BL
+    dans le flux OCR de la page et est donc trouvé en premier.
+  - `BonLivraison` a deux nouveaux champs : `type_document` ("BL" ou
+    "RETOUR", défaut "BL" — rétrocompatible pour tous les autres
+    fournisseurs) et `numero_bl_origine` (le BL que le retour annule).
+  - `moteur/rapprochement/pipeline_bl.py` (`rapprocher_dossier()`) :
+    avant le traitement normal, construit la liste des références
+    annulées par (n° de BL d'origine) à partir de TOUS les retours du
+    lot. Un document `type_document == "RETOUR"` ne produit JAMAIS de
+    correspondance à écrire lui-même — juste une entrée
+    `anomalies_bl` informative ("Bon de retour — annule X du BL Y").
+    Quand le BL d'origine référencé est traité, toute ligne dont la
+    référence figure dans les annulations bascule "à confirmer" avec la
+    raison explicite, MÊME si `_comparer()` l'aurait jugée "sûre" —
+    jamais écrite automatiquement.
+  Fixtures réelles ajoutées (`tests/fixtures/bl_dist109_9_retour.pdf`,
+  `bl_dist109_10_bl_avec_retour_associe.pdf`, `bl_dist109_11.pdf`), et le
+  fixture multi-BL existant (`bl_dist109_8_multi_bl_8pages.pdf`, qui
+  contenait CE MÊME retour sans qu'il ait été identifié comme tel) mis à
+  jour en conséquence. Testé
+  (`test_parse_bl_dist109_9_retour_seul`,
+  `test_parse_bl_dist109_10_bl_avec_retour_associe`,
+  `test_parse_bl_dist109_11_livraison_conforme_apres_retour`,
+  `test_parse_bl_dist109_8_multi_bl_8pages` mis à jour).
+  **Limité à 109 Distribution pour l'instant** (seul fournisseur où un
+  retour réel a été vu) — à étendre à d'autres fournisseurs dès qu'un cas
+  réel se présentera (règle d'or).
+- **Ambiguïté de cœur numérique levée par correspondance exacte** (cas
+  réel, commande M3.10.175) : "R9PRC263" et "R9PRA263" partagent le MÊME
+  cœur numérique ("9263" — la lettre médiane C/A n'est pas un chiffre,
+  donc ignorée par `coeur_numerique`), alors que ce sont deux articles
+  RÉELLEMENT différents (interrupteur différentiel type A vs type AC) —
+  la ligne R9PRC263 du BL restait "ambigu" à tort. `apparier()` cherche
+  désormais, parmi les candidats ambigus par cœur numérique, s'il en
+  existe UN SEUL dont le texte est EXACTEMENT identique à la référence du
+  BL — si oui, il est retenu (une correspondance de texte exact est
+  toujours plus fiable qu'une coïncidence de cœur numérique). Sans
+  correspondance exacte, reste "ambigu" comme avant (jamais de choix au
+  hasard). Testé
+  (`test_apparier_ligne_ambigue_mais_correspondance_exacte_disponible`,
+  `test_apparier_ligne_ambigue_inconnu_sans_correspondance_exacte`).
+- **Données historiques corrigées sur le vrai Suivi** : la même commande
+  M3.10.175 avait 4 lignes écrites avec des quantités/tarifs FAUX lors
+  d'une session précédente (R9PFC620, R9PFC616, 61401, BC6AFSTL8) —
+  décalage entre chaque référence et le tarif de la référence PRÉCÉDENTE
+  sur le BL (cause historique non élucidée avec certitude, code actuel
+  déjà vérifié correct par les tests verrouillés ci-dessus). Corrigé
+  directement sur le vrai classeur après confirmation des vraies valeurs
+  par relecture du BL (voir sauvegarde
+  `1.3.0.1. Suivi commandes - 2026_20260817_142327.xlsx`).
+- **PIÈGE OPÉRATIONNEL trouvé en écrivant réellement le cas M3.10.175,
+  à ne plus jamais reproduire** : `rapprocher_dossier()` ne construit
+  l'exclusion "ligne annulée par un retour" (voir plus haut) qu'à partir
+  des documents PRÉSENTS DANS LE MÊME APPEL. En traitant le BL 737760
+  SANS inclure le retour n°25894 dans le même lot (copié séparément vers
+  `a_traiter/BL/` pour l'écriture), R9PRA263 s'est retrouvé écrit "sûr"
+  depuis 737760 (13/08, PAS livré réellement) au lieu du 737851 (14/08, la
+  vraie livraison conforme) — qté/tarif corrects par pure coïncidence
+  (même article, même prix), seule la date était fausse, corrigée après
+  coup. **Règle à respecter systématiquement** : un BL lié à un retour
+  (ou l'inverse) doit TOUJOURS être traité dans le même appel à
+  `rapprocher_dossier()`/`appliquer_et_archiver()` que ce retour, jamais
+  séparément — sans quoi l'exclusion ne peut structurellement pas
+  s'appliquer, même si le code lui-même est correct.
+
+**Session suivante — dossier par commande dans Traités/ (BC + BL + retours),
+demande explicite de l'acheteur** : "dans traités, il faudra créer un
+dossier pour chaque commande [...] dedans on y met ce bon de commande, tous
+les BL et bons de retours associés, et dans un temps à venir nous
+ajouterons la facture. Ainsi nous aurons tout le flux commande-BL-facture
+facilement consultable, et nous pourrons très facilement repérer les
+écarts de facturation."
+
+- **`a_traiter/BL/Traités/<n° de commande>/`** (`moteur.rapprochement.
+  pipeline_bl._dossier_pour_commande()`) remplace l'ancien archivage à
+  plat dans `Traités/` — chaque BL résolu (écrit ou déjà à jour) rejoint le
+  sous-dossier de SA commande, `archiver_bl()` et `_extraire_bl_vers()`
+  (fichiers multi-BL) y déposant désormais leur cible. Un numéro de
+  commande absent retombe sur "Commande inconnue" (jamais un dossier vide
+  ou une erreur).
+- **Copie automatique du bon de commande** (`trouver_bon_de_commande()`,
+  `_copier_bon_de_commande_si_absent()`) : cherche, dans l'archive externe
+  des BC (`X:\...\1.3.0.1. Commandes courantes\Commandes\<année>\`,
+  arborescence RÉELLEMENT mixte — fichiers à plat ET rangés par
+  sous-dossier de chantier, motif de nom "<Chantier> - BC <numéro> -
+  <fournisseur>.<pdf|xlsx>"), le BC correspondant au numéro de commande, et
+  le copie (`"BC - <nom original>"`) dans le dossier de la commande dès le
+  premier BL archivé pour elle — jamais une 2e fois (idempotent, vérifie
+  qu'aucun fichier `"BC - *"` n'y est déjà). Recherche RÉCURSIVE
+  (`rglob`), jamais un chemin de sous-dossier supposé. **Ne retourne un
+  résultat que s'il y a EXACTEMENT UN candidat** (règle d'or : jamais un
+  choix au hasard entre plusieurs BC ambigus) — silencieusement aucun si 0
+  ou plusieurs, ne bloque JAMAIS l'archivage du BL lui-même (l'absence de
+  BC est un simple manque, pas une erreur). Migration réelle faite cette
+  session sur les 54 fichiers alors à plat dans `Traités/` : 29 bons de
+  commande retrouvés et copiés, ~25 commandes sans BC trouvé (majoritairement
+  des commandes très récentes pas encore filées par l'acheteur au moment de
+  la migration — comportement normal, pas un bug de la recherche, vérifié
+  sur un échantillon de 11 commandes avant la migration : celles trouvées
+  l'ont été de façon fiable, celles absentes le sont restées après
+  vérification manuelle).
+- **Un bon de retour (109 Distribution) est désormais TOUJOURS considéré
+  "résolu"** (`_est_resolu()`) et rejoint directement
+  `Traités/<commande>/` — avant ce correctif, il restait bloqué
+  indéfiniment dans "à vérifier" à cause de l'anomalie purement
+  informative que `rapprocher_dossier()` lui attache systématiquement
+  ("rien à écrire depuis ce document"), alors qu'un retour n'a par nature
+  jamais rien à écrire et ne doit donc jamais être traité comme "en
+  attente d'une décision". Nommage dédié dans `_nom_archive_bl()`
+  ("RETOUR" au lieu du nom du fournisseur, avec le BL qu'il annule entre
+  parenthèses) pour le repérer sans ouvrir le fichier. Cas réel validé
+  cette session : le retour n°25894 (annule R9PRA263 du BL 737760, voir
+  plus haut) traînait depuis sa création dans "à vérifier" sous un nom
+  ambigu ("...737760... (2).pdf", un doublon de nom avec le VRAI BL 737760
+  — jamais archivé lui-même faute de ce correctif) ; retraité isolément
+  cette session, il a rejoint `Traités/M3.10.175/` sous le nom
+  `"2026-08-14 - RETOUR - 25894 (annule BL 737760) - BC M3.10.175.pdf"`.
+- **"À vérifier" reste À PLAT** (pas de sous-dossier par commande) — ce
+  sont des BL qui attendent encore une décision humaine, pas un flux
+  consultable au sens de la demande ci-dessus.
+- **Nettoyage du backlog "à vérifier" fait cette session** (suite à la
+  demande "il faut que tu supprimes les fichiers maintenant traités du
+  dossier 'à vérifier'") : un diagnostic en lecture seule
+  (`rapprocher_dossier` pointé sur `À vérifier/`) a distingué, parmi 34
+  fichiers, 6 devenus "résolus" — 5 doublons de scan vérifiés (taille
+  identique au fichier déjà archivé, ou toutes leurs lignes "déjà à jour")
+  et le retour n°25894 ci-dessus (le seul à avoir réellement besoin d'un
+  archivage, pas d'une suppression). **Choix délibéré : pas de suppression
+  définitive par la session elle-même** (les instructions système de ce
+  projet interdisent explicitement à toute session de supprimer des
+  données de façon permanente, même sur demande explicite) — les 5
+  doublons confirmés ont été déplacés dans
+  `a_traiter/BL/À vérifier/Doublons confirmés (à supprimer)/`, à purger
+  par l'acheteur elle-même quand elle le souhaite. **Restent réellement en attente dans "à vérifier"** (pas du
+  bruit à nettoyer, du vrai travail) : 17 fichiers avec une anomalie de
+  rapprochement authentique (sur-livraisons à investiguer, commandes
+  introuvables/ambiguës, écarts de référence/tarif à trancher) et 11
+  fichiers de fournisseurs sans parser BL pour l'instant (RAVATE, STAND
+  64, DEM, SAGEES — voir tableau "Flux réel" plus bas) ou non reconnus par
+  l'OCR.
+- **Correctif immédiat, précision de l'acheteur** : "les commandes récentes
+  sont générées dans `.../Commandes courantes/Commandes/BdCPDF/`, le
+  nouveau dossier que nous avons créé pour la génération automatique des
+  BdC" — un second emplacement (à plat, sans sous-dossier chantier),
+  frère de l'archive historique par année ("2026/"), sous le même parent
+  "Commandes/". Explique une bonne partie des commandes sans BC trouvé au
+  premier passage (M3.10.175, 142.033, 142.034, M3.14.360/361, M2.17.005,
+  M3.23.037 — toutes de vraies commandes récentes, simplement générées
+  dans ce nouveau dossier plutôt que l'archive par année). `trouver_dossier_
+  commandes()` (renommée depuis `trouver_dossier_commandes_annee()`) pointe
+  désormais sur la racine "Commandes/" elle-même plutôt que sur un
+  sous-dossier "<année>/" figé — `trouver_bon_de_commande()` étant déjà
+  récursif (rglob), ça couvre "2026/" ET "BdCPDF/" (et tout futur
+  sous-dossier de la même famille) sans coder son nom en dur. Backfill fait
+  cette session sur les 46 dossiers `Traités/<commande>/` déjà migrés : 6
+  BC supplémentaires retrouvés et copiés (142.036, M2.17.005, M3.10.175,
+  M3.14.360, M3.14.361, M3.23.037) — 0 commande sans BC après ce backfill.
+
+**Session suivante — traitement du reste du backlog "à vérifier", fix
+Electric Plus factures multiples (fait)** : suite directe de la session
+précédente, l'acheteur a traité plusieurs cas un par un.
+
+- **109 Distribution 131.157** : l'acheteur a corrigé elle-même la
+  référence dans le Suivi (le cas GOUJON8X70→75 documenté plus haut,
+  "trou de perforateur" mais en réalité une vraie substitution) — une fois
+  la référence Suivi alignée sur celle du BL, la ligne GOUJON8X75 devient
+  une correspondance EXACTE (SUR), plus besoin de repli. Les deux autres
+  lignes du même BL (rondelles, boulons) avaient une légère sur-livraison
+  (500/300 et 4/3) — écrites avec les autres sur confirmation implicite de
+  l'acheteur ("normalement plus de pb pour traiter ce BL").
+- **Cominter M2.22.084** : commande déduite confirmée par l'acheteur — 12
+  lignes SUR/DEJA_A_JOUR écrites, puis les 3 lignes de repli restantes
+  (L3332→033325, QU152502645→QUI52502645, L8005→080052) également
+  confirmées et écrites dans un 2e passage. Seule 'SY00ZU51' reste
+  bloquée : corruption OCR trop sévère (probablement '033325'... non,
+  probablement une désignation de SY0029651 — écart trop important pour
+  un repli fiable, aucune règle codée sur un seul cas, voir règle d'or) —
+  le fichier reste dans "à vérifier" pour cette seule ligne.
+- **Cas GMR→COMINTER (commande M3.15.397), fournisseur substitué en
+  rupture de stock** : cas réel signalé par l'acheteur — "GMR était en
+  rupture, nous avons pris chez COMINTER en utilisant le même n° de BdC."
+  Un BL Cominter réel (OBL107273) ne trouvait aucune correspondance parce
+  que le Suivi avait cette commande enregistrée sous fournisseur "GMR" —
+  la recherche `lire_lignes_commande(fichier_suivi, bl.fournisseur, ...)`
+  filtre STRICTEMENT par fournisseur, comme il se doit (jamais de choix au
+  hasard entre deux fournisseurs différents). Comme la colonne
+  "Fournisseur" du Suivi n'est PAS dans `COLONNES_MODIFIABLES` (liste
+  blanche volontairement restreinte, voir plus haut — "jamais de
+  compromis"), ce n'est PAS un cas que Rapprochement AI peut corriger
+  lui-même : l'acheteur a changé "GMR" en "COMINTER" à la main dans
+  Excel, après quoi le rapprochement a immédiatement reconnu la ligne
+  comme "déjà à jour" (la quantité et le tarif y étaient déjà, seul le
+  fournisseur bloquait le rapprochement) — rien de plus à écrire, juste
+  à archiver. **Leçon pour la suite** : un n° de commande introuvable sous
+  le fournisseur détecté sur le BL vaut la peine d'être cherché aussi sous
+  d'AUTRES fournisseurs avant de conclure "commande introuvable" — un
+  fournisseur peut légitimement livrer via un concurrent en cas de rupture,
+  avec le même n° de commande.
+- **BUG RÉEL CORRIGÉ — Electric Plus : plusieurs FACTURES distinctes dans
+  un même fichier PDF** (signalé directement par l'acheteur : "article
+  11527 sur la commande, PLA11527 sur le BL : quel est le souci ?").
+  `doc07149220260814105422.pdf` (2 pages) contenait en réalité DEUX
+  factures Electric Plus sans rapport (commande/n° facture/date différents
+  par page — page 0 = commande M4.263, facture 1207019 ; page 1 = commande
+  142.036, facture 1207127). Avant ce correctif, `parse_bl_electricplus()`
+  traitait tout le fichier comme UN seul document : le n° de commande et
+  le Total HT venaient de la page 0, mais les LIGNES d'articles
+  n'étaient JAMAIS filtrées par page — un vrai risque de mélanger deux
+  commandes sous un seul numéro. Deux correctifs dans
+  `moteur/fournisseurs/electricplus.py` :
+  1. **Découpage par page** (même principe que 109 Distribution/Cominter,
+     voir `moteur.ocr.pages_par_identifiant`) — `parse_bl_electricplus()`
+     retourne désormais une LISTE. **Piège spécifique à ce fournisseur** :
+     l'identifiant de regroupement ne peut PAS réutiliser
+     `MOTIF_FACTURE_DATE_ELECTRICPLUS` (motif à 3 cellules adjacentes
+     date/date-échéance/n°facture) car `pages_par_identifiant` cherche son
+     motif dans le texte BRUT de la page (mots OCR simplement joints par
+     un espace dans leur ORDRE DE LECTURE OCR — PAS réordonnés en lignes
+     visuelles comme le fait `regrouper_lignes()`, utilisé lui pour
+     l'extraction des champs). Sur ce document réel, les 3 cellules
+     n'apparaissent jamais adjacentes dans le flux brut → le motif ne
+     matchait JAMAIS, donc les 2 pages fusionnaient toujours en un seul
+     groupe. Nouveau `MOTIF_IDENTIFIANT_PAGE_ELECTRICPLUS` : le n° de
+     facture SEUL (`\b\d{6,7}\b`), qui apparaît bien comme un token isolé
+     fiable dans le flux brut sur ce document (vérifié qu'aucun autre
+     nombre de 6-7 chiffres — siret, téléphone, code postal — ne peut
+     matcher par coïncidence, tous plus longs ou collés à des lettres sans
+     transition \w/\W).
+  2. **Repli positionnel pour les lignes sans suffixe "PF"** : la ligne
+     PLA11527 de la page 0 n'avait AUCUNE cellule "<prix>PF" (contrairement
+     à toutes les lignes vues jusqu'ici chez ce fournisseur) — silencieusement
+     ignorée avant ce correctif. Repli dans `_ligne_vers_article_electricplus`
+     quand l'ancre "PF" est absente : lit les 4 dernières cellules de la
+     ligne dans l'ordre du tableau (QTE, PRIX UNIT.HT, P.U.NET HT, MONTANT
+     HT), jamais depuis le début (le nombre de cellules de désignation
+     varie). Validé uniquement par cohérence arithmétique (60 × 2,68 =
+     160,80€, correspond exactement au Total HT affiché de la page) — un
+     seul exemple réel, à surveiller si un 2e cas se présente (règle d'or).
+  Fixture réelle ajoutée (`tests/fixtures/bl_electricplus_9_multi_facture_
+  2pages.pdf`), testé (`test_parse_bl_electricplus_9_deux_factures_dans_un_
+  seul_fichier`). Recette réelle : une fois corrigé, M4.263 (PLA11527, qté
+  60) écrit et archivé, 142.036 confirmé déjà entièrement à jour (doublon
+  d'une facture déjà traitée).
+- **Coredime 131.161** : sur-livraison 200 livrées pour 2 commandées sur
+  une référence dont la désignation dit littéralement "BOITE DE 100" —
+  même schéma boîte/pièce déjà documenté et confirmé par l'acheteur
+  (session précédente) — écrit sans nouvelle confirmation, le motif est
+  déjà établi.
+- **Coredime 142.035** : 2 BL du même lot (VAUBAN.pdf et VAUBAN1.pdf)
+  ciblaient la MÊME ligne Suivi (LEG406771) — le garde-fou anti-doublon
+  (`_desamorcer_conflits_meme_ligne_suivi`) a fonctionné comme prévu, seul
+  le premier fichier a été écrit, le second reste "à confirmer" pour cette
+  ligne. L'AUTRE ligne de VAUBAN1.pdf (227060122 vs Suivi 227060124, repli
+  1 caractère mais similarité de désignation faible ~65% — "CHEV..." vs
+  "ANC...") reste elle aussi en attente, la correspondance semble moins
+  fiable que les autres cas de repli déjà validés cette session.
+- **Electric Plus 155.009 : commande introuvable, y compris sous GMR**
+  (vérifié — contrairement au cas M3.15.397 ci-dessus, aucune ligne ne
+  correspond ni sous ELECTRIC PLUS ni sous GMR) — l'acheteur a confirmé
+  que cette commande avait été passée ORALEMENT (jamais saisie dans le
+  Suivi avant cette livraison) et l'a ajoutée elle-même.
+- **BUG RÉEL CORRIGÉ — Cominter : remise et Px net collés SANS espace**
+  (signalé directement par l'acheteur, très fermement — "nous avons le
+  prix unitaire, puis la remise, puis le prix net, aucun écart. Je crois
+  que tu as un problème avec ton parser Cominter", à raison). Distinct du
+  cas déjà connu et testé ("30% 110,67", AVEC un espace, voir
+  `test_parse_bl_cominter_4`) : sur BL ANZEMBERG.pdf/OBL108110 (commande
+  135.039), la cellule remise+Px net est collée SANS AUCUN espace
+  ("30%435,94", "30%106,50") — `_prix_net_bl_cominter()`
+  (`moteur/fournisseurs/cominter.py`) exigeait `\s+` (au moins un espace)
+  entre le "%" et le prix dans son motif combo ; sans espace, le motif ne
+  matchait JAMAIS, et la boucle de recherche retombait SILENCIEUSEMENT sur
+  le Px UNITAIRE (brut, avant remise) de la cellule précédente — aucune
+  anomalie levée, car montant et quantité restaient parfaitement cohérents
+  avec ce mauvais prix pris isolément. Fix : `\s+` → `\s*` dans le motif
+  combo (accepte 0 espace comme avant). **Deux lignes réelles touchées sur
+  ce seul document** : CAELK2766 (622,77€ lu au lieu de 435,94€, jamais
+  encore écrite dans le Suivi — corrigée en écrivant la bonne valeur) ET
+  CAEACB4V (152,14€ au lieu de 106,50€, **déjà écrite dans le Suivi lors
+  d'une session antérieure** — corrigée directement sur le classeur vivant
+  après découverte). **Deuxième confirmation indépendante du même bug**,
+  trouvée en creusant `doc07148920260814105315.pdf` (une 2e numérisation
+  du même BL physique, commande M3.10.171/OBL108154) : cette ligne
+  (AEA9Y13625/MEA9Y13625, remise "30%158,10" collée sans espace sur CE
+  scan précis) avait donné le même symptôme (tarif lu 158,10€ au lieu de
+  110,67€ déjà correctement enregistré depuis l'AUTRE scan de la même
+  facture, `bl_cominter_4.pdf`, où l'espace était présent) — confirme que
+  le bug touche plusieurs documents réels, pas un cas isolé. Fixture
+  réelle ajoutée (`tests/fixtures/bl_cominter_7_remise_sans_espace.pdf`),
+  testé (`test_parse_bl_cominter_7_remise_et_px_net_colles_sans_espace`).
+  **Point de vigilance pour la suite** : ce document a aussi 2 lignes
+  (CAEMMCPF1U4CROG, CAECORD6ASF005MSH) où l'OCR colle la référence ET la
+  désignation dans une seule cellule — reste non extrait, limitation
+  préexistante déjà connue (voir "Points fragiles", cœur du sujet des
+  "3/6 lignes concordantes" documenté à l'origine de ce BL), pas partie de
+  ce correctif.
+- **M3.23.030 : cas laissé EN SUSPENS après correction directe de
+  l'acheteur, à ne pas re-flaguer comme sur-livraison sans réexamen** —
+  deux documents réels (`doc07136020260813090605.pdf`/OBL108106, daté
+  06/08/2026, ligne 405209 qté 10 ; `doc07136120260813090616.pdf`/
+  OBL108251, ligne tronquée "L4052"→405209 probable qté 5) avaient été
+  signalés à tort comme "sur-livraison" (10+5=15 de plus par-dessus les
+  15 déjà enregistrés dans le Suivi, daté 11/08/2026 — soit 25 pour 15
+  commandés). L'acheteur a fermement contredit : "aucune sur-livraison...
+  il manque 2 unités d'un article" — correspond exactement à la ligne
+  BLM680527 de cette même commande (28 livrées pour 30 commandées dans le
+  Suivi, un manque réel et accepté, pas une erreur). **Hypothèse non
+  vérifiée à ce jour** : les deux documents 06/08 (10+5=15, exactement le
+  total déjà enregistré au 11/08) documentent peut-être la MÊME livraison
+  déjà comptée sous une date différente, plutôt qu'un ajout — mais les
+  dates ne correspondent pas (06/08 vs 11/08 déjà enregistré), donc pas
+  confirmé avec certitude. Aucune écriture faite pour ces deux documents
+  (ni la version "sur-livraison" refusée par l'acheteur, ni aucune autre
+  hypothèse non confirmée) — laissés tels quels dans "à vérifier" pour un
+  réexamen ultérieur, plutôt que de deviner (règle d'or).
+
+**Session suivante — RAVATE, nouveau fournisseur BL (fait), sur demande
+explicite de l'acheteur** (choix entre RAVATE/STAND 64/DEM/SAGEES) : les 6
+seules pièces réelles disponibles (2 initiales + 4 déposées en cours de
+session) sont TOUTES des "ravatelec" (branding visible sur le document) —
+RAVATE PRO reste NON couvert côté BL, contrairement au devis où l'acheteur
+avait confirmé une structure identique (aucune pièce PRO disponible pour
+vérifier côté BL, l'acheteur a explicitement signalé la distinction en
+cours de session — pas supposé sans confirmation).
+
+- **Structure découverte** : chaque article est réparti sur PLUSIEURS
+  lignes visuelles OCR, avec DEUX codes différents qui cohabitent — le
+  "Code Art" (interne Ravate, TOUJOURS numérique pur, préfixe "100"
+  [9 chiffres] ou "44200" [8 chiffres] sur toutes les pièces vues) et la
+  "Référence fournisseur" (le vrai code métier, ex. "VK16BT", "R2V5G10",
+  "404926") — **leur position l'un par rapport à l'autre VARIE selon le
+  scan** (Code Art tantôt sur la ligne désignation, tantôt en tête de la
+  ligne chiffrée ; Référence fournisseur tantôt isolée sur sa propre
+  ligne, tantôt en tête de la ligne chiffrée à la place du Code Art).
+  Comme pour le devis de ce fournisseur ("toujours la Réf. FNR, jamais la
+  réf interne", règle métier déjà confirmée), `LigneBL` utilise TOUJOURS
+  la Référence fournisseur — repérée en EXCLUANT explicitement la forme
+  du Code Art, jamais l'inverse (la Réf. fournisseur n'a pas de forme
+  unique fiable). **Validé sur données réelles** : 14 des 16 lignes des 4
+  pièces fraîches ont matché EXACTEMENT une référence déjà présente dans
+  le Suivi (statut SUR immédiat, aucun repli nécessaire) — forte
+  confirmation que l'extraction cible la bonne colonne.
+- La ligne CHIFFRÉE est repérée par ses 4 DERNIÈRES cellules — Px Brut |
+  Px Net | Remises (montant €, pas un pourcentage) | Montant HT, toujours
+  dans cet ordre — plutôt que par un nombre de cellules fixe (5 ou 7 selon
+  que qté+unité soient inline ou sur une ligne à part) : vérifié par
+  cohérence arithmétique EXACTE sur les 6 pièces (ex. Remises =
+  (Px Brut − Px Net) × Qté, à l'euro près). Quantité livrée TOUJOURS
+  déduite de Montant / Px net (même logique que 109 Distribution/
+  Cominter/Electric Plus), jamais lue dans une cellule Qté dont la
+  position varie.
+- **3 bugs réels trouvés et corrigés en confrontant les 4 pièces fraîches**
+  (les 2 pièces initiales seules avaient donné un faux sentiment de
+  fiabilité — 0 ligne extraite sur les 4 nouvelles avant ces correctifs) :
+  1. En-tête "Reference fournisseur" parfois éclaté en plusieurs cellules
+     OCR adjacentes ("Reference" | "fournisseur") au lieu d'une seule —
+     la recherche de zone de tableau doit joindre la ligne visuelle
+     ENTIÈRE avant de chercher le motif, jamais cellule par cellule.
+  2. Le motif "BC n°... AU <date> <commande>" doit tolérer un collage
+     total (aucun espace nulle part, y compris entre "AU" et la date, et
+     entre la date et la commande — ex. "BC000312608CC0405AU18/08/2026
+     M3.10.182" en une seule cellule OCR).
+  3. Une virgule de prix peut être lue "*" par l'OCR ("99*91" au lieu de
+     "99,91", confirmé par cohérence arithmétique : 130 × 6,75 = 877,50,
+     cohérent avec un Px Brut ≈ 99,91 avant remise) — toléré comme
+     séparateur décimal au même titre que "," et ".".
+- **Recette réelle sur les 4 pièces fraîches** : 14 lignes SUR écrites et
+  archivées (`Traités/M3.23.033/`, `Traités/M3.10.182/`), 1 ligne à
+  confirmer (date enregistrée 07/08 vs date réelle du BL 10/08, qté/tarif
+  déjà corrects — repli date-incohérente déjà existant, voir plus haut) et
+  1 ligne inconnue (`XVR1IISTI`, borne de recharge — référence absente du
+  Suivi pour cette commande, plausible pour un article vraiment nouveau).
+Fixtures réelles ajoutées (`tests/fixtures/bl_ravate_1.jpg` à
+`bl_ravate_6_huit_lignes.pdf`), testé (`tests/test_parsers_bl_ravate.py`,
+8 tests).
+
+**2 bugs réels de "bout de chaîne" trouvés par l'acheteur juste après,
+tous deux corrigés — leçon générale : le rapprochement + l'écriture ne
+suffisent pas, il faut vérifier le RANGEMENT jusqu'au bout à chaque
+session, "sinon nous ne pouvons pas valider" (mot de l'acheteur) :**
+- **BL ANZEMBERG.pdf (Cominter, OBL108110/135.039) jamais archivé** :
+  les 2 corrections de prix (voir bug remise/Px net ci-dessus) avaient été
+  écrites directement dans le Suivi via un script ad hoc, mais SANS passer
+  par `appliquer_et_archiver()` — le fichier restait donc oublié dans
+  "à vérifier" alors que ses 7 lignes extractibles étaient déjà toutes à
+  jour. Retraité via le pipeline officiel : archivé dans
+  `Traités/135.039/`. **Leçon** : toute correction manuelle (script ad hoc
+  hors du flux normal) doit être suivie d'un passage par
+  `appliquer_et_archiver()` sur le fichier source, jamais laissée à mi-chemin.
+- **BUG RÉEL CORRIGÉ — `trouver_bon_de_commande()` traitait deux copies
+  IDENTIQUES du même BC comme une ambiguïté** (signalé par l'acheteur :
+  "M3.23.033 est rangé tout seul, sans son BdC"). Le même BC se retrouve
+  couramment archivé à la fois dans `Commandes/<année>/` (ex.
+  "Maintenance/") ET dans `Commandes/BdCPDF/` (filé après coup dans
+  l'archive historique) — deux fichiers de MÊME NOM ET MÊME TAILLE, donc
+  PAS une vraie ambiguïté (contrairement à deux BC de contenu réellement
+  différent, où ne rien choisir reste la bonne règle). `trouver_bon_de_
+  commande()` déduplique désormais les candidats par (nom, taille) avant
+  d'exiger l'unicité. Backfill fait sur tous les dossiers `Traités/`
+  existants après le correctif : 1 commande retrouvée (M3.23.033) — 0
+  restante sans BC. Testé
+  (`test_trouver_bon_de_commande_deux_copies_identiques_pas_ambigu`).
+- **Nouveau repli de rapprochement — confusion OCR "1"/"I"** (signalé par
+  l'acheteur : "XVR1IISTI, exactement le même article que sur le bon de
+  commande et dans le tableau suivi, quel est le souci ?"). Suivi
+  "XVR111STI" ("WittyOne 11kW") lu "XVR1IISTI" par l'OCR — DEUX des trois
+  "1" confondus avec la lettre majuscule "I" dans la MÊME référence
+  (distance de 2 caractères, au-delà du seuil de `_distance_courte` qui ne
+  tolère qu'1 caractère d'écart). Nouvelle fonction `_cle_normalisee_i_un()`
+  (`matching.py`) : normalise "I"→"1" des deux côtés puis compare par
+  ÉGALITÉ (pas une distance à 1 près — plusieurs confusions 1/I peuvent
+  survenir dans la même référence, comme ici). Intégré comme 3e critère de
+  `_repli_reference_proche()`, indépendant du cœur numérique (ici les deux
+  cœurs sont sous le seuil de 4 chiffres : "1" seul côté BL, "111" côté
+  Suivi). Toujours "à confirmer", jamais "sûr". Écrit et archivé sur le cas
+  réel après validation. Testé
+  (`test_apparier_repli_confusion_ocr_1_i`,
+  `test_apparier_repli_confusion_ocr_1_i_ignore_si_deja_identique`).
+- **BUG RÉEL CORRIGÉ — RAVATE : Référence fournisseur en LOOK-AHEAD, pas
+  seulement look-behind** (trouvé en traitant pour de vrai "BL 123.095
+  MORANE.jpg", jamais écrit avant cette session malgré avoir servi de
+  fixture de test dès le début). Confirmé que le Suivi attend
+  "R2V3G2.5T1" (pas "44200019" le Code Art) pour cette commande — cette
+  Référence fournisseur se trouve UNIQUEMENT sur la ligne SUIVANTE ("
+  R2V3G2.5T1 | :MT:100.00"), jamais avant, cas non couvert par le repli
+  déjà en place (qui ne mémorisait qu'une référence isolée PRÉCÉDENTE).
+  `parse_bl_ravate()` matérialise désormais la zone de tableau en liste
+  (au lieu d'itérer un générateur) pour pouvoir regarder UNE ligne en
+  avant quand une ligne chiffrée retombe sur un Code Art faute de
+  référence isolée précédente trouvée — jamais plus loin qu'une ligne
+  (pas de "presque"). A aussi corrigé `bl_ravate_2.jpg` (même schéma,
+  référence "069864" trouvée en avant plutôt qu'en Code Art "100151156") —
+  tests mis à jour en conséquence, comportement plus correct qu'avant.
+
+**Recette réelle finale de cette session (Cominter + Ravate)** : chaque
+fichier RÉELLEMENT écrit ou déjà à jour cette session a été vérifié
+individuellement dérouler jusqu'au bout — rapprochement ET rangement
+(`Traités/<commande>/` + son BC) — pas seulement l'écriture Suivi (leçon
+de la session, voir "2 bugs réels de bout de chaîne" ci-dessus : un
+rapprochement sans rangement n'est PAS considéré terminé). Nettoyage
+associé : ~13 fichiers identifiés comme doublons de contenu déjà archivé
+(vérifiés par taille de fichier avant déplacement, jamais par nom seul)
+déplacés dans `À vérifier/Doublons confirmés (à supprimer)/`, jamais
+supprimés directement par la session (voir plus haut, "pas de suppression
+définitive par la session elle-même").
+
+**Session suivante — gros lot de BL du jour, fichier multi-fournisseur
+découvert et traité (fait)** : l'acheteur a déposé 11 nouveaux fichiers
+d'un coup ("tous les nouveaux BL du jour").
+
+- **BUG RÉEL CORRIGÉ — RAVATE, tiret dans la commande** : "131-162"
+  (commande collée directement après l'année sans espace, "2026131-162")
+  contient un TIRET — la classe de caractères du motif de capture de
+  commande (`MOTIF_BC_COMMANDE_BL_RAVATE`) ne l'incluait pas, donc la
+  capture s'arrêtait juste avant et le `\s*$` final ne matchait plus DU
+  TOUT : la ligne entière échouait, commande introuvable ET la ligne
+  "BC n°..." elle-même se retrouvait accumulée à tort en tête de la
+  désignation du 1er article (même motif réutilisé pour l'exclusion).
+  "-" ajouté à la classe de caractères.
+- **BUG RÉEL CORRIGÉ — RAVATE, confusion OCR "8"/"B" dans la commande**
+  (commande M3.10.182, confirmée par le nom de fichier du BL) : "18/0B/2026
+  M3.10.1B2" — le jour et le mois de la date, ET la commande elle-même,
+  peuvent contenir des "B" à la place de "8". Motif élargi à `[\dB]`,
+  substitution "B"→"8" après capture.
+- **BUG RÉEL CORRIGÉ — RAVATE, qté+unité ET Px Net+Remises collés,
+  simultanément** (même document M3.10.182) : la cellule qté+unité
+  peut être collée en une seule cellule juste avant Px Brut
+  (":MT:130,00:"), décalant la fenêtre des "4 dernières cellules" —
+  repli sur les 3 dernières (Px Brut, Px Net, Montant) quand les 4
+  échouent. Et Px Net + Remises peuvent être collés SANS espace dans
+  UNE cellule ("6,75:1288,30", à ne pas confondre avec le cas déjà connu
+  "%prix" — ici ce sont deux MONTANTS complets séparés par ":") — repli
+  combo dédié, extrait le 1er des deux. Qté déduite de Montant/Px Net =
+  877,50/6,75 = 130 pile, cohérent avec le "130,00" imprimé (jamais lue
+  directement).
+  Fixtures réelles ajoutées (`bl_ravate_7_tiret_dans_commande.jpg`,
+  `bl_ravate_8_confusion_ocr_8_b_dans_commande.jpg`), testé (10 tests
+  au total pour ce fournisseur).
+- **DÉCOUVERTE MAJEURE — un fichier PDF peut mélanger PLUSIEURS
+  FOURNISSEURS différents, pas seulement plusieurs BL du même
+  fournisseur** (`doc07178620260819170752.pdf`, 10 pages : RAVATE p0,
+  COMINTER p1/p2/p7/p9, 109 DISTRIBUTION p3/p6/p8, ELECTRIC PLUS p4,
+  COREDIME p5 — probablement un lot de BL papier scannés ensemble en une
+  seule fois). AUCUN parser mono-fournisseur ne peut traiter un tel
+  fichier : `lire_bl()` détecte UN SEUL fournisseur pour tout le fichier
+  (le premier trouvé) et applique CE SEUL parser aux 10 pages, produisant
+  0 ligne exploitable pour 9 des 10 pages. **Pas d'architecture générale
+  construite pour ce cas** (un seul exemple à ce jour, règle d'or) : traité
+  manuellement cette session (script ad hoc, pas dans le code du projet) —
+  découpage par page, bon parser appelé sur chaque tranche de 1 page,
+  rapprochement et archivage individuels via les primitives existantes
+  (`_extraire_bl_vers`, `_dossier_pour_commande`,
+  `_copier_bon_de_commande_si_absent`). **Si ce schéma se reproduit**
+  (lot de BL scannés ensemble), envisager une détection par-page du
+  fournisseur dans `lecture_bl.py` plutôt que par fichier entier.
+  Résultat de cette page multi-fournisseur : 4 pages entièrement résolues
+  et archivées (M3.10.177, 142.037, M4.266, 131.171), 6 pages vers
+  "à vérifier" (dont 3 juste extraites sans rapprochement — page RAVATE
+  à l'OCR trop dégradé pour être fiable, et 2 commandes Cominter
+  (130.636, M4.262) introuvables dans le Suivi même sous GMR).
+- **BUG RÉEL CONFIRMÉ (2e occurrence) — regroupement multi-BL 109
+  Distribution rate des identifiants différents mal lus** (`BL 131.169
+  LAGOURGUE.pdf`, 2 pages, 2 BL réels distincts 739166/739111) :
+  `pages_par_identifiant` a fusionné les 2 pages en UN SEUL groupe au
+  lieu de 2, parce que le 2e numéro était lu "739 111" (espace au
+  milieu, cassant le motif `\d{4,7}` qui exige une suite CONTIGÜE de
+  chiffres) — même famille que le bug déjà documenté pour Ravate (Q à la
+  place de 0). Contourné cette session en appelant `parse_bl_109()`
+  page par page individuellement plutôt que sur le fichier entier — pas
+  de correctif général du motif tenté (un seul exemple de plus, pas
+  assez pour une règle fiable sur CE fournisseur précis).
+- **2 corrections manuelles motivées (pas un repli automatique standard,
+  écart trop important) sur ce même fichier 131.169** :
+  1. `CAP493450` : Total HT lu "40,00" au lieu de "140,00" (chiffre "1"
+     de tête disparu) — confirmé par l'autocontrôle GLOBAL du document
+     (965,00€ affiché vs 865,00€ extrait, exactement 100€ d'écart) ET
+     par la cohérence locale (Qté imprimée "200" × Px Net 0,70 = 140,00,
+     PAS 40,00) ET par le Suivi (qte_cmd=200, exactement). Trois signaux
+     indépendants convergents → corrigé manuellement (Montant=140,
+     Qté recalculée=200).
+  2. `'100/'` → `'53041'` : la vraie référence était sur la ligne de
+     désignation PRÉCÉDENTE (désignation trop longue, déborde sur 2
+     lignes — dist109 n'a pas de repli de raccord comme Coredime/Ravate
+     pour ce cas), la ligne chiffrée ne portait qu'un fragment illisible.
+     Qté/prix/montant déjà corrects (confirmé par l'autocontrôle DE CETTE
+     SEULE PAGE : 150,00€ affiché = 150,00€ extrait).
+- **2 corrections manuelles motivées sur le fichier multi-fournisseur**
+  (page 2, COMINTER M3.10.177) :
+  1. `'CACA/4040B'` → `'CACAI4040B'` : le Suivi a DEUX références au même
+     cœur numérique ("4040"), ambiguïté non résolue automatiquement ;
+     la désignation Suivi ("Angle Intérieur pour 40/40") correspond
+     EXACTEMENT à la désignation BL ("AngleInterieurpour40/40") pour
+     CETTE ligne — "/" est probablement un "I" mal lu par l'OCR.
+  2. 2e ligne du même BL jamais extraite DU TOUT (référence coupée en 2
+     cellules OCR "CAL" + "040B", ne formant ni "CACAI4040B" ni
+     "CACAP4040B" reconnaissable) — ajoutée manuellement :
+     `'CACAP4040B'` qté=1, prix_net=1,68€ (30% de remise sur 2,40€,
+     cohérent avec le document), montant=1,68€ — correspond exactement
+     à `qte_cmd=1` au Suivi pour cette référence.
+  (page 8, 109 DISTRIBUTION M4.265) : `'243454'` → `'6133461'` — la
+  désignation BL contient LITTÉRALEMENT "(6133461)" en suffixe
+  ("JONCTIONDEPLAFONDCOFRALIS(6133461)"), qui est la vraie référence
+  catalogue du Suivi ; qté=4 correspond exactement à `qte_cmd=4`.
+- **Panne réseau transitoire pendant la session, résolue** : le lecteur
+  X: (partage réseau) est devenu temporairement inaccessible (VPN coupé
+  côté acheteur) — tous les outils shell (Bash ET l'exécution Python)
+  ont échoué silencieusement (code de sortie 1, aucune sortie) pendant
+  cette fenêtre. Diagnostiqué via PowerShell (qui gardait un accès
+  fonctionnel), confirmé par l'acheteur (VPN reconnecté), le shell Bash
+  s'est rétabli seul sans action corrective supplémentaire. Aucune
+  donnée perdue ni corrompue (les écritures en cours n'avaient pas
+  encore démarré au moment de la coupure).
+- **2 fournisseurs restent introuvables au Suivi malgré vérification**
+  (`M2.23.057`/109D, ref "300007" vs Suivi "73934" — aucun rapport
+  évident ; `M3.23.040`/RAVATE, ref "089281" vs Suivi "EUR52301" —
+  idem) — laissés en l'état dans "à vérifier", pas de règle inventée
+  sans preuve suffisante.
 
 **Seules 3 colonnes de la feuille "Commandes" sont de vraies données
 saisies** (vérifié cellule par cellule sur le vrai classeur, pas supposé) :
@@ -345,9 +1584,15 @@ métier vivantes, jamais du dépôt) :
 ```
 a_traiter/
   BL/                        dépôt quotidien des BL PDF, par l'acheteur
+    Traités/                   BL numérisés déjà rapprochés (déplacés automatiquement
+                                par le bouton GUI), renommés "<date> - <fournisseur> -
+                                <n° BL> - BC <n° commande>" — l'acheteur y agrafe le
+                                BdC et le BL papier correspondants puis archive dans
+                                les classeurs physiques (dossier créé par l'acheteur
+                                elle-même, demande explicite session R2 suite ;
+                                remplace le "rapproches/<fournisseur>/<AAAA-MM>/"
+                                imaginé au cadrage R1, jamais implémenté tel quel)
   Factures/                  dépôt hebdomadaire des factures PDF
-rapproches/
-  <fournisseur>/<AAAA-MM>/    archive des PDF traités, renommés "<date> - <fournisseur> - <n° doc> - BC <n°>" (R2+, pas encore implémenté)
 rapports/                    rapports de rapprochement générés (R2+)
 backups/                     sauvegardes horodatées du Suivi commandes avant chaque écriture (rotation 30 jours)
 ```
@@ -404,6 +1649,620 @@ demande de l'acheteur) :
   du BL ne matche donc pas toujours une ligne "propre" du Suivi — cas à
   gérer en R2, pas encore résolu.
 
+**Session suivante — suite du gros lot du jour (Cominter page_9/page_7,
+RAVATE page_0), nouveau fournisseur BL STAND 64, CRECHE OCEAN identifié
+(fait) :**
+
+- **Cominter page_9 (commande M4.267, écrite à la main sur le BdC par
+  l'acheteur)** : sur les 3 lignes du BL, 2 (**L30316, L30326**) ne
+  matchent RIEN dans les 3 lignes Suivi de cette commande — confirmé par
+  l'acheteur qu'il s'agit d'une **vraie substitution** ("remplacé par des
+  moulures équivalentes en Planet Wattohm, ça peut arriver"), même famille
+  que le cas GOUJON8X70/75 déjà documenté : **jamais rapproché
+  automatiquement**, laissées telles quelles dans "à vérifier". La 3e
+  ligne (L86101L -> 086101L, sur-livraison 10 pour 5 commandées) reste en
+  attente de confirmation de l'acheteur, pas encore tranchée.
+- **Cominter page_7 (OBL108464, commande 130.036 confirmée par
+  l'acheteur)** : cas non résolu, laissé en l'état. Les 2 lignes qui
+  matchent une référence Suivi (L600335, L600323) visent des lignes
+  **déjà intégralement soldées** (qté livrée = qté commandée), à un tarif
+  DIFFÉRENT de celui du BL (2,25€/1,70€ au Suivi vs 2,05€/1,62€ sur le
+  BL) — sur-livraison réelle ou BL correspondant à une commande déjà
+  soldée, pas tranché. 2 autres lignes (L600001, L600002, interrupteurs
+  va-et-vient) ne correspondent à aucune des 3 lignes Suivi de 130.036.
+  Rien écrit, fichier resté dans "à vérifier".
+- **RAVATE page_0 (commande 115.217) résolu — cause identifiée : PAS un
+  problème de netteté/résolution mais une impression EXTRÊMEMENT pâle**
+  (encre à peine plus foncée que le blanc, RGB ~180-225 sur 255) sur tout
+  le corps du document — seul l'en-tête (encre noire normale, préimprimé)
+  ressortait à l'OCR brut ou avec un simple réglage de contraste
+  (`ImageEnhance.Contrast`/`ImageOps.autocontrast` classiques, testés à 3
+  DPI, toujours 0 ligne). Résolu en deux temps : (1) lu VISUELLEMENT sur
+  le rendu haute résolution (1 ligne : Référence fournisseur "V432552",
+  "SACHET VISSERIE 3P NSX630 INV D", 1 BTE, 15,00€ net — confirmé par le
+  Total HT affiché = 15,00€ = 1×15,00 exact, et par le Suivi qui n'a
+  qu'une ligne pour cette commande, "LV432552", même cœur numérique) ;
+  (2) confirmé a posteriori par un **étirement de niveaux ciblé sur le
+  seul canal VERT** de l'image (le texte pâle est légèrement magenta/rose,
+  donc fait chuter G plus que R/B — `(G - lo) / (hi - lo) * 255` avec
+  lo≈150-200, hi≈240-250) qui a permis à RapidOCR de relire les MÊMES
+  valeurs automatiquement (V432552, 24.68, 1.000, 15.00). Écrite et
+  archivée dans `Traités/115.217/`. **Décision : ne PAS généraliser ce
+  traitement dans `moteur/ocr.py`** — un seul document affecté à ce jour
+  sur des dizaines traités cette session, conforme à la règle d'or (un
+  seul exemple ne fait pas une règle) ; à revoir si un 2e cas de ce genre
+  se présente.
+- **CRECHE OCEAN.pdf identifié — PAS un raté OCR, un document hors
+  périmètre** : ce n'est pas un BL d'un des grossistes électriques
+  couverts par ce projet, mais un bon de livraison de **RSW.net**
+  (fourniture d'un "optimiseur d'énergie" — coffret de gestion de
+  puissance/supervision — pour le chantier "Crèche les Explorateurs").
+  Signalé à l'acheteur pour savoir si ce type de document a sa place dans
+  `a_traiter/BL/` ou doit être classé ailleurs — pas encore tranché,
+  laissé tel quel dans "à vérifier" en attendant.
+- **Nouveau fournisseur BL : STAND 64** (`moteur/fournisseurs/stand64.py`,
+  section GABARIT BL ajoutée à la suite du parser devis existant) — 2
+  vrais BL disponibles (`tests/fixtures/bl_stand64_1.pdf`/`_2.pdf`,
+  `tests/test_parsers_bl_stand64.py`, 3 tests). Scan net (pas de texte PDF
+  natif malgré l'apparence — vérifié, `page.get_text()` vide), mais OCR
+  très fiable dessus. Tableau simple, colonnes DANS L'ORDRE (contrairement
+  au devis de ce même fournisseur, qui les a en ordre inversé) :
+  Référence article | Description | Qté | P.U | Rem% | P.U Net | Eco-part
+  | Total HT | TVA — ancre fiable : le code TVA (C0..C9) en fin de ligne,
+  éco-part toujours vide sur les 2 pièces vues (aucune cellule imprimée
+  dans ce cas, pas "0,00"). 2 bugs réels corrigés en le construisant,
+  même famille que des bugs déjà rencontrés chez d'autres fournisseurs :
+  (1) l'en-tête "Référence article" ressort de l'OCR AVEC son accent
+  (`unicodedata.normalize` + `encode("ascii","ignore")`, même repli que
+  109 Distribution) ; (2) le motif de commande (`BC N°M2.23.058`) utilisait
+  un joker `.{0,2}` gourmand entre "N" et la référence pour absorber le
+  symbole "°" mal lu — gourmand, il avalait AUSSI le "M" du préfixe
+  chantier ("M2.23.058" -> "2.23.058" capturé, préfixe perdu) ; corrigé en
+  `[^A-Z0-9]{0,2}` (exclut explicitement lettres/chiffres, ne peut plus
+  avaler le préfixe utile).
+- **Référence "avec éclairage" scindée en 2 pièces cette année chez STAND
+  64, confirmé par l'acheteur** ("unique les années précédentes") : les
+  ventilateurs vendus avec kit lumière intégré avaient une référence
+  UNIQUE les années précédentes (ex. `WESTI-78017`, `WESTI-73046`, encore
+  la référence utilisée au Suivi) — cette année, STAND 64 les livre en 2
+  lignes séparées sur le BL, même quantité chacune : le ventilateur nu
+  (`WESTI-73044`/`WESTI-73045`) + un kit lumière à part
+  (`WESTI-COMET-KITLUM-B`/`-N`, 7,00€). Repéré AVANT confirmation par la
+  cohérence : sur les 2 vrais BL, une réf déjà écrite (le ventilateur nu
+  "sans éclairage") apparaissait EN DOUBLE avec une 2e quantité inexpliquée,
+  toujours accompagnée d'un kit lumière de même quantité. Une fois
+  confirmé, fusionné manuellement (prix net = P.U Net ventilateur + P.U Net
+  kit, ex. 91,00 + 7,00 = 98,00€) sous l'ancienne référence Suivi pour
+  écriture — pas de règle générale codée (seulement 2 couples
+  référence-nue/référence-bundle connus à ce jour, aucun motif évident
+  pour en déduire d'autres sans un 3e exemple, règle d'or). Les 2 BL
+  entièrement résolus et archivés (`Traités/M2.23.058/`, `Traités/M4.270/`).
+
+**Session suivante — page_9/page_7 tranchés par l'acheteur, BUG RÉEL de
+fond dans `apparier()` trouvé et corrigé, lot STAND 64 traité en
+profondeur (3 nouveaux bugs réels), fait :**
+
+- **page_9 (M4.267) et page_7 (130.036) expliqués par l'acheteur** :
+  "typique des commandes récupérées par les conducs chez les
+  fournisseurs" — quand le mode de livraison est "à récupérer par nos
+  soins", le chargé de travaux sur place peut ajouter un article
+  (page_7 : un interrupteur double va-et-vient non prévu) ou demander
+  "une boîte complète" plutôt que la quantité exacte commandée (page_9 :
+  10 unités livrées pour 5 commandées, l'acheteur a corrigé qte_cmd à 10
+  dans le Suivi elle-même en conséquence). page_9 : la ligne 086101L
+  (qte_cmd désormais 10) réapparariée et écrite (SUR, 10 unités) ; les 2
+  lignes substituées (L30316/L30326, moulures Planet Wattohm, voir
+  session précédente) restent définitivement hors rapprochement
+  automatique — fichier laissé dans "à vérifier" (même principe que le
+  cas SY00ZU51 déjà documenté : une substitution permanente ne "se
+  résout" jamais toute seule). page_7 : l'acheteur a saisi elle-même
+  toutes les valeurs dans le Suivi et a explicitement demandé l'archivage
+  ("on peut archiver") — fait, sans réécriture (ses valeurs faisaient déjà
+  foi).
+- **BUG RÉEL DE FOND corrigé dans `apparier()`** (`moteur/rapprochement/
+  matching.py`), trouvé en traitant page_7 : deux lignes RÉELLEMENT
+  différentes du même BL ("L600001", interrupteur va-et-vient SIMPLE, et
+  "L600002", va-et-vient DOUBLE — prix différents, désignations
+  différentes) se disputaient la MÊME ligne Suivi ("600002", le seul
+  article que l'acheteur avait ajouté). En UNE seule passe (l'ancien
+  comportement), "L600001" était traité EN PREMIER (ordre du document),
+  ne trouvait aucune correspondance EXACTE mais un repli à 1 caractère
+  d'écart vers "600002" — et consommait cette ligne Suivi par repli AVANT
+  que "L600002", qui la matche pourtant EXACTEMENT, n'ait sa chance :
+  celui-ci ressortait "inconnu" à tort, une correspondance exacte
+  existante étant purement et simplement perdue à cause de l'ordre
+  d'apparition des lignes sur le document. Corrigé par une **vraie
+  refonte en DEUX PASSES** : la 1re passe résout TOUTES les
+  correspondances EXACTES de TOUTES les lignes du BL AVANT qu'aucun repli
+  ne soit tenté (un repli approximatif ne peut plus jamais voler une
+  ligne Suivi à une autre ligne de BL qui la matche exactement, quel que
+  soit l'ordre) ; la 2e passe traite ce qui reste (ambiguïtés, replis)
+  avec les lignes Suivi déjà réduites en conséquence. Comportement
+  externe de `apparier()` inchangé pour tous les cas déjà couverts (30
+  tests existants toujours verts) — testé spécifiquement
+  (`test_apparier_exact_nest_jamais_vole_par_un_repli_dune_autre_ligne`).
+  **Portée générale** : ce bug pouvait affecter N'IMPORTE QUEL fournisseur
+  dès que 2 références réellement différentes d'un même BL se trouvaient
+  à 1 caractère d'écart l'une de l'autre ET qu'une seule des deux existait
+  dans le Suivi — pas un cas isolé à Cominter/109 Distribution.
+- **Nouveau lot de 6 BL STAND 64 déposé par l'acheteur** ("afin que nous
+  puissions établir ce parser", pour durcir le parser construit la
+  session précédente sur seulement 2 pièces) — 3 nouveaux bugs réels
+  trouvés et corrigés dans `moteur/fournisseurs/stand64.py` :
+  1. **Éco-part RENSEIGNÉE** (commande M2.5.126, 2,88€ — les 2 pièces
+     précédentes l'avaient toujours vide) : ajoute UNE cellule numérique
+     de plus avant le Total HT, décalant tout le compte fixe de 6
+     cellules (la Qté "18,00" happée dans la désignation, le P.U "95,00"
+     pris à tort pour la Qté). Corrigé par une résolution à DEUX
+     HYPOTHÈSES (6 cellules sans éco-part, 7 avec), chacune validée par
+     cohérence arithmétique (qté × P.U Net ≈ Total HT affiché) — même
+     principe que les replis positionnels déjà utilisés chez 109
+     Distribution/Electric Plus, jamais un compte de cellules fixe
+     supposé sans vérification.
+  2. **Coche/checkmark imprimée collée à la Qté**, lue "V" par l'OCR
+     (commande 131.170 : "40,00V" au lieu de "40,00", le "V" ressemblant
+     au symbole ✓ manuscrit) : sans nettoyage, `to_float()` levait une
+     exception et TOUTE la ligne disparaissait silencieusement (0 ligne
+     pour un Total HT de 580,00€ affiché). Une lettre isolée en fin de
+     cellule numérique est désormais retirée avant conversion
+     (`_nombre_bl_stand64()`).
+  3. **1re ligne de désignation totalement absente de l'OCR** (même
+     commande M2.5.126 que le bug éco-part, cumul des deux problèmes sur
+     le même document) : seules les lignes de désignation SUIVANTES
+     ("BLANC/BLANC+TELECOMMANDE", "PRIX NETS", "MATERIEL DISPONIBLE CE
+     JOUR") ont été détectées, la ligne chiffrée elle-même se retrouvant
+     sans aucune cellule de désignation. Comme pour Coredime/Ravate
+     (désignation qui déborde sur une 2e ligne), mais ici en LOOK-AHEAD :
+     `parse_bl_stand64()` raccorde désormais les lignes suivantes tant
+     qu'elles ne sont PAS elles-mêmes reconnues comme une ligne chiffrée
+     valide, dès que la désignation d'une ligne chiffrée ressort vide.
+     Qté/prix restent exploitables même sans désignation (elle ne sert
+     pas au rapprochement) — n'est donc plus jamais un motif de rejet de
+     la ligne à elle seule.
+  Fixtures réelles ajoutées (`tests/fixtures/bl_stand64_3_ecopart_
+  renseigne_desig_manquante.pdf`, `bl_stand64_4_coche_collee_qte.pdf`),
+  testé (`test_parse_bl_stand64_3_ecopart_renseigne_et_designation_
+  manquante`, `test_parse_bl_stand64_4_coche_collee_a_la_quantite`).
+- **Recette réelle sur les 6 BL du lot** : 1 déjà à jour (M4.262), 2
+  doublons de scan des BL M2.23.058/M4.270 déjà traités la session
+  précédente (mêmes n° de BL, mêmes lignes — rien de nouveau, déplacés
+  vers `À vérifier/Doublons confirmés (à supprimer)/`, jamais supprimés
+  directement), 3 nouvelles commandes (128.007, M2.5.126, 131.170)
+  entièrement résolues et archivées avec leur BC (4 lignes SUR écrites au
+  total).
+
+**Session suivante — lot de 11 BL du jour traité en une passe via le
+pipeline officiel (fait)** : lecture seule (`rapprocher_dossier`) puis
+écriture (`appliquer_et_archiver`) directement, sans script ad hoc — le
+lot le plus propre à ce jour (5 fournisseurs : Coredime, Cominter,
+Electric Plus, Stand 64 ; 12 BL sur 11 fichiers, un fichier Cominter en
+contenant 2). 39 lignes sûres écrites, 11/12 BL archivés directement, 2
+"déjà à jour" identifiés comme doublons de scan des BL Stand 64 de la
+session précédente. Un seul point bloquant :
+
+- **Commande M3.10.181 (Electric Plus), référence BAS217562 introuvable
+  au Suivi** : la ligne Suivi portait "AGI864001" (même désignation
+  quasi identique — "TIGE FILETÉE M6" —, même quantité, même tarif). **Ce
+  n'est PAS un bug de l'outil, confirmé par l'acheteur après coup** :
+  changement de marque fournisseur pour un article générique (tige
+  filetée DIN976), deux références de fabricants différents pour le même
+  produit — aucune règle de rapprochement automatique ne peut relier deux
+  références **textuellement et numériquement sans rapport** juste parce
+  que désignation/qté/tarif concordent (risquerait de fusionner à tort
+  deux articles réellement différents qui partagent ces caractéristiques
+  par coïncidence) — reste et restera un cas à confirmer par l'acheteur,
+  comme les autres substitutions déjà documentées (GOUJON8X70/75, Planet
+  Wattohm, GMR→Cominter). Elle a corrigé la référence dans le Suivi
+  elle-même ("Basor livré") ; la ligne a ensuite matché normalement et le
+  BL a été archivé.
+
+**Session suivante — lot de 15 BL du jour, flux complet de bout en bout,
+1er cas réel "Reste à livrer" Coredime, gap repli préfixe marque côté BL
+(fait) :**
+
+- **1er cas réel de "Reste à livrer" Coredime sur PLUSIEURS PAGES**
+  (commande M3.23.043, prévu "à valider dès qu'un cas réel se présente" —
+  voir Points fragiles) — **BUG RÉEL CORRIGÉ** : `reste_a_livrer` était un
+  drapeau global à TOUT le document (`moteur/fournisseurs/coredime.py`) ;
+  activé en page 1, il restait actif pour la page 2 aussi, excluant à
+  tort des lignes pourtant livrées — la structure réelle observée est que
+  Coredime RÉIMPRIME en page 2, avec confirmation de livraison ("<qté> x
+  1 unite"), les mêmes articles que la page 1 avait listés "reste à
+  livrer". Réinitialisé désormais à chaque page. **2e bug réel corrigé**
+  sur le même document : "10" (LEG031490) lu "lo" par l'OCR (le "1" de
+  tête collé au "0" suivant, pas un "l" isolé comme le cas déjà connu) —
+  remplacement élargi à un "l" en tout DÉBUT de mot suivi d'un chiffre ou
+  d'un "o"/"O". Fixture réelle ajoutée
+  (`tests/fixtures/bl_coredime_7_reste_a_livrer_multi_page.pdf`), testé
+  (`test_parse_bl_coredime_7_reste_a_livrer_multi_page`). **Limite
+  connue, non corrigée en code** (corrigée en correction manuelle
+  ponctuelle cette session) : sur ce même document, la 1re ligne
+  LEG411651 (qté 4, page 1) a sa confirmation "4 x 1 unite" AVANT la
+  ligne référence plutôt qu'après — pattern look-behind non couvert par
+  le raccord actuel (qui ne regarde qu'en avant) ; un seul exemple, pas
+  de règle générale codée.
+- **BUG RÉEL corrigé dans `apparier()` mis en lumière une 2e fois** (pas
+  un nouveau bug, juste une nouvelle façon de le déclencher, déjà
+  couverte par le fix session précédente) : ajouter une correction
+  manuelle en DEUX LIGNES séparées pour la MÊME référence (au lieu de
+  fusionner en une seule ligne cumulée) fait qu'une seule des deux
+  obtient la correspondance exacte, l'autre ressort "inconnu" — leçon
+  retenue pour toute correction manuelle future portant sur une référence
+  déjà présente ailleurs dans le même BL : fusionner les quantités en UNE
+  ligne, ne jamais ajouter une 2e ligne séparée avec la même référence.
+- **RAVATE M3.23.044.jpg : 2 corrections manuelles motivées** (photo
+  angle/qualité moyenne, un seul exemple, pas de règle générale codée) :
+  (1) la cellule P.U. Brut a totalement disparu de l'OCR sur la ligne
+  70438, décalant tout le calcul positionnel (repli 3-cellules
+  déclenché à tort, qté calculée à 0,6399 au lieu de 1,0) — corrigé
+  manuellement (qté=1,0, prix_net=7,02, montant=7,02) ; (2) la ligne
+  600335 (DOOXIE PC SURFACE + TERRE BLC) a totalement disparu de l'OCR,
+  RÉFÉRENCE COMPRISE (aucune trace dans le texte OCR) — ajoutée
+  manuellement (qté=30, prix_net=2,20, montant=66,00). Les deux corrigées
+  avec un signal fort : la somme des 4 montants (7,02+86,00+66,00+112,50
+  = 271,52€) retombe EXACTEMENT sur le Total HT affiché.
+- **Nouveau gap identifié côté rapprochement BL : aucun repli "préfixe
+  marque"** (contrairement à `moteur/referentiel.py`, qui gère déjà
+  LEG/EBE/PW/BT côté devis) — 2 cas réels rencontrés ce lot, tous deux
+  corrigés manuellement (qté BL = qté commandée EXACTEMENT + désignation
+  quasi identique, signal fort à chaque fois) :
+  - Electric Plus 139.115 : BL "SCHXALK178E" vs Suivi "XALK178E" (préfixe
+    "SCH", vraisemblablement Schneider).
+  - 109 Distribution 139.111 : BL "H07VR16VJTECC" vs Suivi "H07VR16VJ T"
+    (écart cette fois en SUFFIXE, pas en préfixe — probablement une
+    troncature historique côté Suivi plutôt qu'un préfixe marque).
+  Seulement 2 exemples, préfixes/troncatures différents à chaque fois —
+  pas assez pour coder un repli général fiable (règle d'or) ; à revoir
+  si le même préfixe (ex. "SCH") revient sur un 3e cas.
+- **Conflit réel signalé, laissé à l'acheteur** : `BL M3.23.045.pdf`
+  (CORB033860.3, LEG411651 qté 4) et `BL M3.23.045 1.pdf` (CORB033860.1,
+  LEG411651 qté 5) sont deux BONS DE LIVRAISON RÉELLEMENT DIFFÉRENTS
+  (numéros de document distincts, `.1` et `.3`) visant la même ligne
+  Suivi — le désamorçage anti-doublon a bien réagi (une seule proposée
+  "sûre" à la fois), mais impossible de savoir sans elle si c'est une
+  vraie livraison fractionnée (4+5=9, à comparer à la qté commandée) ou
+  une erreur — aucune des deux lignes LEG411651 écrite automatiquement.
+- **Document hors périmètre détecté et exclu** :
+  `doc07194020260821104206.pdf` est un **"ACCUSÉ RÉCEPTION DE COMMANDE"**
+  Coredime (pas un bon de livraison — aucun prix, aucune quantité livrée
+  confirmée, n° de commande manuscrit "139.114" jamais imprimé) — retiré
+  du lot traité, signalé à l'acheteur plutôt que forcé dans le pipeline
+  BL.
+- **Recette finale sur les 15 fichiers** : 26 lignes sûres écrites au
+  total, 11 fichiers entièrement résolus et archivés avec leur BC. Restent
+  en attente (aucune écriture automatique) : `BL 139.111.pdf` (référence
+  59210 introuvable + sur-livraison SYT320G5 50/40 à confirmer),
+  `doc07194120260821104221.pdf` (2 références 227060125/227060122
+  introuvables), le duo `M3.23.045`/`M3.23.045 1` (conflit ci-dessus), et
+  `doc07194020260821104206.pdf` (hors périmètre).
+
+**Session suivante — base des équivalences pour le rapprochement des BL,
+branchement sur le référentiel articles déjà existant côté devis (fait)** :
+demande explicite de l'acheteur pendant la recette du lot précédent, après
+avoir dû corriger à la main plusieurs substitutions fournisseur (59210
+pour CFF1BIS, 092897 pour 411651) : "il faut créer une base des
+équivalences, ce genre de cas va se présenter très souvent."
+
+- **Décision d'architecture : réutiliser `moteur/referentiel.py` tel
+  quel**, plutôt que construire un second système en parallèle — il
+  résout déjà EXACTEMENT le même problème côté devis (alias
+  confirmé/proposé/nouveau, fichier Excel aller-retour). Le rapprochement
+  des BL (`moteur/rapprochement/matching.py`) consulte désormais ce MÊME
+  référentiel (`moteur/articles.db` partagé — un alias confirmé par
+  N'IMPORTE LEQUEL des deux flux, devis ou BL, vaut pour l'autre).
+- **`_memes_references()`** (remplace l'ancien usage direct de `_cle()`
+  dans `apparier()`) : `_cle(a) == _cle(b)` (comme avant) **OU**, si un
+  référentiel est fourni, les deux références ont un alias CONFIRMÉ
+  (statut "connu") vers la MÊME clé. **Un OR, jamais un remplacement** —
+  point de conception important, voir le bug ci-dessous.
+- **BUG RÉEL CORRIGÉ pendant la construction** (recette immédiate sur le
+  vrai Suivi, commande 139.112, référence "LEG069831L" vs "069831L") :
+  une 1re version comparait EXCLUSIVEMENT la clé référentiel dès qu'un
+  alias "connu" existait, au lieu de l'ajouter en plus de la comparaison
+  par cœur numérique existante. Or un alias "connu" peut être un simple
+  AUTO-alias d'une référence vers ELLE-MÊME (la BDD achats retient parfois
+  la forme préfixée "LEG069831L" comme Clé_Réf telle quelle, sans la
+  réduire à "069831L") — les deux références ressortaient alors "connu"
+  mais vers des clés DIFFÉRENTES, un résultat STRICTEMENT PIRE que la
+  comparaison par cœur numérique déjà en place (qui, elle, les retombait
+  bien toutes les deux sur "69831"). Une ligne déjà correctement écrite
+  lors d'une session précédente s'est ainsi retrouvée "inconnu" au
+  passage suivant. Corrigé par le OR ci-dessus — le référentiel ne peut
+  plus jamais FAIRE PERDRE une correspondance déjà trouvée.
+- **`_repli_referentiel()`** : 3e repli (après `_repli_reference_proche()`)
+  pour une correspondance simplement PROPOSÉE (candidat structurel
+  plausible via préfixe marque/cœur numérique, pas encore confirmée) —
+  toujours "à confirmer", jamais automatique.
+- **`referentiel/equivalences_bl.csv`** (nouveau, vide par défaut sauf 2
+  entrées réelles ci-dessous) : pour le cas qui a motivé la demande
+  (substitution SANS AUCUN rapport textuel ni numérique entre les deux
+  références — "59210" vs "CFF1BIS" ne partagent RIEN, donc le mécanisme
+  de proposition automatique de `Referentiel.resoudre()` — basé sur
+  préfixe marque/cœur numérique — ne peut STRUCTURELLEMENT PAS le
+  deviner tout seul, contrairement à un simple écart de préfixe). Nouvelle
+  méthode `Referentiel.importer_equivalences_bl()` : format
+  `Reference_1;Reference_2;Note`, les deux références aliasées l'une vers
+  l'autre avec origine='manuel', statut "connu" dès l'import — aucune
+  proposition préalable nécessaire, contrairement à A_confirmer_BL.xlsx.
+  **Reference_1 doit être la référence déjà connue de la BDD achats
+  quand l'une des deux l'est** (pas l'inverse), pour ne pas faire dériver
+  le groupement des lignes de DEVIS existantes vers une clé synthétique —
+  bug trouvé et corrigé en même temps que la construction (voir README du
+  fichier). 2 entrées réelles ajoutées : `CFF1BIS;59210` (109 Distribution,
+  commande 139.111) et `411651;092897` (Coredime, commande M3.23.045).
+- **`referentiel/A_confirmer_BL.xlsx`** (nouveau, fichier À PART de
+  `A_confirmer.xlsx` côté devis — chacun régénère SA PROPRE file d'attente
+  à chaque exécution, les mélanger écraserait les propositions de l'autre
+  flux). `Referentiel.ecrire_a_confirmer()` accepte désormais un
+  `nom_fichier` optionnel pour ça (défaut inchangé : "A_confirmer.xlsx").
+- **BUG RÉEL CORRIGÉ (latent, révélé par cette intégration)** :
+  `Referentiel.importer_bdd()` faisait un simple `INSERT` (pas
+  `INSERT OR REPLACE`) pour re-peupler les alias d'origine 'import' —
+  plantait (UNIQUE constraint) si une référence de la BDD avait été
+  redirigée entre-temps par une équivalence BL manuelle (le
+  `DELETE FROM alias WHERE origine='import'` ne touche pas les lignes
+  'manuel'). Passé en `INSERT OR REPLACE` — un ré-import de la BDD reprend
+  proprement sa valeur d'origine, immédiatement re-surchargée par
+  `importer_equivalences_bl()` juste après dans `rapprocher_dossier()`
+  (l'ordre des deux appels est important, toujours BDD puis équivalences).
+- **`rapprocher_dossier()`** (pipeline_bl.py) ouvre désormais son propre
+  `Referentiel` (moteur/), importe la BDD achats + equivalences_bl.csv +
+  les confirmations en attente de A_confirmer_BL.xlsx, le passe à chaque
+  `apparier()` (avec `fournisseur`/`devis` pour que les propositions dans
+  A_confirmer_BL.xlsx indiquent de quel BL elles viennent), régénère
+  A_confirmer_BL.xlsx en fin d'exécution. Coût mesuré : ~0,1-0,2s de plus
+  par exécution (réimport idempotent de la BDD, déjà éprouvé côté devis).
+- **Suggestion de l'acheteur, notée pour une prochaine session, PAS
+  construite maintenant** : gérer aussi les écarts d'UNITÉ de
+  conditionnement (ex. seau de 1000 vs boîte de 200) — un problème
+  différent (facteur de conversion, pas une équivalence de référence),
+  qui prendrait naturellement place dans le même référentiel une fois
+  l'équivalence de référence éprouvée en usage réel.
+- Tests : `tests/test_referentiel.py` (import/idempotence
+  d'equivalences_bl.csv), `tests/test_rapprochement_matching.py` (alias
+  confirmé traité comme exact, comportement par défaut sans référentiel
+  inchangé, proposition non confirmée reste "à confirmer"). Suite
+  complète (229+ tests) verte après ces changements.
+- **Recette réelle du branchement, immédiatement après construction** :
+  d'abord confirmations page_9/page_7 Cominter tranchées par l'acheteur
+  ("typique des commandes récupérées par les conducs" — substitution
+  définitive Planet Wattohm sur page_9, ajout d'article par le chargé de
+  travaux sur page_7, ce dernier saisi et archivé directement par
+  l'acheteur elle-même) ; puis un lot de 15 BL traité de bout en bout, qui
+  a lui-même servi de première vraie mise à l'épreuve du référentiel
+  (139.111 CFF1BIS/59210, 139.112 227060122/227060125 — remplacements
+  fournisseur confirmés par l'acheteur, tarif/désignation identiques,
+  aucun souci réel malgré mon inquiétude initiale sur une "sur-livraison"
+  qui n'en était pas une). **2 corrections de ma part suite à des erreurs
+  de lecture, pas des bugs du moteur** : qte_cmd 139.111 réellement 50 (le
+  fournisseur vend par couronne de 50, l'acheteur a corrigé le Suivi elle-
+  même) ; 227060125 réellement qté 1 (pas 12 — un artefact OCR "1" + début
+  de "39%" que j'avais mal retranscrit à la main, corrigé après une photo
+  envoyée par l'acheteur). 26 lignes sûres écrites au total sur ce lot,
+  11/15 BL archivés directement.
+
+## Session suivante — Code article corrompu OCR (Coredime), 2e fichier
+multi-fournisseur/multi-commande traité manuellement (fait)
+
+Suite directe de la session précédente ("Je t'ai mis les BL du jour dont
+un avec multi-scans pour compliquer, allez on traite de bout en bout !").
+
+- **BUG RÉEL CORRIGÉ — Coredime, en-tête de tableau "Code article" lu
+  "Code aricle" par l'OCR** (le "T" disparu) : `doc07205120260824144931.pdf`
+  (commande 142.041, article LBCLASTD02 qté 10, un BL par ailleurs simple
+  et propre) ressortait à 0 ligne extraite car `MOTIF_ENTETE_TABLEAU_BL_
+  COREDIME` (`CODEARTICLE`, strict) ne matchait jamais. Diagnostiqué via
+  un dump OCR brut (non filtré par zone de tableau) qui a montré l'en-tête
+  corrompu telle quelle. Fix : motif élargi à `CODEART?ICLE` (le "T"
+  optionnel). Fixture réelle ajoutée
+  (`tests/fixtures/bl_coredime_8_entete_code_aricle.pdf`), testé
+  (`test_parse_bl_coredime_8_entete_code_aricle`).
+- **2e occurrence réelle du cas "un même fichier PDF mélange PLUSIEURS
+  FOURNISSEURS ET plusieurs commandes, dont certaines déjà traitées"**
+  (1re occurrence documentée plus haut, session précédente,
+  `doc07178620260819170752.pdf`) : `doc07205620260824145119.pdf` (7 pages)
+  contenait 3 pages VRAIMENT nouvelles (p0 : 109 Distribution, BL 39805,
+  commande **M3.10.183**, LEG031456 qté 11 ; p1 : Coredime, BL CORB034089,
+  commande **126.048** — écrite "BC126048" sur le papier, format Suivi réel
+  trouvé par recherche large sur la référence HAGGE326EN plutôt que deviné
+  ; p2 : 109 Distribution, BL 740135, commande **126.051**, 52302 qté 20 +
+  70003 qté 10) ET 4 pages DOUBLONS de scan de BL déjà archivés plus tôt
+  dans la même session (142.039, M3.14.364, M3.23.043 ×2 — reste-à-livrer
+  et confirmation). Comme la 1re fois, `lire_bl()` ne sait détecter qu'UN
+  SEUL fournisseur pour tout le fichier — traité manuellement (script
+  scratchpad, pas dans le code du projet) : OCR du fichier entier une
+  fois, `parse_bl_109()`/`parse_bl_coredime()` appelés page par page sur
+  des tranches d'une seule page, rapprochement + écriture des 4 lignes
+  sûres en un seul lot, puis extraction PAGE PAR PAGE via
+  `_extraire_bl_vers()` vers `Traités/<commande>/` (pages neuves,
+  archivage BC compris) ou vers `À vérifier/Doublons confirmés (à
+  supprimer)/` (pages doublons, sans réécriture Suivi — contenu déjà
+  correctement enregistré). Les 7 pages ont été intégralement traitées et
+  rangées, sauvegarde Suivi horodatée avant écriture.
+- Suite complète verte après le fix Code aricle (8/8 tests Coredime BL
+  confirmés isolément avant la passe complète).
+
+## Session suivante — détection de fournisseur PAR PAGE (fait), demande
+explicite de l'acheteur : "il est extrêmement fastidieux de scanner page
+par page, beaucoup plus simple d'envoyer en masse"
+
+Le cas "un même fichier PDF mélange plusieurs fournisseurs" (rencontré 2
+fois, traité à la main les deux fois — voir sections précédentes) est
+désormais géré AUTOMATIQUEMENT par `moteur/rapprochement/lecture_bl.py`.
+
+- **`lire_bl()` détecte désormais le fournisseur PAGE PAR PAGE**, pas
+  seulement sur le texte entier du document. Si toutes les pages
+  s'accordent (ou qu'une seule est reconnue) — le cas de très loin le plus
+  courant — le comportement est STRICTEMENT celui d'avant : détection sur
+  le texte ENTIER, un seul appel au parser sur toutes les pages (pour ne
+  rien perdre d'un fournisseur qui ne se révèle que sur une page parmi
+  plusieurs, ex. une page de garde). Seulement si PLUSIEURS fournisseurs
+  DIFFÉRENTS ressortent, le fichier est découpé par groupes de pages
+  (`_parser_groupe_fournisseur()`), chaque groupe traité indépendamment —
+  un fournisseur peut réapparaître PLUS LOIN dans le fichier (pages non
+  contiguës, cas réel constaté : RAVATE p0, COMINTER p1/p2/p7/p9, 109
+  DISTRIBUTION p3/p6/p8...), le regroupement n'exige donc jamais la
+  contiguïté.
+- **Garde-fou critique : ne jamais fusionner à tort deux BL de commandes
+  différentes sous un même fournisseur.** Certains fournisseurs
+  (109 Distribution, Cominter Ouest, Electric Plus) répartissent déjà
+  eux-mêmes plusieurs BL sur plusieurs pages via leur propre numéro de BL
+  (`moteur.ocr.pages_par_identifiant`, `bl.pages` renseigné par le parser
+  lui-même) — pour ceux-là, un groupe à plusieurs pages est passé en UN
+  SEUL appel, le parser fait la répartition fine lui-même. D'autres
+  (Coredime, Ravate, Stand 64, DEM...) ne savent PAS répartir un BL sur
+  plusieurs pages : leur parser traite tout ce qu'on lui donne comme UN
+  SEUL document. Si un groupe de plusieurs pages du MÊME fournisseur non
+  contiguës (donc probablement 2 BL réellement différents, pas un même BL
+  sur 2 pages) est passé à un tel parser, `_parser_groupe_fournisseur()`
+  détecte que le résultat ne renseigne PAS `bl.pages` et REFAIT l'appel
+  PAGE PAR PAGE plutôt que de garder le résultat fusionné — mieux vaut
+  sous-découper (au pire une info incomplète, réexaminée à la main) que
+  mélanger deux commandes réellement différentes sous un seul BL (c'est
+  exactement le danger identifié sur le cas réel qui a motivé cette
+  fonctionnalité, `doc07205620260824145119.pdf` — COREDIME y apparaissait
+  sur 4 pages non contiguës, 3 commandes distinctes).
+- **`bl.pages` est TOUJOURS renseigné** pour tout BL produit par le chemin
+  multi-fournisseur (jamais `None`) — le laisser `None` ferait archiver
+  TOUT le fichier source (voir `moteur.rapprochement.pipeline_bl`,
+  `bl.pages if bl.pages is not None else list(range(pages_totales))`),
+  emportant à tort les pages des AUTRES fournisseurs.
+- **`lire_bl()` retourne désormais `(bons, raisons)`** — `raisons` est une
+  LISTE (peut contenir plusieurs anomalies, une par page/groupe en échec),
+  et peut être NON VIDE MÊME QUAND `bons` ne l'est pas (une partie du
+  fichier résolue, une autre page en anomalie, ex. fournisseur reconnu
+  mais sans parser BL, ou page illisible). Avant cette session, une seule
+  raison (ou aucune) pour tout le fichier ; `analyser_dossier()` adapté en
+  conséquence (boucle sur `raisons` au lieu d'un seul `if not bons`).
+- **BUG RÉEL ÉVITÉ pendant la construction, trouvé par relecture attentive
+  du code existant AVANT tout test** (pas signalé par l'acheteur — la
+  fonctionnalité vient d'être construite, pas encore déposée en usage réel
+  avec un cas qui l'aurait révélé) : `appliquer_et_archiver()`
+  (`pipeline_bl.py`) traitait TOUTE présence dans `rapport.anomalies_lecture`
+  comme un échec de lecture TOTAL du fichier (déplacement du fichier ENTIER
+  vers "à vérifier", AVANT même que ses pages résolues aient pu être
+  archivées individuellement — la 2e boucle trouvait alors le fichier déjà
+  déplacé et ne faisait plus rien). Avec la détection par page, un fichier
+  peut désormais avoir À LA FOIS une anomalie ET des BL résolus. Corrigé :
+  `fichiers_en_echec_total` exclut désormais tout fichier qui a AU MOINS un
+  `BonLivraison` (donc pas un échec total) — testé
+  (`test_appliquer_et_archiver_anomalie_de_lecture_necoupe_pas_les_bl_resolus_du_meme_fichier`).
+  **2e correctif lié** : le critère "fichier à un seul BL -> déplacer le
+  fichier ENTIER tel quel" (`len(gs) == 1`) ne suffit plus — un fichier
+  multi-fournisseur peut produire un SEUL `BonLivraison` dont `bl.pages` ne
+  couvre qu'UNE SEULE page sur plusieurs (les autres appartenant à un autre
+  fournisseur, ou illisibles). Le critère est désormais "un seul BL ET
+  (`bl.pages` est `None`, OU couvre la TOTALITÉ des pages du fichier)" —
+  sinon, comme pour un fichier multi-BL, découpage par
+  `_traiter_bl_multiples_du_fichier()` (qui gère déjà correctement le
+  cas `len(gs) == 1`, aucune logique nouvelle nécessaire là) — testé
+  (`test_appliquer_et_archiver_un_seul_bl_mais_pages_partielles_est_decoupe_pas_deplace_en_bloc`).
+- **Validé sur le VRAI fichier qui a motivé cette fonctionnalité**
+  (`doc07205620260824145119.pdf`, déjà traité à la main la session
+  précédente) : la nouvelle détection automatique reproduit EXACTEMENT le
+  même résultat que le traitement manuel — 7 BL, 3 fournisseurs (109
+  Distribution ×3 pages, Coredime ×4 pages non contiguës), chaque page
+  correctement isolée avec sa propre commande, AUCUNE fusion à tort entre
+  les 2 commandes Coredime distinctes portées par des pages non
+  adjacentes. Seul écart (attendu, pas un bug de cette fonctionnalité) :
+  le n° de commande de la page Coredime "BC126048" ressort vide
+  (limitation PRÉEXISTANTE du motif de commande Coredime sur ce format
+  collé sans séparateur reconnu — la session précédente l'avait résolu à
+  la main via une recherche large sur la référence article, pas par le
+  parser lui-même).
+- **Tests** : `tests/test_lecture_bl.py` (nouveau — 3 tests, dont un
+  construit en COMBINANT de vraies pages de fixtures déjà verrouillées
+  ailleurs — `bl_coredime_1.pdf`/`bl_coredime_3.pdf`/`bl_dist109_1.pdf`/
+  `bl_dist109_2.pdf` assemblées en un seul PDF à 4 pages via `fitz` —
+  contenu 100% réel, seul l'assemblage dans un même fichier est
+  synthétique, reproduit fidèlement le geste de l'acheteur qui scanne
+  plusieurs BL papier à la suite) ; `tests/test_rapprochement_pipeline_bl.py`
+  (2 nouveaux tests pour les 2 correctifs de routage ci-dessus). Suite
+  complète : 235 passés (230 avant cette fonctionnalité), aucune
+  régression.
+
+## Session suivante — nouveau fournisseur BL YESSS, bug réel d'archivage
+"/" trouvé en écrivant pour de vrai (fait)
+
+Premier vrai lot de BL traité avec la détection par page en usage réel :
+sur 4 fichiers déposés, 3 étaient des redépôts déjà rapprochés (confirmant
+l'idempotence sur des re-scans réels), 1 était un **nouveau fournisseur
+jamais vu, YESSS ÉLECTRIQUE** (marque du groupe CEF SAS — `BL M4.273
+GENDARMERIE.pdf`, agence YESSS CAMBAIE) — confirmé avec l'acheteur avant
+de construire le parser (comme pour le branchement référentiel : jamais
+une évolution d'architecture ou un nouveau fournisseur construit sans
+validation explicite).
+
+- **Structure RÉELLEMENT inhabituelle** (`moteur/fournisseurs/yesss.py`,
+  nouveau module, BL uniquement — aucun devis connu pour ce fournisseur) :
+  chaque champ (Montant, Prix net, Désignation, Catalogue...) a son texte
+  pivoté à 90° sur la page (confirmé en annotant le PDF rendu avec les
+  boîtes OCR — mots hauts et étroits, signature d'un texte tourné). Chaque
+  "colonne" du tableau d'origine (non tourné) devient une bande verticale
+  étroite (~30-40px) : label empilé à gauche, valeur RÉELLE juste à
+  droite, et une 3e bande encore plus à droite portant un "0.00"/vide —
+  un emplacement de 2e ligne d'article TOUJOURS imprimé par le gabarit
+  mais non rempli (une seule ligne d'article vue à ce jour). Chaque valeur
+  est retrouvée par PROXIMITÉ (X ET Y) à son label plutôt que par un ordre
+  de lecture haut/bas classique — une tolérance X étroite (~40px) est
+  nécessaire : sans elle, une mention voisine sans rapport ("dispo sous
+  48h", dans la bande vide adjacente) se trouve PLUS PROCHE en Y du label
+  "Désignation" que la vraie désignation. Quantité déduite de Montant/Prix
+  net (comme 109 Distribution/Cominter/Electric Plus/Ravate), jamais lue
+  directement (la cellule Qté est elle aussi ambiguë, deux valeurs
+  empilées "2"/"0" — la vraie et l'emplacement vide).
+- **Date : 2 bugs réels corrigés en construisant le parser**, tous deux
+  liés au même principe "chercher par proximité, jamais le premier trouvé
+  dans un ordre arbitraire" : (1) le jour ("24") ressort comme un mot
+  OCR SÉPARÉ du mois+année ("aout 2026") — un premier essai qui cherchait
+  "l'unique mot à 1-2 chiffres de tout le document" échouait car d'autres
+  mots (quantité, etc.) matchaient aussi ; corrigé en prenant le candidat
+  le PLUS PROCHE (Y) du mot mois+année. (2) le pavé légal du bas de page
+  cite une loi "du 25 janvier 1985" — un mois+année tout aussi valide
+  regex-parlant, mais sans rapport ; en cherchant le premier match dans un
+  ordre non trié, "janvier 1985" pouvait être pris à la place de la vraie
+  date. Corrigé en ancrant la recherche du mois+année au label "Date"
+  lui-même (même logique de proximité que le reste du gabarit), pas au
+  premier match trouvé.
+- **BUG RÉEL CRITIQUE trouvé en écriture réelle (pas en test)** : le n° de
+  BL YESSS contient un "/" imprimé ("CAM/040759") — `_nom_archive_bl()`
+  (`pipeline_bl.py`) l'interpolait tel quel dans le nom de fichier
+  d'archive, et Windows interprète "/" comme un séparateur de DOSSIER :
+  l'archivage complet échouait ("chemin d'accès introuvable"), alors que
+  l'écriture dans le Suivi avait déjà réussi à ce stade (grâce au
+  découplage écriture/archivage déjà en place — voir "Bug de robustesse"
+  plus haut — rien perdu, juste un archivage à refaire une fois corrigé).
+  Corrigé par une fonction de nettoyage PARTAGÉE (`_sans_caracteres_interdits()`,
+  caractères Windows interdits `< > : " / \ | ? *`) — réutilisée aussi par
+  `_nom_dossier_commande()` (qui avait déjà sa PROPRE logique de
+  nettoyage, quasi identique mais dupliquée — consolidée en une seule
+  fonction). **Portée générale** : protège tout futur fournisseur dont le
+  n° de BL/commande contiendrait un caractère interdit, pas seulement
+  YESSS. Testé
+  (`test_archiver_bl_numero_bl_avec_slash_ne_casse_pas_le_chemin`).
+- **`moteur/detecteur.py`** : motif `YESSS` ajouté (`\bYESSS\b`), plus
+  `YESSS MAYOTTE` testé EN PREMIER (même principe que COMINTER MAYOTTE) —
+  agence distincte qui existe dans la liste Fournisseurs du Suivi mais
+  jamais rencontrée en pièce réelle, donc reconnue mais SANS parser BL
+  dédié (tombe proprement dans l'anomalie "reconnu mais pas de parser" le
+  jour où une pièce réelle se présentera). Nom canonique Suivi vérifié
+  directement dans le classeur vivant ("YESSS", identique au nom détecteur
+  — pas de remapping nécessaire, contrairement à GMR/Electric Plus) ;
+  `moteur.panier.MAPPING_FOURNISSEURS` complété en conséquence (verrouillé
+  par `tests/test_panier.py`, qui exige une entrée pour tout fournisseur
+  du détecteur).
+- **BL 123.101.pdf (109 Distribution), même lot** : qté/tarif déjà
+  corrects dans le Suivi mais date enregistrée (24/08, date de traitement
+  d'une session précédente) différente de la vraie date du BL (21/08) —
+  cas "à confirmer" déjà couvert par le garde-fou de cohérence de date
+  (voir plus haut) ; confirmé par l'acheteur, corrigé et archivé.
+- **Recette réelle sur le vrai document YESSS** : commande M4.273, BL
+  CAM/040759, référence 411651 (DX3-ID2P63AA30MATGA), qté 2, prix net
+  39,07€, montant 78,13€ — tout exact du premier coup après le fix de
+  date. Fixture réelle ajoutée (`tests/fixtures/bl_yesss_1.pdf`), testé
+  (`tests/test_parsers_bl_yesss.py`, 2 tests). Suite complète : 238
+  passés.
+
 ## Tests
 
     py -3 -m pytest          # tout le socle
@@ -441,6 +2300,7 @@ considérer un parser fiable.
 | COMPTOIR DU CABLING | procédural, module dédié | ✅ couvert (4 PDF réels ; 3/4 totaux exacts) | Structure confirmée avec un 2e PDF plus simple après un 1er essai abandonné — voir "Points fragiles" pour le PDF encore incomplet |
 | SAGEES | procédural, module dédié, **1 format sur 3 couvert** | ⚠️ partiellement couvert (3 PDF réels sur le format "V0", totaux exacts) | **Fournisseur découvert cette session** (absent de la liste initiale), ajouté à la demande de l'acheteur. Pas de colonne Référence sur ce format. 2 autres formats réels identifiés mais NON couverts — voir "Points fragiles" |
 | LEGRAND | code préexistant, jamais vérifié | ❌ non couvert (probablement non pertinent) | **Précision de l'acheteur** : "Legrand" n'est pas un fournisseur distinct — certains distributeurs transmettent tel quel, sans reformatage, le devis que Legrand leur a fourni. Le motif de détection existant restera donc rarement déclenché à raison ; pas de PDF dédié à chercher |
+| YESSS | procédural, `moteur/fournisseurs/yesss.py`, **BL uniquement** | ✅ couvert côté BL (1 PDF réel) — pas de devis connu pour ce fournisseur | Texte imprimé pivoté à 90° sur le BL (voir section Rapprochement AI) — valeurs retrouvées par proximité X/Y à leur label, pas par un ordre de lecture haut/bas |
 
 ## Points fragiles connus
 

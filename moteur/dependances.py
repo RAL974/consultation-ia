@@ -21,6 +21,7 @@ import sys
 REQUIS = {
     "openpyxl": "openpyxl",
     "fitz": "PyMuPDF",
+    "rapidocr_onnxruntime": "rapidocr-onnxruntime",
 }
 
 

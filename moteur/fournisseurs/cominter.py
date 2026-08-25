@@ -22,6 +22,9 @@ v3 (chantier Kanopée CDC, devis DV121328/DV124395) : Qté, Px unitaire,
 import re
 
 from moteur.modele import Article
+from moteur.ocr import pages_par_identifiant, regrouper_lignes
+from moteur.outils import to_float
+from moteur.rapprochement.modele_bl import BonLivraison, LigneBL
 
 # --- GABARIT (Cominter / Cominter Mayotte) ---------------------------------
 # Deux formats de PDF coexistent chez Cominter (v1, v2 ci-dessous) : une
@@ -291,8 +294,327 @@ def parse_cominter(texte: str) -> list[Article]:
 
 
 
+# --- GABARIT BL (Cominter Ouest) --------------------------------------------
+# BL scanné (image pure, comme les autres fournisseurs — voir moteur/ocr.py).
+#
+# PIÈGE réel signalé par l'acheteur AVANT tout code, décisif ici : un même
+# fichier PDF peut contenir PLUSIEURS bons de livraison scannés à la suite
+# (jusqu'à 8 vus en session R2 suite), chacun avec son propre n° "OBL......"
+# — mais un même BL peut aussi déborder sur 2 pages (le tableau d'articles
+# tient sur la 1ère, le pied de page des totaux sur la 2e, MÊME n° OBL sur
+# les deux). `grouper_pages_par_identifiant()` (moteur/ocr.py, générique)
+# regroupe donc les pages par n° OBL AVANT tout parsing : une page sans OBL
+# détecté (le pied de page qui déborde) rejoint le groupe précédent plutôt
+# que d'ouvrir un nouveau groupe à tort.
+#
+# Structure de chaque BL : "Bon de livraison : OBL......" (n° de document),
+# un champ "Référence" (n° de commande acheteur, ex. "M3.23.030", parfois
+# précédé d'un mot de chantier genre "LAGOURGUE 131.155" — cherché par
+# recherche libre, pas ancrage strict, pour ignorer ce préfixe), puis un
+# tableau Référence/Désignation/Qté+Cdt (souvent COLLÉS en une seule
+# cellule OCR, ex. "22,00 Unité")/Px unitaire/Rem%(optionnel)/Px net/
+# Montant HT/[code TVA isolé optionnel]. Comme Coredime, le nombre de
+# cellules par ligne varie (Rem% absent si 0%) : ancrage sur le MONTANT
+# (dernière cellule "argent", ou avant-dernière si un code TVA isolé
+# traîne derrière), Px net juste avant — la quantité livrée en est déduite
+# (Montant / Px net) plutôt que lue dans la cellule Qté+Cdt collée.
+#
+# Pas d'autocontrôle Total HT ici (contrairement à 109 Distribution/
+# Electric Plus) : le tableau de répartition TVA en pied de page a une
+# structure trop irrégulière (colonnes qui se décalent selon le nombre de
+# taux de TVA présents) pour extraire la valeur de façon fiable sans plus
+# d'exemples réels — mieux vaut l'omettre que de calculer un total faux.
+MOTIF_BL_COMINTER = re.compile(r"[0O]BL\s*(\d{5,7})", re.IGNORECASE)
+MOTIF_ENTETE_TABLEAU_BL_COMINTER = re.compile(r"DESIGNATION")
+MOTIF_PIED_TABLEAU_BL_COMINTER = re.compile(r"ARTICLE7")
+# BUG RÉEL CORRIGÉ (session R2 suite, recette réelle) : l'OCR colle parfois
+# le mot de chantier au n° de commande SANS aucun espace, ex.
+# "LAGOURGUE131.155" (un seul token). L'ancien motif ("[A-Z]?\d..." avec
+# préfixe libre) captait alors à tort la DERNIÈRE lettre du mot précédent
+# comme si c'était le préfixe du n° de commande ("E131.155" au lieu de
+# "131.155") — la commande "131.155" en devenait introuvable dans le
+# Suivi, tout le BL correspondant perdu. Le préfixe lettre (chantiers du
+# style "M3.23.030") n'est accepté que s'il n'est PAS précédé d'une autre
+# lettre (véritable début de mot) ; sinon on ne capture QUE les chiffres.
+MOTIF_COMMANDE_BL_COMINTER = re.compile(
+    r"((?:(?<![A-Za-z])[A-Z]\d{1,4}|(?<!\d)\d{1,4})(?:[.\-]\d{1,4}){1,2})"
+)
+MOTIF_MONTANT_BL_COMINTER = re.compile(r"^(\d[\d\s]*[,.]\d{2})\s*E?\s*\d?$", re.IGNORECASE)
+MOTIF_REF_ARTICLE_BL_COMINTER = re.compile(r"^(?=[A-Z0-9./\-]*\d)[A-Z0-9./\-]{4,15}$")
+# Date au format JJ/MM/AA OU JJ/MM/AAAA — l'année est tantôt sur 2
+# chiffres tantôt sur 4 SELON LE SCAN (cas réel : 2 documents du même lot,
+# "06/08/26" et "04/08/2026") — cellule "Date" de l'en-tête (Numero/Date/
+# Fin de Validité), juste après "Numero".
+MOTIF_DATE_BL_COMINTER = re.compile(r"^(\d{1,2})/(\d{2})/(\d{2}|\d{4})$")
+# --- fin GABARIT BL -----------------------------------------------------------
+
+
+def _sans_espaces_bl_cominter(s: str) -> str:
+    return re.sub(r"\s+", "", s.upper())
+
+
+def _argent_bl_cominter(cellule: str):
+    m = MOTIF_MONTANT_BL_COMINTER.match(cellule.strip())
+    return to_float(m.group(1)) if m else None
+
+
+def _zone_tableau_bl_cominter(lignes_groupees: list[list[dict]]) -> list[list[dict]]:
+
+    i_entete = next(
+        (i for i, ligne in enumerate(lignes_groupees)
+         if any(MOTIF_ENTETE_TABLEAU_BL_COMINTER.search(_sans_espaces_bl_cominter(m["texte"])) for m in ligne)),
+        None,
+    )
+    if i_entete is None:
+        return []
+
+    i_pied = next(
+        (i for i, ligne in enumerate(lignes_groupees)
+         if i > i_entete and any(
+             MOTIF_PIED_TABLEAU_BL_COMINTER.search(_sans_espaces_bl_cominter(m["texte"])) for m in ligne
+         )),
+        None,
+    )
+
+    return lignes_groupees[i_entete + 1:(i_pied if i_pied is not None else len(lignes_groupees))]
+
+
+def _prix_net_bl_cominter(cellules: list[str], fin: int):
+    """Px net = normalement la cellule juste avant Montant. Deux cas réels
+    où elle n'est pas directement lisible :
+    - remise % et Px net collés dans la MÊME cellule OCR, AVEC ou SANS
+      espace entre le "%" et le prix (ex. "30% 110,67" mais aussi "30%
+      435,94" — cas réel, BL ANZEMBERG.pdf/OBL108110, ligne CAELK2766,
+      signalé par l'acheteur : sans l'espace optionnel, le motif ne
+      matchait jamais et la boucle retombait à tort sur le Px UNITAIRE de
+      la cellule précédente, 622,77€ au lieu du vrai Px net 435,94€ — bug
+      silencieux, aucune anomalie levée car montant/qté restaient
+      cohérents avec le mauvais prix) — le Px net est là, juste après le
+      taux ;
+    - Px net absent, seule la remise % subsiste (ex. "L600321 ...
+      3,00/Unite 26,78 30% 56,24") : reconstruit un prix net effectif à
+      partir du Px unitaire (juste avant le taux) et du taux, vérifié
+      exact sur un vrai cas (26,78 x 0,70 = 18,746 ; 3 x 18,746 = 56,24,
+      montant affiché)."""
+
+    k = fin - 1
+
+    while k >= 1:
+
+        cellule = cellules[k].strip()
+
+        m_combo = re.fullmatch(r"\d+\s*%\s*(\d[\d\s]*[,.]\d{2})", cellule)
+        if m_combo:
+            return to_float(m_combo.group(1))
+
+        m_pct = re.fullmatch(r"(\d+)\s*%", cellule)
+        if m_pct:
+            if k - 1 >= 1:
+                prix_unitaire = _argent_bl_cominter(cellules[k - 1])
+                if prix_unitaire is not None:
+                    return round(prix_unitaire * (1 - to_float(m_pct.group(1)) / 100), 4)
+            return None
+
+        val = _argent_bl_cominter(cellule)
+        if val is not None:
+            return val
+
+        k -= 1
+
+    return None
+
+
+def _quantite_bl_cominter(cellules: list[str], j: int, montant: float, prix_net: float):
+    """Quantité livrée : PRIORITÉ à la cellule Qté+Unité imprimée (ex.
+    "30,00 Unite" -> 30.0) — c'est la vraie valeur, un compte d'unités
+    entières pour la plupart des références (interrupteurs, prises...).
+
+    BUG RÉEL CORRIGÉ (session R2 suite, recette réelle) : cette fonction
+    calculait AUPARAVANT la quantité via Montant / Px net (comme pour 109
+    Distribution/Electric Plus, où le Px net affiché est fiable) — mais
+    chez Cominter, avec une remise, le Px net affiché est ARRONDI à la
+    ligne alors que le Montant semble calculé à partir d'une valeur plus
+    précise (ex. 30 x 4,165 = 124,95, mais Px net affiché "4,17" ->
+    124,95 / 4,17 = 29,9640...). Résultat concret écrit dans le Suivi
+    commandes vivant avant correction : "29,96 interrupteur(s)" au lieu de
+    30, "149,89" au lieu de 150 — une quantité non entière n'a aucun sens
+    pour ce genre d'article et a été repérée par l'acheteur. Montant / Px
+    net ne sert plus qu'en dernier repli, si la cellule Qté est absente."""
+
+    if j < len(cellules):
+        m = re.match(r"^(\d+(?:[,.]\d+)?)", cellules[j].strip())
+        if m:
+            try:
+                return float(m.group(1).replace(",", "."))
+            except ValueError:
+                pass
+
+    if prix_net:
+        return round(montant / prix_net, 2)
+
+    return None
+
+
+def _ligne_bl_vers_article_cominter(cellules: list[str]) -> LigneBL | None:
+
+    if not cellules:
+        return None
+
+    reference = cellules[0].strip()
+
+    if reference.upper().startswith("ECO") or not MOTIF_REF_ARTICLE_BL_COMINTER.match(reference):
+        return None
+
+    fin = len(cellules) - 1
+    if fin >= 1 and re.fullmatch(r"\d", cellules[fin].strip()):
+        fin -= 1  # code TVA isolé en bout de ligne, pas le montant
+
+    if fin < 2:
+        return None
+
+    montant = _argent_bl_cominter(cellules[fin])
+    prix_net = _prix_net_bl_cominter(cellules, fin)
+
+    if not montant or not prix_net:
+        return None
+
+    j = 1
+    while j < fin - 1 and not re.match(r"^\d", cellules[j].strip()):
+        j += 1
+    designation = " ".join(c.strip() for c in cellules[1:j]).strip()
+
+    quantite = _quantite_bl_cominter(cellules, j, montant, prix_net)
+    if not quantite:
+        return None
+
+    return LigneBL(
+        reference_fournisseur=reference,
+        designation=designation,
+        quantite_livree=quantite,
+        prix_net=prix_net,
+        montant=montant,
+    )
+
+
+def _parse_un_bl_cominter(mots_par_page_groupe: list[list[dict]]) -> BonLivraison:
+
+    lignes_plates = [
+        mot["texte"]
+        for mots in mots_par_page_groupe
+        for ligne in regrouper_lignes(mots)
+        for mot in ligne
+    ]
+    texte = "\n".join(lignes_plates)
+
+    numero_bl = ""
+    m = MOTIF_BL_COMINTER.search(texte)
+    if m:
+        numero_bl = f"OBL{m.group(1)}"
+
+    # N° de commande : cherché entre l'en-tête "Numero/Date/Fin de
+    # Validité" et l'en-tête du tableau d'articles ("Designation") —
+    # recherche libre (pas ancrage strict) pour ignorer un éventuel mot de
+    # chantier devant (ex. "LAGOURGUE 131.155").
+    i_numero = next(
+        (i for i, l in enumerate(lignes_plates) if _sans_espaces_bl_cominter(l).startswith("NUMERO")),
+        None,
+    )
+    i_designation = next(
+        (i for i, l in enumerate(lignes_plates) if "DESIGNATION" in _sans_espaces_bl_cominter(l)),
+        None,
+    )
+
+    numero_commande = ""
+    date_bl = ""
+    if i_numero is not None and i_designation is not None:
+        for l in lignes_plates[i_numero + 1:i_designation]:
+            if not numero_commande:
+                m = MOTIF_COMMANDE_BL_COMINTER.search(l)
+                if m:
+                    numero_commande = m.group(1).upper().replace(" ", ".")
+            if not date_bl:
+                m_date = MOTIF_DATE_BL_COMINTER.match(l.strip())
+                if m_date:
+                    jour, mois, annee = m_date.groups()
+                    annee = annee if len(annee) == 4 else f"20{annee}"
+                    date_bl = f"{int(jour):02d}/{mois}/{annee}"
+
+    articles = []
+    for mots in mots_par_page_groupe:
+
+        lignes_zone = _zone_tableau_bl_cominter(regrouper_lignes(mots))
+        i = 0
+
+        while i < len(lignes_zone):
+
+            cellules = [m["texte"] for m in lignes_zone[i]]
+            i += 1
+
+            reference_candidate = cellules[0].strip() if cellules else ""
+            reference_valide = bool(
+                cellules
+                and not reference_candidate.upper().startswith("ECO")
+                and MOTIF_REF_ARTICLE_BL_COMINTER.match(reference_candidate)
+            )
+
+            # BUG RÉEL CORRIGÉ (session R2 suite, recette réelle) : sur une
+            # désignation longue, l'OCR renvoie parfois la référence sur
+            # sa PROPRE ligne, APRÈS la ligne désignation+qté+prix (au lieu
+            # d'être en 1ère cellule de cette même ligne) — cas réel
+            # "PLW11643" : la ligne courante n'a pas de référence valide,
+            # mais la ligne suivante est une référence isolée (1 seule
+            # cellule). Sans ce raccord, la ligne (et sa quantité livrée)
+            # disparaissait silencieusement — un article réellement livré
+            # n'était alors jamais écrit dans le Suivi.
+            if not reference_valide and i < len(lignes_zone):
+                cellules_suivantes = [m["texte"] for m in lignes_zone[i]]
+                if len(cellules_suivantes) == 1:
+                    ref_suivante = cellules_suivantes[0].strip()
+                    if (
+                        not ref_suivante.upper().startswith("ECO")
+                        and MOTIF_REF_ARTICLE_BL_COMINTER.match(ref_suivante)
+                    ):
+                        cellules = [ref_suivante] + cellules
+                        i += 1
+
+            article = _ligne_bl_vers_article_cominter(cellules)
+            if article:
+                articles.append(article)
+
+    return BonLivraison(
+        fournisseur="COMINTER",
+        fichier="",
+        numero_bl=numero_bl,
+        date_bl=date_bl,
+        numero_commande=numero_commande,
+        lignes=articles,
+        total_ht_affiche=None,
+    )
+
+
+def parse_bl_cominter(mots_par_page: list[list[dict]]) -> list[BonLivraison]:
+    """Un même fichier peut contenir PLUSIEURS BL scannés à la suite (voir
+    bandeau GABARIT BL) : retourne une liste, une entrée par BL détecté.
+    Chaque BonLivraison porte aussi les indices de page (0-based) qu'il
+    occupe dans le fichier source (bl.pages) — utilisé par
+    moteur.rapprochement.pipeline_bl pour archiver chaque BL
+    individuellement (découpage PDF), sans attendre que TOUS les BL du
+    même fichier soient résolus."""
+
+    groupes_indices = pages_par_identifiant(mots_par_page, MOTIF_BL_COMINTER)
+
+    resultat = []
+    for indices in groupes_indices:
+        bl = _parse_un_bl_cominter([mots_par_page[i] for i in indices])
+        bl.pages = indices
+        resultat.append(bl)
+
+    return resultat
+
+
 # "COMINTER MAYOTTE" est géré par moteur/fournisseurs/cominter_mayotte.py :
 # entité distincte (SIRET, adresse, structure de devis différents), voir
 # le bandeau GABARIT de ce module.
 FOURNISSEURS = ['COMINTER']
 parse = parse_cominter
+parse_bl = parse_bl_cominter

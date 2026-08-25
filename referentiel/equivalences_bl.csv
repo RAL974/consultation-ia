@@ -1,0 +1,26 @@
+# Équivalences déjà tranchées pour le rapprochement des BL (Rapprochement
+# AI, moteur/rapprochement/matching.py) — demande explicite de l'acheteur :
+# "il faut créer une base des équivalences, ce genre de cas va se
+# présenter très souvent" (remplacement d'un article par un autre du même
+# fabricant/de la même famille, référence sans AUCUN rapport textuel ni
+# numérique avec l'originale — un simple écart de préfixe ou un chiffre
+# abîmé sont déjà couverts ailleurs, PAS besoin de les mettre ici).
+#
+# Contrairement à referentiel/A_confirmer_BL.xlsx (propositions
+# automatiques à valider), ce fichier n'a besoin d'AUCUNE proposition
+# préalable : chaque ligne est une équivalence déjà confirmée par
+# l'acheteur, reconnue automatiquement pour toujours dès le prochain
+# rapprochement (comme un "OUI" déjà coché).
+#
+# Format (séparateur ; comme les autres fichiers du projet) :
+#   Reference_1;Reference_2;Note
+#     Reference_1   la référence qui fait foi (celle déjà connue de la BDD
+#                   achats/base/BDD_articles.csv si l'une des deux l'est,
+#                   sinon celle du Suivi) — sert de clé commune aux deux
+#     Reference_2   la référence "équivalente" (ex. substitut livré par le
+#                   fournisseur)
+#     Note          libre, pour se souvenir du pourquoi (pas utilisée par
+#                   le rapprochement)
+Reference_1;Reference_2;Note
+CFF1BIS;59210;109 Distribution, commande 139.111 - colliers à embase RAMTUB 16/32 boîte de 100, même désignation/tarif, substitution fournisseur pure (CFF1BIS = référence catalogue/Suivi d'origine, 59210 = ce qui a été livré)
+411651;092897;Coredime, commande M3.23.045 - interrupteur différentiel Legrand, 092897 = référence grand public de 411651 (référence professionnelle déjà connue de la BDD achats), même désignation

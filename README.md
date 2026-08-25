@@ -77,6 +77,68 @@ consultations/
 Tu peux fermer l'outil et y revenir plus tard : en re-choisissant le même
 dossier de consultation, le Comparatif déjà généré est retrouvé tout seul.
 
+### Rapprocher les BL (bons de livraison)
+
+Pour l'instant, **109 Distribution**, **Coredime**, **Electric Plus/GMR**
+et **Cominter Ouest** sont couverts (GMR n'envoyant pas de BL séparé, ses
+factures sont utilisées directement) — les BL des autres fournisseurs sont
+simplement mis de côté (voir plus bas), rien n'est perdu, ils seront pris
+en charge au fur et à mesure.
+
+**Étape 1 — déposer les BL**
+Dépose les BL scannés (PDF ou JPG) du jour dans `a_traiter/BL/`. Peu
+importe le nom du fichier.
+
+**Étape 2 — lancer la lecture**
+1. Double-clique sur `lancer_gui.bat`.
+2. Clique sur **"Rapprocher les BL"** (3ᵉ bouton). Une nouvelle fenêtre
+   s'ouvre et lit les BL — ça peut prendre **1 à 2 minutes** (l'outil doit
+   "regarder" chaque BL comme une image, il n'y a pas de raccourci). Le
+   Suivi commandes n'a pas besoin d'être fermé pour cette étape.
+3. Quatre listes apparaissent :
+   - **Sûres** (cochées automatiquement) : l'outil est confiant, prêtes à
+     écrire telles quelles.
+   - **À confirmer** (décochées automatiquement) : quelque chose
+     d'inhabituel (ex. plus livré que commandé, tarif différent de celui
+     déjà noté) — **vérifie chaque ligne avant de cocher**, coche
+     seulement celles qui sont correctes.
+   - **Déjà à jour** : informatif seulement, rien à faire (l'outil a
+     reconnu que ce BL était déjà saisi — il ne réécrit jamais en double).
+   - **Inconnues** / **Fichiers non traités** : informatif seulement,
+     l'outil ne sait pas rapprocher ces lignes ou ces BL tout seul (n° de
+     commande introuvable, référence qui ne correspond à rien dans le
+     Suivi pour cette commande, ou fournisseur pas encore couvert) — à
+     traiter à la main.
+
+**Étape 3 — fermer le Suivi commandes dans Excel**
+**Si le classeur "Suivi commandes" est ouvert dans Excel, ferme-le avant
+l'étape suivante.** L'outil refuse d'écrire tant qu'il est ouvert (pour ne
+jamais risquer de l'abîmer) — un message d'erreur te le redira si tu
+oublies, rien de dangereux, il suffit de fermer puis de recliquer.
+
+**Étape 4 — écrire**
+1. Clique sur **"Écrire les lignes cochées dans le Suivi commandes"**.
+2. Une boîte de dialogue récapitule combien de lignes vont être écrites et
+   dans quel fichier — confirme.
+3. Une sauvegarde horodatée du Suivi est faite automatiquement AVANT toute
+   écriture (dossier `backups/`), au cas où.
+4. Une fois terminé, chaque BL est rangé automatiquement :
+   - **entièrement traité** (toutes ses lignes écrites ou déjà à jour) ->
+     `a_traiter/BL/Traités/`, renommé avec la date, le fournisseur, le n°
+     de BL et le n° de commande — c'est là que tu retrouves les BL
+     numérisés pour agrafer le BdC et le BL papier et archiver dans les
+     classeurs ;
+   - **au moins une ligne "à confirmer" non cochée ou "inconnue"** ->
+     `a_traiter/BL/À vérifier/` (nom inchangé) — jamais mélangé avec les
+     BL pas encore lus, pour repérer d'un coup d'œil ceux qui attendent
+     une décision de ta part (ex. une référence différente entre le BL et
+     le Suivi). Une fois le Suivi corrigé à la main si besoin, tu peux
+     relancer un passage dessus normalement (redépose-le dans
+     `a_traiter/BL/` si tu veux qu'il repasse par l'outil).
+
+Rien n'est jamais écrit sans que tu aies vu et confirmé le nombre de
+lignes concerné.
+
 ## 3. Lire le Comparatif — que veulent dire les couleurs ?
 
 | Couleur | Sur quelle colonne | Ce que ça veut dire |
@@ -103,6 +165,11 @@ projet.
 
 **En cas de souci, c'est un de ces deux fichiers qu'il faut envoyer** pour
 obtenir de l'aide.
+
+Pour le rapprochement des BL : chaque écriture dans le Suivi commandes
+laisse une trace dans `rapports/` (nombre de lignes écrites, BL archivés,
+anomalies) et une sauvegarde du Suivi juste avant l'écriture dans
+`backups/` — à envoyer aussi en cas de souci sur cette étape.
 
 ## 5. Autres outils
 

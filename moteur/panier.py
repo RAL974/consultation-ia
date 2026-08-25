@@ -63,6 +63,8 @@ MAPPING_FOURNISSEURS = {
     "TELENCO": "Telenco",
     "SAGEES": "Sagees",
     "DEM": "DEM",
+    "YESSS": "YESSS",
+    "YESSS MAYOTTE": "YESSS MAYOTTE",
 }
 
 TYPE_COMMANDE_DEFAUT = "Chantier"
