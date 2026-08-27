@@ -1,0 +1,23 @@
+fournisseur;email_principal;emails_secondaires;categories_v1;domaines_observes;source
+RAVATE;allan.pougary@ravate.com;;câbles, appareillage, matériel courant;CFO/CFA, câbles, appareillage, matériel courant;Envoyés 18-27/08 (Allan Pougary); parser Consultation AI
+RAVATEPRO;;;luminaires;luminaires, pro;brief projet; parser Consultation AI
+COMINTER;arnaud@cominter.re;;câbles, appareillage, matériel courant;CFO/CFA, câbles, appareillage;Envoyés 18-27/08 (Arnaud); parser Consultation AI
+COMINTER_MAYOTTE;;;Mayotte (tout);Mayotte;brief projet; parser Consultation AI
+COREDIME;;;câbles, appareillage;CFO/CFA, appareillage (affilié Sonepar);brief projet; parser Consultation AI; skill comparatif-fournisseurs (Jimmy Coltrat)
+DEM;guillaume.damour@dem-run.com;;câbles, appareillage, matériel courant;CFO/CFA, câbles;Envoyés 18-27/08 (Guillaume Damour); parser Consultation AI
+DIST109;comptoir3@109ouest.re;;câbles, matériel courant;matériel courant;Envoyés 18-27/08; parser Consultation AI
+EDOI;;;câbles, matériel courant;CFO/CFA;brief projet; parser Consultation AI
+ELECTRICPLUS (=GMR=Blandin);ofranson@gmr.re;;câbles, appareillage;CFO/CFA, câbles;Envoyés 17/08 (Olivier Franson); parser Consultation AI; skill comparatif-fournisseurs
+IMPORELEC;;;matériel courant;matériel courant;brief projet; parser Consultation AI
+IMPORTER;comptoirimporter@gmail.com;;matériel courant (Mayotte);matériel courant;Envoyés 19/08 (Besoin urgent GYSM); parser Consultation AI
+COMPTOIR_CABLING;;;informatique, câblage réseau;informatique, câblage;TR 06/08 (Devis N°DE00029194); parser Consultation AI
+LEGRAND;;;appareillage Legrand (fabricant);appareillage (fabricant);parser Consultation AI
+PROTECTHOMS;romain.potier@protecthoms.com;;régulation;régulation;Envoyés 10/08; parser Consultation AI
+SAGEES;ludovic.leong-bin@sagees.com;;matériel courant;matériel courant (fil GYSM);Envoyés 20/08 (Ludovic Leong-Bin); parser Consultation AI
+STAND64;;;luminaires;luminaires;brief projet; parser Consultation AI
+TELENCO;;;vidéo, contrôle d'accès;CFO/CFA;brief projet; parser Consultation AI
+YESSS;David.Gauvin@yesss-fr.com;Benjamin.Vitry@yesss-fr.com;Nassuf.Lihadji@yesss-fr.com;câbles, appareillage, matériel courant;CFO/CFA, matériel courant;Envoyés 18-27/08 (David Gauvin); parser Consultation AI
+CLAREO;;;luminaires;luminaires (Clareo Lighting);parser Consultation AI
+URMET;b.cordier@urmet.fr;f.guimet@urmet.fr;contrôle d'accès, visiophonie;contrôle d'accès, visiophonie;Envoyés 25/08; skill outlook-com-automation (urmet-devis-2026)
+1STSHINE;;;brasseurs d'air Agir+;brasseurs d'air Agir+ (DCF-FS52920, DCF-W986);profil William
+ATELIER_ROUSTANJEE;maqtextile.atelierroustanjee@gmail.com;;textile, logo;textile, logo;Envoyés 24/08

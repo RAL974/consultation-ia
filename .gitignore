@@ -41,3 +41,10 @@ referentiel/exports/
 a_traiter/
 rapports/
 backups/
+
+# Flux demandes d'achat (pipeline Hermes) : états runtime et fichiers de travail
+etat.json
+demandes_a_traiter.json
+devis_recus.json
+brouillons_a_creer.json
+suivi_consultations.csv
