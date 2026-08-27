@@ -48,3 +48,6 @@ demandes_a_traiter.json
 devis_recus.json
 brouillons_a_creer.json
 suivi_consultations.csv
+
+# Runtime phase 2
+affaires_devis.json
