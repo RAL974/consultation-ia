@@ -182,3 +182,22 @@ anomalies) et une sauvegarde du Suivi juste avant l'écriture dans
 
 Ces deux points sont détaillés dans `CLAUDE.md`, à l'usage d'une prochaine
 session de développement sur ce projet.
+
+## 6. Flux automatique des demandes et devis (agent Hermes)
+
+Depuis le 27/08/2026, un pipeline automatisé (agent Hermes, skill
+`flux-demandes-achat`, cron « achats-flux » toutes les 30 min en heures
+ouvrées) :
+
+1. **Détecte** les demandes d'achat des conducs/RA dans les boîtes
+   ral@ et achats@ (Outlook, lecture seule) — `detecter_demandes.py`.
+2. **Prépare** les demandes de devis en BROUILLONS Outlook (jamais
+   d'envoi automatique — vous validez et cliquez Envoyer) —
+   `creer_brouillons.py`.
+3. **Classe** les devis reçus par affaire dans `consultations/<affaire>/devis/`
+   — `classer_devis.py` — et **génère les comparatifs** automatiquement.
+
+Le récap de chaque passage (brouillons créés, devis classés, comparatifs,
+anomalies) est envoyé dans le groupe Telegram « IA ESR ». Les anomalies de
+lecture des devis sont listées dans `TRAVAUX_PARSERS.md` (à traiter en
+session Claude Code).

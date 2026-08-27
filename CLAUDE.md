@@ -2263,6 +2263,199 @@ validation explicite).
   (`tests/test_parsers_bl_yesss.py`, 2 tests). Suite complète : 238
   passés.
 
+## Session suivante — lot mélangeant 5 fournisseurs, 4 bugs réels corrigés,
+2 nouveaux fournisseurs (DEM, PROTECTHOMS) (fait)
+
+Premier fichier réel à mélanger AUTANT de fournisseurs différents d'un
+coup (RAVATE, Coredime, Cominter, Electric Plus, 109 Distribution — 5
+pages, 5 fournisseurs) : la détection par page (voir section précédente)
+les a tous séparés correctement dès le premier passage automatique.
+
+- **BUG RÉEL CORRIGÉ — RAVATE, "AU" et la date collés par des tirets**
+  (commande 135.049) : "AU-25/08/2026--135-049" — les deux `\s*` du motif
+  de commande n'acceptaient QUE des espaces, jamais un tiret à cet endroit
+  précis (distinct du tiret déjà toléré DANS la commande, "131-162"). La
+  commande ressortait introuvable. `\s*` élargi en `[\s-]*` aux deux
+  endroits — le tiret capturé reste normalisé en point par le code déjà
+  en place.
+- **BUG RÉEL CORRIGÉ — RAVATE, séparateur de date lu "."** :
+  "25/08.2026" au lieu de "25/08/2026" — motif élargi pour accepter "/"
+  OU "." aux deux séparateurs.
+- **Limite RAVATE non corrigée (scan de moindre qualité, règle d'or)** :
+  seules 2 des 4 lignes d'articles de ce document sont extraites (les 2
+  autres ont des cellules chiffrées trop abîmées) — l'autocontrôle Total
+  HT (1681,61€ affiché vs 1030,99€ extrait) le signale honnêtement.
+  Fixture réelle ajoutée (`bl_ravate_9_commande_tirets_colles.pdf`),
+  testé.
+- **BUG RÉEL CORRIGÉ — ELECTRIC PLUS, en-tête de colonnes fusionné avec le
+  1er article** (commande M4.269) : l'OCR a groupé "DESIGNATION QTE PRIX
+  UNIT.HT..." sur la MÊME ligne visuelle que la référence+désignation du
+  1er article ("PLA11525 EMBTMOULUREKEVA32MMX12MM DESIGNATION QTE..."),
+  faisant échouer cette ligne entièrement et perdre la référence du 1er
+  article (la ligne suivante récupérait à tort un bout de désignation
+  comme référence). `_zone_tableau_electricplus()` détache désormais les
+  cellules qui précèdent le mot d'en-tête et les reporte sur la ligne
+  suivante.
+- **BUG RÉEL CORRIGÉ — ELECTRIC PLUS, garde-fou contre une fausse
+  référence** : une ligne chiffrée peut se retrouver sans aucune
+  référence/désignation adjacente (regroupement Y défavorable, ou
+  véritablement absente sur le document) — `cellules[0]` est alors la
+  QUANTITÉ elle-même ("70,00MTR"), jamais une vraie référence.
+  `_ligne_vers_article_electricplus()` refuse désormais de produire une
+  ligne dans ce cas (plutôt que d'écrire "70,00MTR" comme référence) —
+  l'écart de Total HT (86,40€ affiché vs 29,70€ extrait pour 2 lignes
+  sûres) signale honnêtement qu'une ligne manque. Fixture réelle ajoutée
+  (`bl_electricplus_10_entete_fusionne_1er_article.pdf`), testé.
+- **Correction manuelle motivée — COREDIME, commande introuvable**
+  (fichier `2026-08-19 - COREDIME - CORB033477.1 - BC inconnue.pdf`) :
+  aucun label "BC"/"COMMANDE N°" reconnu sur ce document (label
+  "Commanderef:" suivi de "108.26", tronqué — la vraie valeur "108.276"
+  apparaît par ailleurs isolée juste avant "Référence LACOUTURE").
+  Retrouvée avec certitude par recherche large sur les références de
+  l'article dans le Suivi (5-6 correspondances convergentes sur la
+  commande "108.276") — PAS un correctif de code (un seul exemple, format
+  de label jamais revu ailleurs, règle d'or), corrigée à la main pour ce
+  BL précis avant rapprochement.
+- **Correction manuelle motivée — COREDIME, référence tronquée** : "600RAL"
+  extrait sur le BL correspond à "600RAL7016" dans le Suivi (même
+  désignation "RAL 7016", même quantité 8) — la cellule OCR a perdu le
+  suffixe "7016". Corrigée à la main (même principe qu'au-dessus).
+- **Limite COREDIME non corrigée** : 5 des 7 lignes de ce BL ne sont pas
+  extraites — leur confirmation "<qté> x 1 unite" a perdu la quantité de
+  tête à l'OCR (juste "x 1 unite" sans chiffre devant), contrairement aux
+  2 lignes extraites qui, elles, ont gardé leur chiffre. Toutes ces 5
+  lignes ont `qte_commandee=8` dans le Suivi — plausible qu'elles valent
+  aussi 8, mais UN SEUL signal (pas de prix chez Coredime pour
+  recouper) : pas assez pour deviner, laissées à la vérification de
+  l'acheteur sur le papier.
+- **Nouveau fournisseur BL : DEM** (déjà couvert côté devis,
+  `moteur/fournisseurs/dem.py`, section GABARIT BL ajoutée à la suite du
+  parser devis existant — **le parser devis n'a PAS été touché**, un
+  premier essai l'avait accidentellement réécrit de mémoire au lieu de
+  seulement ajouter du code, repéré et corrigé immédiatement via `git
+  diff` avant tout test). Structure du tableau IDENTIQUE au devis (déjà
+  documentée : prix AU CENT "/C", désignation sur la ligne suivante) —
+  seule différence, c'est un scan OCR au lieu de texte PDF natif. 2 vrais
+  BL vus (`bl_dem_1_deux_pages_reste_a_livrer.pdf`,
+  `bl_dem_2_six_lignes.pdf`) :
+  - **Chaque PAGE est un bon de livraison DEM indépendant** (pas de
+    fusion inter-pages) : sur le 1er fixture, les 2 pages ont des n° de
+    BL et des dates DIFFÉRENTS (706992 le 24/08, 706990 le 20/08) pour la
+    MÊME commande M3.14.363 — `parse_bl_dem()` retourne donc une LISTE,
+    comme 109 Distribution/Cominter/Electric Plus.
+  - **1er cas réel de "Reste à livrer" chez DEM** : une ligne SANS prix
+    ni montant imprimés (désignation collée sur la même ligne visuelle
+    faute de place prise par les colonnes de prix vides) — jamais
+    livrée, exclue. Contrairement à Coredime, pas besoin de mémoriser un
+    drapeau par page : l'absence de prix est en elle-même le signal
+    fiable ici. Preuve concrète que l'exclusion est correcte : cette
+    MÊME référence/quantité réapparaît PRICÉE sur l'AUTRE page du même
+    fichier (la livraison suivante qui la solde).
+  - Recette : les 2 fixtures retombent exactement sur leurs Total HT
+    respectifs (237,50€ / 87,50€ / 702,66€). Testé
+    (`tests/test_parsers_bl_dem.py`, 3 tests) + le test devis existant
+    (`test_parse_dem`) toujours vert.
+- **Nouveau fournisseur BL : PROTECTHOMS** (`moteur/fournisseurs/
+  protecthoms.py`, nouveau module, BL uniquement) — équipements de
+  protection individuelle/amiante, PAS du matériel électrique comme tous
+  les autres fournisseurs de ce projet, mais confirmé présent dans la
+  liste Fournisseurs du Suivi (vérifié directement dans le classeur
+  vivant) donc en périmètre. 1 vrai BL vu (commande M3.15.399). Structure
+  simple et claire, tableau "Reference produit | Designation | Quantites
+  | Reste à livrer" : chaque ligne visuelle est déjà un article complet.
+  Référence produit repérée par sa FORME (1 chiffre + 2 lettres + 6
+  chiffres, ex. "2VU043003") plutôt qu'une position de cellule ou un
+  en-tête/pied de tableau. "Reste à livrer" (4e cellule, présente sur 1
+  ligne du seul document vu) est **purement informatif ici, jamais
+  soustrait** — contrairement au "Reste à livrer" Coredime/DEM (qui
+  EXCLUT toute la ligne) : chez PROTECTHOMS, "Quantites" et "Reste à
+  livrer" sont deux colonnes séparées, la ligne EST bien livrée à hauteur
+  de "Quantites". Pas de prix du tout sur ce document (comme Coredime) —
+  pas d'autocontrôle Total HT possible. Testé
+  (`tests/test_parsers_bl_protecthoms.py`, 2 tests), 8/8 lignes exactes
+  dès le premier essai.
+- **Limite COMINTER non corrigée (`BL 131.165 RAL LAGOURGUE.pdf`, 0 ligne
+  extraite)** : scan très dégradé, l'en-tête de colonnes ("Px unitaire
+  Rem Px net") s'est retrouvé mélangé à la référence+désignation du seul
+  article (même famille de problème que le bug Electric Plus corrigé
+  cette session, mais combiné à une qualité de scan bien plus mauvaise) —
+  un seul exemple, pas assez pour généraliser un correctif fiable ; laissé
+  en l'état dans "à vérifier" pour vérification manuelle sur le papier
+  (article probablement "Rail de montage 41X41 en C", qté 2, montant
+  73,75€ d'après une lecture visuelle, non extrait automatiquement).
+
+## Session suivante — 2e lot du jour, 3 bugs réels RAVATE corrigés, 2
+commandes retrouvées à la main (fait)
+
+- **BUG RÉEL CORRIGÉ — RAVATE, "/" séparateur de date lu "7"** (commande
+  M3.18.223, 2 documents du même lot) : "AU16706/2026-M3-18.223" (un seul
+  "/" corrompu) et "AU1670672026.M3.18.223" (les DEUX corrompus) — motif
+  de commande élargi pour tolérer "/", "." OU "7" aux deux séparateurs de
+  la date (sans risque de confusion : jour et mois ont une longueur fixe
+  dans le motif). Le séparateur avant la commande elle-même tolère aussi
+  "." en plus d'espace/tiret.
+- **BUG RÉEL CORRIGÉ — RAVATE, en-tête "Reference" lu "Reterence"** (F
+  confondu avec T) : l'ancre de début de tableau ne matchait plus DU TOUT,
+  zone vide, 0 ligne extraite pour un Total HT de 204,86€ affiché. "F"
+  rendu tolérant au "T".
+- **BUG RÉEL CORRIGÉ — RAVATE, virgule décimale lue ":"** ("0:00" au lieu
+  de "0,00") — même famille que la confusion "*" déjà tolérée, sans risque
+  de confondre avec le cas COMBO existant (2 montants séparés par ":") :
+  la partie après les 2 décimales ne peut alors jamais tenir dans les 3
+  caractères de fin autorisés, le motif simple échoue proprement et le
+  repli combo prend le relais. Fixtures réelles ajoutées
+  (`bl_ravate_10_separateur_slash_lu_7.pdf`,
+  `bl_ravate_11_entete_reterence_0_ligne.pdf`), testé (2 tests).
+- **Limite RAVATE non corrigée** (`bl_ravate_11`, même lot) : la 2e ligne
+  d'article de ce document a son Montant HT au point décimal déplacé
+  ("4106." au lieu de "41,06") — un seul exemple, pas de règle inventée ;
+  l'autocontrôle Total HT (204,86€ vs 163,80€ extrait) le signale
+  honnêtement.
+- **Correction manuelle motivée — COMINTER, commande APRÈS l'en-tête**
+  (fichier multi-BL, 1er des 3 BL) : la recherche de commande est bornée
+  entre l'en-tête "Numero/Date/Fin de Validité" et l'en-tête du tableau
+  "Designation" (voir `parse_bl_cominter`) — sur ce document précis, la
+  valeur "M3.10.166" (label "Référence") est imprimée APRÈS "Designation",
+  hors de cette fenêtre pour la première fois observée. Un seul exemple,
+  élargir la fenêtre de recherche risquerait de capturer un nombre de la
+  1ère ligne d'article par erreur — corrigée à la main pour ce BL précis.
+- **Correction manuelle motivée — 109 Distribution, "N° Réf. Client" en
+  texte libre** (commande retrouvée : "161.008") : le champ contenait
+  "kanoppe clim 161" (un nom de chantier, pas un code commande) au lieu du
+  format habituel — retrouvée avec certitude par recherche large sur la
+  référence de l'article dans le Suivi (résultat unique, "161" du nom de
+  chantier correspond bien au préfixe de "161.008"). Pas un correctif de
+  code (format jamais revu ailleurs, règle d'or).
+- **Recette réelle sur les 8 fichiers (10 BL) du lot** : 13 lignes sûres
+  écrites au total, 8 BL/pages archivés individuellement (dont les 3 BL
+  d'un même fichier Cominter groupé). Restent en "à vérifier" : 2 pages
+  RAVATE avec une référence introuvable dans le Suivi pour leur commande,
+  et le Cominter "131.165" à 0 ligne déjà documenté ci-dessus.
+
+## Session suivante — 3e lot du jour, 2 bugs réels YESSS corrigés sur son
+2e vrai BL (fait)
+
+- **BUG RÉEL CORRIGÉ — YESSS, commande imprimée "BC N°..."** (2e vrai BL
+  vu, `BL M4.276.pdf`) : format DIFFÉRENT du 1er document ("N° commande
+  M4.273", "commande" en toutes lettres) — ici "BC N°M4.276" en un seul
+  mot OCR, sans espace entre "N°" et la valeur. Le label "N° commande"
+  existe bien aussi sur ce document, mais comme label de colonne isolé
+  (aucune valeur adjacente dans le même mot) : les deux formats sont
+  désormais essayés, sans risque de faux positif sur ce label isolé (rien
+  à capturer juste après "commande" dans son propre mot).
+- **BUG RÉEL CORRIGÉ — YESSS, date imprimée en un seul mot bien formé** :
+  "25 aout 2026" (jour+mois+année ensemble), alors que sur le 1er document
+  le jour ressortait comme un mot OCR séparé du mois+année. Le motif
+  mois+année capture désormais un jour optionnel directement dans le même
+  mot, avant de retomber sur la recherche par proximité si absent
+  (comportement du 1er document inchangé). Fixture réelle ajoutée
+  (`bl_yesss_2_commande_bc_no_et_date_groupee.pdf`), testé.
+- **Recette réelle sur les 3 fichiers du lot** : 2 lignes écrites, 2 BL
+  archivés (RAVATE M4.275, YESSS M4.276). Reste en "à vérifier" : RAVATE
+  126.049 (1 ligne à confirmer — repli référence proche "Z" vs "2", 1
+  ligne inconnue — référence "T4" absente du Suivi pour cette commande,
+  potentiellement un article réellement différent).
+
 ## Tests
 
     py -3 -m pytest          # tout le socle
@@ -2286,7 +2479,7 @@ considérer un parser fiable.
 | RAVATE | `_gabarit.scan_ancre` | ✅ couvert | Toujours la Réf. FNR, jamais la réf interne |
 | RAVATE PRO | délègue à `ravate.py` | ✅ couvert (confirmé par l'acheteur) | Construction identique à Ravate Elec (confirmé directement, pas de PDF Ravate Pro dédié disponible) |
 | COREDIME | `_gabarit.scan_regex` | ✅ couvert | Garde-fou qté×prix propre en plus de l'autocontrôle global |
-| DEM | `_gabarit.scan_regex` | ✅ couvert | Prix affichés AU CENT (/C) ; prix_net dérivé de montant/qté |
+| DEM | `_gabarit.scan_regex` (devis) + procédural (BL) | ✅ couvert devis ET BL | Prix affichés AU CENT (/C) ; prix_net dérivé de montant/qté. Côté BL, chaque page = un BL indépendant (jamais de fusion inter-pages) |
 | ELECTRIC PLUS (alias GMR) | `_gabarit.scan_ancre` | ✅ couvert | "GMR" = marque publique du canal Electric Plus, même gabarit |
 | 109 DISTRIBUTION | `_gabarit.scan_ancre`, 2 variantes essayées | ✅ couvert (corrigé cette session) | **2 structures réelles différentes** chez ce fournisseur (réf avant ou après le bloc chiffré) — voir "Points fragiles" |
 | COMINTER | procédural (2 formats v1/v2) | ✅ couvert (v1 confirmé réel ; v2 toujours non confronté à un PDF réel) | — |
@@ -2301,6 +2494,7 @@ considérer un parser fiable.
 | SAGEES | procédural, module dédié, **1 format sur 3 couvert** | ⚠️ partiellement couvert (3 PDF réels sur le format "V0", totaux exacts) | **Fournisseur découvert cette session** (absent de la liste initiale), ajouté à la demande de l'acheteur. Pas de colonne Référence sur ce format. 2 autres formats réels identifiés mais NON couverts — voir "Points fragiles" |
 | LEGRAND | code préexistant, jamais vérifié | ❌ non couvert (probablement non pertinent) | **Précision de l'acheteur** : "Legrand" n'est pas un fournisseur distinct — certains distributeurs transmettent tel quel, sans reformatage, le devis que Legrand leur a fourni. Le motif de détection existant restera donc rarement déclenché à raison ; pas de PDF dédié à chercher |
 | YESSS | procédural, `moteur/fournisseurs/yesss.py`, **BL uniquement** | ✅ couvert côté BL (1 PDF réel) — pas de devis connu pour ce fournisseur | Texte imprimé pivoté à 90° sur le BL (voir section Rapprochement AI) — valeurs retrouvées par proximité X/Y à leur label, pas par un ordre de lecture haut/bas |
+| PROTECTHOMS | procédural, `moteur/fournisseurs/protecthoms.py`, **BL uniquement** | ✅ couvert côté BL (1 PDF réel) — pas de devis connu, équipements de protection/amiante | Référence repérée par sa FORME (1 chiffre + 2 lettres + 6 chiffres), pas d'en-tête/pied de tableau. Aucun prix sur ce document (comme Coredime) |
 
 ## Points fragiles connus
 
@@ -2416,11 +2610,38 @@ considérer un parser fiable.
   `dossier_resultats` quand une fonction du moteur est appelée sans en
   préciser un, ex. tests). Les deux sont dans `.gitignore`.
 
-## Évolutions envisagées (pas commencées)
+## Flux demandes d'achat (pipeline Hermes) — implémenté 27/08/2026
 
-- **Ingestion des devis par email** : aujourd'hui l'acheteur dépose les PDF
-  à la main dans `consultations/<nom>/devis/` ; une boîte mail dédiée (ou
-  un dossier surveillé) pourrait alimenter ce dossier automatiquement.
+Pipeline agentique piloté par l'agent Hermes (skill `flux-demandes-achat`,
+cron « achats-flux » toutes les 30 min en heures ouvrées, livraison du récap
+dans le groupe Telegram « IA ESR »). Trois scripts Python vivent à la racine
+du projet (versionnés sur le repo) :
+
+- `detecter_demandes.py` — lecture SEULE des boîtes ral@ + achats@ (Outlook
+  COM) : fenêtre glissante (etat.json), anti-doublon EntryID, résolution GAL
+  (`m.Sender.GetExchangeUser()`, startswith("/o=") INSENSIBLE à la casse),
+  liste officielle des demandeurs (NOMS_DEMANDEURS), flag `deja_traite` via
+  les Envoyés. Sorties : `demandes_a_traiter.json` + `devis_recus.json`.
+- `creer_brouillons.py` — crée des BROUILLONS Outlook de demandes de devis
+  (`mail.Save()` uniquement — JAMAIS Send()/Display(), garde-fou absolu).
+  Entrée `brouillons_a_creer.json`, trace dans `suivi_consultations.csv`.
+- `classer_devis.py` — regroupe `devis_recus.json` par affaire (sujet
+  normalisé), crée `consultations/<affaire>/devis/`, télécharge les PDF
+  (COM : `ns.GetItemFromID` — PAS sur les Folder en dispatch dynamique
+  pywin32). Idempotent (« déjà présent » = déjà téléchargé).
+
+Règle d'or du flux : AUCUN envoi programmatique ; les fichiers Besoin des
+nouvelles consultations sont créés à partir de la consultation citée dans
+les réponses fournisseurs (« De : William AIMAR ... Objet : ... »), jamais
+inventés. Les fichiers runtime (etat.json, *_a_traiter.json, devis_recus.json,
+brouillons_a_creer.json, suivi_consultations.csv, affaires_devis.json) sont
+gitignorés.
+
+- **Ingestion des devis par email** : ✅ FAIT (27/08/2026) — voir la section
+  « Flux demandes d'achat (pipeline Hermes) » : les devis reçus par mail sur
+  ral@/achats@ sont détectés (detecter_demandes.py), regroupés par affaire et
+  téléchargés dans consultations/<affaire>/devis/ (classer_devis.py), puis les
+  comparatifs sont générés automatiquement (cron Hermes « achats-flux »).
 - **Bascule vers Appro-Tracker** quand son module Commandes existera :
   `referentiel/exports/*.csv` (alias appris, composés, articles nouveaux)
   est déjà pensé comme graine pour cette migration — voir section

@@ -71,13 +71,12 @@ def download_devis(items_by_affaire):
                     if not fn.lower().endswith(".pdf"):
                         continue
                     dest = devis_dir / fn
-                    # Évite les doublons de nom entre fournisseurs
+                    # Idempotence : déjà téléchargé (passage cron répété) → skip.
+                    # Le suffixe (2) ne sert que si le MÊME nom arrive d'un autre
+                    # mail/fournisseur (rare) — sinon on ne duplique jamais.
                     if dest.exists():
-                        stem, suffix = dest.stem, dest.suffix
-                        n = 2
-                        while dest.exists():
-                            dest = devis_dir / f"{stem} ({n}){suffix}"
-                            n += 1
+                        saved.append(fn + " (déjà présent)")
+                        continue
                     a.SaveAsFile(str(dest))
                     saved.append(fn)
             except Exception as e:
