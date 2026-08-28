@@ -2637,6 +2637,8 @@ inventés. Les fichiers runtime (etat.json, *_a_traiter.json, devis_recus.json,
 brouillons_a_creer.json, suivi_consultations.csv, affaires_devis.json) sont
 gitignorés.
 
+## Évolutions envisagées (pas commencées)
+
 - **Ingestion des devis par email** : ✅ FAIT (27/08/2026) — voir la section
   « Flux demandes d'achat (pipeline Hermes) » : les devis reçus par mail sur
   ral@/achats@ sont détectés (detecter_demandes.py), regroupés par affaire et
