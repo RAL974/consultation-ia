@@ -2771,6 +2771,77 @@ l'écrire sans d'abord vérifier qu'elle correspond à un signal fort
 affiché). Ce contrôle de bon sens, simple et rapide, aurait évité tout cet
 incident.
 
+## Session suivante — lot de 8 BL du jour, règle "quantité entière" appliquée
+systématiquement avant écriture, 3 cas de mauvaise cellule de quantité (fait)
+
+Premier lot traité après la leçon ci-dessus : chaque ligne "sûre" par
+l'automatique a été recroisée avec la quantité commandée avant écriture — a
+immédiatement débusqué 2 lignes RAVATE avec des quantités fractionnaires
+(0,7336 et 1,1962) que le rapprochement automatique aurait classées "sûres"
+sans lever aucune alerte (la quantité obtenue restait sous la quantité
+commandée, donc pas de garde-fou sur-livraison déclenché).
+
+- **RAVATE (139.118, 161.012) — la cellule Px Brut, si illisible par l'OCR,
+  décale la fenêtre des 4 dernières cellules et fait confondre Remises avec
+  Px Net.** `_ligne_chiffree_bl_ravate()` bascule sur un repli à 3 cellules
+  dès qu'UNE des 4 dernières ne parse pas comme un montant — ce repli
+  suppose TOUJOURS que c'est Px Brut qui a disparu (absorbé par une cellule
+  qté+unité collée, cas déjà documenté, M3.10.182) et garde donc les 3
+  dernières comme [Px Brut, Px Net, Montant]. Mais ici c'est Px Brut
+  LUI-MÊME qui échoue à parser ("1666" au lieu de "16,66", séparateur
+  perdu ; "8T6" au lieu de "8,76", lettre substituée) — les 3 dernières
+  cellules sont alors réellement [Px Net, Remises, Montant], pas
+  [Px Brut, Px Net, Montant] : Remises se retrouve utilisé comme Px Net
+  (192,20€ au lieu de 7,05€ ; 125,40€ au lieu de 5,00€), donnant des
+  quantités livrées à 0,7336/1,1962 au lieu de 20/30 (la vraie quantité,
+  imprimée en clair juste avant ce bloc de 4 cellules). **Pas de correctif
+  de code** (2 documents du même lot, cause chaque fois différente —
+  séparateur perdu vs lettre substituée — pas assez homogène pour une règle
+  fiable sans risquer de casser le repli existant, qui, lui, reste
+  nécessaire pour son cas d'origine ; règle d'or) : corrigé à la main sur
+  ces 2 lignes, vérifié par la quantité commandée (20 et 30, exactement) ET
+  par le Total HT imprimé (141,00€ et 150,00€, chacun retombant pile avec
+  qté×Px Net).
+- **COREDIME (123.108) — "Gaine ICT" vendue en couronnes de 100m, un code
+  de désignation numérique se glisse juste avant la vraie quantité.** Cellules
+  réelles : `['LEG06620', 'ICTA3422', '20', 'ATF', 'STANDARD', '100M', '400', 'M*']`
+  — le "20" (code de taille, Ø20mm, faisant partie de la désignation) et le
+  "400" (la VRAIE quantité, en mètres, juste avant l'unité "M*") sont tous
+  les deux des nombres isolés dans des cellules séparées ; le code actuel a
+  pris le premier ("20") au lieu du dernier avant l'unité ("400"). Qté
+  livrée réelle = 400 (LEG06620) et 300 (LEG06625) — vérifié : correspond
+  EXACTEMENT à la quantité commandée dans les deux cas (contre 20/25 extraits
+  à tort). Un seul document à ce jour, traité en correction manuelle.
+- **Nouveau préfixe fabricant confirmé par l'acheteuse : "SIB"** (référence
+  BL "SIBP02120" = référence Suivi "P02120", "ajouté au code dans la base
+  article SONEPAR") — à ajouter à la liste des préfixes déjà connus
+  (LEG/EBE/PW/BT) si un 2e cas se présente avec un vrai gain à en tirer via
+  `deduire_prefixes()`.
+- **ELECTRIC PLUS (139.117) — décalage cascadé entre référence et données
+  chiffrées sur tout le document**, plus grave que les cas déjà documentés
+  (désignation qui déborde, "BLANC" pris pour une référence) : sur ce
+  document précis, la donnée chiffrée qui SUIT une référence dans le flux
+  OCR n'est PAS toujours la sienne — reconstruit entièrement par
+  correspondance avec la quantité commandée de chaque référence (5
+  correspondances trouvées, chacune vérifiée par une égalité EXACTE
+  qté×prix=montant) : 077040L=2 (5,11€), 077111L=100 (2,70€), 077011L=6
+  (3,39€), 076565=25 (7,86€), 080251=50 (0,82€). **077001L (qte_cmd=2)
+  n'a aucune donnée correspondante trouvée sur ce document** — pas livrée
+  cette fois, pas forcée. **~10,56€ d'écart résiduel sur le Total HT
+  (548,62€ affiché contre 538,06€ reconstitué) reste inexpliqué** — laissé
+  tel quel plutôt que deviné une 6e ligne fantôme (l'autocontrôle existant
+  le signale honnêtement).
+- **`BL E26.009.pdf` : PAS un bon de livraison fournisseur** — c'est un BON
+  DE COMMANDE émis par ELECTRICITE SERVICES REUNION elle-même (gants
+  Maxiflex, gilets WTP — EPI), déposé par erreur dans `a_traiter/BL/` au
+  lieu d'être un BL d'un fournisseur. Laissé tel quel, signalé à l'acheteur
+  plutôt que forcé dans le pipeline de rapprochement (aucun fournisseur à y
+  reconnaître, ce n'est structurellement pas le même type de document).
+- **Recette sur les 7 vrais BL du lot** : 12 lignes écrites, toutes
+  entières, toutes vérifiées soit par correspondance exacte avec la
+  quantité commandée soit par reconstitution du Total HT — 7 BL archivés
+  avec leur BC.
+
 ## Tests
 
     py -3 -m pytest          # tout le socle
