@@ -1,0 +1,7 @@
+# Demande d'origine ; Reference ; Quantite
+# Une ligne par article. Separateur = point-virgule.
+# Colonne 1 = texte du demandeur (affiche en tete du comparatif)
+# Colonne 2 = reference Legrand/fabricant (pour le rapprochement)
+# Colonne 3 = quantite
+# Source : demande COUTAREL Nicolas du 27/08/2026 12:11 (citee dans le devis SPIR 2608DV00128)
+Gants ATG Maxiflex Endurance 42-845 ADAPT - Enduits 3/4 – Picots ; AT042845-ZZ10ACA ; 1680

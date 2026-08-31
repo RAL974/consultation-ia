@@ -7,16 +7,31 @@ from moteur.outils import to_float
 from moteur.rapprochement.modele_bl import BonLivraison, LigneBL
 
 # --- GABARIT (Electric Plus Réunion — marque publique du canal GMR) --------
-# Structure du texte extrait, un champ par ligne, ancrée sur "PF" :
+# Structure du texte extrait, un champ par ligne, ancrée sur "PF" (ou "PR") :
 #     Référence          (i-5)
 #     Désignation        (i-4)
 #     Quantité           (i-3)
 #     Prix unit. HT      (i-2)
 #     P.U. net HT        (i-1)
-#     PF                 (i)
+#     PF ou PR           (i)
 #     Montant HT         (i+1)
 #     Code TVA           (i+2)
-MARQUEUR = "PF"
+# "PR" au lieu de "PF" : constaté sur 2 devis réels (D1109436/BT-Floe,
+# D1109369/R2V 3G1.5 - Rico Carpaye), texte PDF natif (pas un artefact
+# OCR comme le repli P[FR] déjà en place côté BL) — une 2e valeur réelle
+# pour cette même colonne, même position, mêmes calculs (qté × prix_net =
+# montant vérifié exact sur les 2 PDF). Sans ce marqueur en plus, ces
+# devis ressortaient à 0 article malgré le fournisseur bien reconnu.
+# Élargir ce marqueur a aussi révélé (fixture electric_plus_gmr.pdf,
+# déjà en place) que 7 lignes "PR" y étaient silencieusement perdues
+# depuis le début, sans qu'aucune anomalie ne soit levée (pas de contrôle
+# de Total HT document pour ce parser devis, contrairement au BL) — voir
+# tests/test_parsers.py::test_parse_electricplus.
+# Limite résiduelle NON corrigée (règle d'or, un seul exemple à ce jour) :
+# sur ce même document, la ligne WAG2273205 n'a AUCUN marqueur PF/PR du
+# tout (montant 120,00€ imprimé directement après le prix net) — reste
+# non extraite, voir "Points fragiles" dans CLAUDE.md.
+MARQUEUR = ["PF", "PR"]
 OFFSETS = {
     "reference_fournisseur": -5,
     "designation": -4,
@@ -146,6 +161,18 @@ MOTIF_FACTURE_DATE_ELECTRICPLUS = re.compile(
 # \w/\W, vérifié sur ce document réel).
 MOTIF_IDENTIFIANT_PAGE_ELECTRICPLUS = re.compile(r"\b(\d{6,7})\b")
 MOTIF_ENTETE_TABLEAU_ELECTRICPLUS = re.compile(r"REFERENCES")
+# BUG RÉEL CORRIGÉ (2e lot, fichier multi-fournisseurs) : sur ce document,
+# l'en-tête de colonnes ("DESIGNATION QTE PRIX UNIT.HT...") s'est retrouvé
+# GROUPÉ PAR L'OCR (tolérance Y de regrouper_lignes) sur la MÊME ligne
+# visuelle que la référence+désignation du 1er article ("PLA11525
+# EMBTMOULUREKEVA32MMX12MM DESIGNATION QTE..."). Cette ligne échouait
+# alors totalement (cellules[-2]/cellules[-1] = "MONTANT HT"/"TVA", pas
+# des nombres) et sa référence/désignation était perdue — le 1er article
+# ressortait avec la référence de la ligne SUIVANTE (le morceau de
+# désignation qui y avait débordé) prise à tort pour une référence. Voir
+# _zone_tableau_electricplus, qui détache désormais les cellules
+# précédant ce motif et les reporte sur la ligne suivante.
+MOTIF_ENTETE_COLONNES_ELECTRICPLUS = re.compile(r"^(DESIGNATION|QTE|PRIX|P\.?U\.?|MONTANT|TVA)", re.IGNORECASE)
 MOTIF_PIED_TABLEAU_ELECTRICPLUS = re.compile(r"TOTALHT|CODESTVA")
 MOTIF_TOTAL_HT_ELECTRICPLUS = re.compile(r"TOTALHT(\d[\d\s]*[,.]\d{2})")
 MOTIF_REF_INCOMPLETE_ELECTRICPLUS = re.compile(r"^[A-Z]{1,3}$")
@@ -186,7 +213,25 @@ def _zone_tableau_electricplus(lignes_groupees: list[list[dict]]) -> list[list[d
         None,
     )
 
-    return lignes_groupees[i_entete + 1:(i_pied if i_pied is not None else len(lignes_groupees))]
+    zone = list(lignes_groupees[i_entete + 1:(i_pied if i_pied is not None else len(lignes_groupees))])
+
+    # Voir bandeau GABARIT BL (MOTIF_ENTETE_COLONNES_ELECTRICPLUS) : si la
+    # 1re ligne de la zone mélange des cellules d'en-tête ("DESIGNATION",
+    # "QTE"...) AVEC des cellules qui les précèdent (la référence/
+    # désignation du 1er article, entraînées dans le même groupement Y),
+    # ces cellules précédentes sont détachées et reportées en tête de la
+    # ligne suivante plutôt que perdues avec le reste de la ligne d'en-tête.
+    if zone:
+        i_entete_colonne = next(
+            (i for i, m in enumerate(zone[0]) if MOTIF_ENTETE_COLONNES_ELECTRICPLUS.match(m["texte"].strip())),
+            None,
+        )
+        if i_entete_colonne is not None and i_entete_colonne > 0 and len(zone) > 1:
+            cellules_reportees = zone[0][:i_entete_colonne]
+            zone[1] = cellules_reportees + zone[1]
+            zone = zone[1:]
+
+    return zone
 
 
 def _ligne_vers_article_electricplus(cellules: list[str]) -> LigneBL | None:
@@ -224,6 +269,18 @@ def _ligne_vers_article_electricplus(cellules: list[str]) -> LigneBL | None:
         return None
 
     reference = cellules[0].strip()
+
+    # BUG RÉEL CORRIGÉ (2e lot, fichier multi-fournisseurs) : une ligne
+    # chiffrée peut se retrouver SANS aucune référence/désignation
+    # adjacente (le regroupement Y de l'OCR les a rattachées à une AUTRE
+    # ligne, ou elles manquent purement et simplement sur ce document) —
+    # cellules[0] est alors la QUANTITÉ elle-même ("70,00MTR"), jamais une
+    # vraie référence. Mieux vaut ne PAS produire de ligne du tout (le
+    # contrôle du Total HT du document signalera honnêtement qu'une ligne
+    # manque) que d'écrire une "référence" qui n'en est pas une.
+    if MOTIF_QTE_OU_NOMBRE_ELECTRICPLUS.match(reference):
+        return None
+
     debut_designation = 1
 
     if (

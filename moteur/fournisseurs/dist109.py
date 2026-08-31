@@ -51,8 +51,35 @@ OFFSETS_DEVIS_BPU = {
 # ex. "LK4288", "CR1/3G2.5", "M-160101" (tiret), "GOUJON 8X70" (espace) —
 # ces deux derniers manquaient silencieusement (0 anomalie levée à tort)
 # tant que le contrôle Total HT du PDF n'a pas signalé l'écart (cas réel,
-# chantier Kanopée CDC).
-MOTIF_REF_DEVIS_BPU = re.compile(r"^[A-Z0-9./\-\s]{5,15}$")
+# chantier Kanopée CDC). Borne haute élargie à 20 (cas réel,
+# "FRN1X6G3-3G1.5 T", 16 caractères — devis ISHOP Saint-Denis, 321051) :
+# ce n'était pas une 3e variante de gabarit, juste une référence plus
+# longue que celles vues jusque-là, écartée à tort par la borne à 15.
+# "+" ajouté à la classe de caractères (cas réel, "BTSOUT3X150+70"/
+# "BTSOUT3X95+50", devis BT - Floe 321273) : 2 lignes sur 5 manquaient
+# silencieusement (1 539,00€ sur 1 626,40€), signalé par l'autocontrôle
+# Total HT.
+MOTIF_REF_DEVIS_BPU = re.compile(r"^[A-Z0-9./+\-\s]{5,20}$")
+
+# Variante "devis_bpu" avec colonne Rem% RENSEIGNÉE (cas réel, devis ISHOP
+# 321106/Réglettes - Rico Carpaye) : la colonne "Rem%" (remise, ex.
+# "2,94") n'apparaît dans le texte extrait QUE si elle est non nulle sur
+# CE document — quand elle est présente, elle s'intercale entre Total et
+# P.U.Net, décalant tout le reste d'un cran (même famille que la cellule
+# Eco-part optionnelle déjà rencontrée côté BL Stand 64). Sans cette
+# variante, ce devis ressortait à 0 article malgré un Total HT affiché ;
+# la référence attendue (ex. "302758", 6 chiffres) tombait sur la cellule
+# P.U.Net ("45,00000", avec une virgule — rejetée par MOTIF_REF_DEVIS_BPU,
+# ce qui évite justement toute confusion silencieuse avec la variante
+# sans Rem%, voir parse_109 ci-dessous).
+OFFSETS_DEVIS_BPU_REMISE = {
+    "designation": -2,
+    "qte": -1,
+    "total": 1,
+    "rem_pct": 2,
+    "pu_net_affiche": 3,
+    "reference_fournisseur": 4,
+}
 
 MOTIF_DEVIS = r"(?:Commande client|Devis) n[°o]\s*([\d\s]+?)\s+du"
 MOTIF_TOTAL_HT = r"Total HT\s*\n\s*([\d\s]+,\d{2})\s*(?:EUR|€)"
@@ -118,16 +145,20 @@ def parse_109(texte: str) -> list[Article]:
 
     blocs_commande = scan_ancre(lignes, MARQUEURS_TVA, OFFSETS_COMMANDE)
     blocs_devis_bpu = scan_ancre(lignes, MARQUEURS_TVA, OFFSETS_DEVIS_BPU)
+    blocs_devis_bpu_remise = scan_ancre(lignes, MARQUEURS_TVA, OFFSETS_DEVIS_BPU_REMISE)
 
-    for bloc_c, bloc_d in zip(blocs_commande, blocs_devis_bpu):
+    for bloc_c, bloc_d, bloc_dr in zip(blocs_commande, blocs_devis_bpu, blocs_devis_bpu_remise):
 
         ref_c = (bloc_c["reference_fournisseur"] or "").strip()
         ref_d = (bloc_d["reference_fournisseur"] or "").strip()
+        ref_dr = (bloc_dr["reference_fournisseur"] or "").strip()
 
         if MOTIF_REF_COMMANDE.match(ref_c):
             article = _bloc_vers_article(bloc_c, devis, ref_c)
         elif MOTIF_REF_DEVIS_BPU.match(ref_d):
             article = _bloc_vers_article(bloc_d, devis, ref_d)
+        elif MOTIF_REF_DEVIS_BPU.match(ref_dr):
+            article = _bloc_vers_article(bloc_dr, devis, ref_dr)
         else:
             article = None
 

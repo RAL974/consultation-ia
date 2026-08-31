@@ -1,0 +1,7 @@
+# Demande d'origine ; Reference ; Quantite
+# Une ligne par article. Separateur = point-virgule.
+# Colonne 1 = texte du demandeur (affiche en tete du comparatif)
+# Colonne 2 = reference Legrand/fabricant (pour le rapprochement)
+# Colonne 3 = quantite
+# Source : demande William AIMAR du 28/08/2026 10:35 (citee dans devis DEM N° 821472)
+2 unites CPE/antennes directionnelles exterieures (1 emettrice + 1 receptrice), ou kit pont pre-appaire ; ; 2

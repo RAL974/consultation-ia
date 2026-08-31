@@ -220,3 +220,35 @@ def test_parse_bl_cominter_7_remise_et_px_net_colles_sans_espace():
         designation='Bloc de 4 ventilateurs pour baie de brassage 19"',
         quantite_livree=1.0, prix_net=106.5, montant=106.5,
     )
+
+
+def test_parse_bl_cominter_8_capacite_de_coupure_dans_sa_propre_cellule():
+    """BUG RÉEL CORRIGÉ (signalé par l'acheteur, données réelles du Suivi —
+    "il ne peut y avoir que des entiers en quantité") : sur la ligne
+    L406777, la capacité de coupure "4.5KA" (normalement collée en fin de
+    désignation, comme sur les 3 autres lignes de disjoncteurs de ce même
+    document) se retrouve dans SA PROPRE cellule OCR. Comme elle commence
+    aussi par un chiffre, l'ancien test `re.match(r"^\\d", ...)` la prenait
+    à tort pour la cellule Qté+Unité — décalant tout le reste d'une
+    cellule et donnant une quantité livrée de 4,5 (au lieu de 10, la vraie
+    cellule Qté juste après). La vraie cellule Qté+Unité s'écrit toujours
+    avec exactement 2 décimales ("10,00"), jamais 1 seule comme "4.5" —
+    exigé désormais en plus du simple "commence par un chiffre"."""
+
+    [bl] = parse_bl_cominter(_mots("bl_cominter_8_kA_dans_sa_propre_cellule.pdf"))
+
+    assert bl.numero_commande == "M3.23.042"
+    assert bl.numero_bl == "OBL108537"
+
+    lignes_par_ref = {l.reference_fournisseur: l for l in bl.lignes}
+
+    assert lignes_par_ref["L406777"] == LigneBL(
+        reference_fournisseur='L406777',
+        designation='DisjoncteurDNX31P+NG32A 4.5KA',
+        quantite_livree=10.0, prix_net=7.67, montant=76.7,
+    )
+    # Les 3 autres lignes de disjoncteurs (kA collé à la désignation, pas
+    # de cellule séparée) n'ont jamais été affectées par ce bug — vérifié
+    # ici pour ne pas les régresser avec le correctif.
+    for ref, qte in [("L406773", 20.0), ("L406774", 20.0), ("L406775", 20.0)]:
+        assert lignes_par_ref[ref].quantite_livree == qte

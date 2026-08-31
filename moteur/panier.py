@@ -65,6 +65,14 @@ MAPPING_FOURNISSEURS = {
     "DEM": "DEM",
     "YESSS": "YESSS",
     "YESSS MAYOTTE": "YESSS MAYOTTE",
+    "PROTECTHOMS": "Protecthoms",
+    # Vérifié dans la liste "Fournisseurs" du vrai Suivi commandes (feuille
+    # "Listes Paramètres") : "Artdeco.re" y figure telle quelle (à côté
+    # d'une entrée distincte "LEDS'Run" non retenue ici, le domaine
+    # artdeco.re étant l'ancre de détection de ce fournisseur — voir
+    # moteur/detecteur.py). À confirmer auprès de l'acheteuse si un Panier
+    # réel révèle que c'est en fait "LEDS'Run" qui est utilisé.
+    "ART DECO": "Artdeco.re",
 }
 
 TYPE_COMMANDE_DEFAUT = "Chantier"

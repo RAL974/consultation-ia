@@ -1,0 +1,21 @@
+Fil H07VU 1,5mm² vert/jaune ; H07VU1.5VJ ; 100
+Fil H07VU 1,5mm² bleu ; H07VU1.5B ; 800
+Fil H07VU 1,5mm² rouge ; H07VU1.5R ; 1000
+Fil H07VU 1,5mm² marron ; H07VU1.5M ; 300
+Fil H07VU 1,5mm² orange ; H07VU1.5O ; 500
+Fil H07VU 1,5mm² noir ; H07VU1.5N ; 200
+Fil H07VU 1,5mm² violet ; H07VU1.5V ; 300
+Fil H07VU 2,5mm² vert/jaune ; H07VU2.5VJ ; 1200
+Fil H07VU 2,5mm² bleu ; H07VU2.5B ; 1100
+Fil H07VU 2,5mm² rouge ; H07VU2.5R ; 1100
+Gaine ICT Ø20 lubrifiée ; 06620 ; 400
+Gaine ICT Ø25 lubrifiée ; 06625 ; 500
+Wago 2T ; WAG2T ; 13
+Wago 3T ; WAG3T ; 8
+Wago 4T ; WAG4T ; 3
+Wago 5T ; WAG5T ; 7
+Préfilé PTT ; PREFPTT ; 300
+Préfilé TV ; PREFTV ; 300
+Préfilé 1G16 ; PREF1G16 ; 200
+Préfilé 3G2,5 ; PREF3G2.5 ; 500
+Gaine ICT Ø25 classique ; ICTØ25 ; 1000

@@ -158,22 +158,66 @@ def code_interne_ampoule(designation: str):
     return f"AMP_LED_{cu_code}_{t}K" if t else f"AMP_LED_{cu_code}"
 
 
+# Sections de conducteur normalisées (mm²) : borne le repli "premier
+# nombre de la désignation" pour ne pas prendre un conditionnement
+# ("- 50", "X8") pour une section.
+_SECTIONS_EMBOUT = {"0.5", "0.75", "1", "1.5", "2.5", "4", "6", "10", "16",
+                    "25", "35", "50", "70", "95", "120", "150"}
+
+# Couleurs du code NF des embouts : leur présence identifie un embout de
+# câblage même sans le mot CABLAGE (cas réel RAVATE "EMBOUT  6  VERT - 50").
+_COULEURS_EMBOUT = ("NOIR", "GRIS", "VERT", "ROUGE", "BLEU", "JAUNE",
+                    "BLANC", "ORANGE", "IVOIRE", "BEIGE", "TURQUOISE", "VIOLET")
+
+
 def code_interne_embout(designation: str):
-    du = (designation or "").upper()
+    # Pliage d'accents indispensable : "CÂBLAGE" ne contient pas "CABL"
+    # (cas réel COMINTER "Embout de câblage isolé noir 1,5mm²" -> aucun
+    # code, donc jamais regroupé avec les embouts des autres fournisseurs).
+    import unicodedata
+    du = "".join(
+        c for c in unicodedata.normalize("NFKD", (designation or "").upper())
+        if not unicodedata.combining(c)
+    )
+    du = re.sub(r"(\d)\s*,\s*(\d)", r"\1.\2", du)   # "2, 5MM2" -> "2.5MM2"
 
     if "EMBOUT" not in du:
         return None
 
+    # Embouts d'obturation (goulotte, rail, tube...) : pas des ferrules.
+    if any(x in du for x in ("GOULOTTE", "RAIL", "TUBE", "MOULURE", "PLINTHE")):
+        return None
+
     # embout de câblage / repérage / ferrule, identifié par la section
-    if any(x in du for x in ("CABL", "REP", "IVOIRE", "BEIGE")) or re.search(r"\bC\.?\s?\d", du):
-        m = re.search(r"(\d+(?:[.,]\d+)?)\s*(?:MM²|MM2|MM|²)", du)
+    if (any(x in du for x in ("CABL", "REP", "DOUBLE", "PREISOL", "ISOL"))
+            or any(c in du for c in _COULEURS_EMBOUT)
+            or re.search(r"\bC\.?\s?\d", du)):
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:MM²|MM2|MM|²)", du)
         if not m:
-            m = re.search(r"\b(\d+(?:[.,]\d+)?)\b", du)
+            # Section sans unité : premier nombre appartenant aux sections
+            # normalisées ("EMBOUT  1.5  NOIR - 50" -> 1.5, pas 50... sauf
+            # désignation réduite à "EMBOUT ... 50" où 50 mm² est retenu).
+            for cand in re.findall(r"\b\d+(?:\.\d+)?\b", du):
+                cand = cand.rstrip("0").rstrip(".") if "." in cand else cand
+                if cand in _SECTIONS_EMBOUT:
+                    class _M:  # même interface que re.Match pour la suite
+                        def group(self, _):
+                            return cand
+                    m = _M()
+                    break
         if m:
             sec = m.group(1).replace(",", ".")
             if "." in sec:
                 sec = sec.rstrip("0").rstrip(".")
-            return f"EMBOUT_{sec}"
+            if sec not in _SECTIONS_EMBOUT:
+                return None
+            # Simple et double (préisolé 2 x <section>) sont des articles
+            # DIFFÉRENTS : sans ce suffixe, "EMBOUT DOUBLE 2.5MM2" et
+            # "EMBOUT DE CABLAGE 2.5" tombaient dans le même groupe et le
+            # comparatif affichait des prix de simples face à un besoin de
+            # doubles (cas réel, consultation Rico Carpaye).
+            double = "DOUBLE" in du or re.search(r"\b2\s*X\s*" + re.escape(sec), du)
+            return f"EMBOUT_{sec}_DOUBLE" if double else f"EMBOUT_{sec}"
 
     return None
 

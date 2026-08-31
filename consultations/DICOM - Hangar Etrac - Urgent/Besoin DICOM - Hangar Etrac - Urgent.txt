@@ -1,0 +1,7 @@
+Câble 5G16mm2 ; ; 40
+Manchons à sertir 16mm2 ; ; 5
+Gaine thermo pour fil 16mm2 ; ; 1
+Tube IRO Ø32 avec fixation ; ; 30
+Disjoncteur 4P 63A Schneider ; A9F77463 ; 1
+Auxiliaire Schneider ; A9A26904 ; 1
+Bobine MX Schneider ; A9A26946 ; 1

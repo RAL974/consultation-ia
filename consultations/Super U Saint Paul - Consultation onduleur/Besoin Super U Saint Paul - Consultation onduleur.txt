@@ -1,0 +1,6 @@
+# Demande d'origine ; Reference ; Quantite
+# Une ligne par article. Separateur = point-virgule.
+# Colonne 1 = texte du demandeur (affiche en tete du comparatif)
+# Colonne 2 = reference Legrand/fabricant (pour le rapprochement)
+# Colonne 3 = quantite
+1 onduleur 45kVA conforme au CCTP ci-joint ; ; 1

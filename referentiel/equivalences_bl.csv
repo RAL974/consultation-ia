@@ -24,3 +24,5 @@
 Reference_1;Reference_2;Note
 CFF1BIS;59210;109 Distribution, commande 139.111 - colliers à embase RAMTUB 16/32 boîte de 100, même désignation/tarif, substitution fournisseur pure (CFF1BIS = référence catalogue/Suivi d'origine, 59210 = ce qui a été livré)
 411651;092897;Coredime, commande M3.23.045 - interrupteur différentiel Legrand, 092897 = référence grand public de 411651 (référence professionnelle déjà connue de la BDD achats), même désignation
+C019BT;FILVK16BT;DEM, commande M3.23.046 - câble souple HO7VK 16 bleu touret, C019BT = référence catalogue BDD (déjà utilisée par COMINTER), FILVK16BT = code interne DEM, même désignation/quantité (20)
+C019RT;FILVK16RT;DEM, commande M3.23.046 - câble souple HO7VK 16 rouge touret, C019RT = référence catalogue BDD (déjà utilisée par COMINTER), FILVK16RT = code interne DEM, même désignation/quantité (20)

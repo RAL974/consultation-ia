@@ -113,7 +113,11 @@ def parse_ravate(texte: str) -> list[Article]:
 # remise) — toléré comme séparateur décimal au même titre que "," et ".".
 MOTIF_CODE_ART_BL_RAVATE = re.compile(r"^(100\d{6}|44200\d{3})$")
 MOTIF_REF_FOURNISSEUR_BL_RAVATE = re.compile(r"^[A-Z0-9][A-Z0-9./]{2,10}$")
-MOTIF_ENTETE_TABLEAU_BL_RAVATE = re.compile(r"REFERENCEFOURNISSEUR")
+# BUG RÉEL CORRIGÉ (2e lot du jour) : "Reference" lu "Reterence" par l'OCR
+# (F confondu avec T) sur un document par ailleurs propre — l'ancre ne
+# matchait alors plus DU TOUT, la zone du tableau ressortait vide (0 ligne
+# extraite pour un Total HT de 204,86€ affiché). "F" rendu tolérant au T.
+MOTIF_ENTETE_TABLEAU_BL_RAVATE = re.compile(r"RE[FT]ERENCEFOURNISSEUR")
 MOTIF_PIED_TABLEAU_BL_RAVATE = re.compile(r"\d*LIGNE")
 # "BC 00312608CC0056 AU 04/08/2026 M3.23.033" (espaces, tirets ou rien du
 # tout selon le scan, y compris entre "AU" et la date, et entre la date et
@@ -132,22 +136,60 @@ MOTIF_PIED_TABLEAU_BL_RAVATE = re.compile(r"\d*LIGNE")
 # matchait plus DU TOUT, faisant échouer toute la ligne (numéro de
 # commande ET exclusion de cette ligne-repère hors de la désignation, qui
 # réutilise ce même motif).
-MOTIF_BC_COMMANDE_BL_RAVATE = re.compile(r"AU\s*[\dB]{1,2}/\S{2}/\d{2,4}\s*([A-Z]?[\dB][\dB.-]*)\s*$", re.IGNORECASE)
+# BUG RÉEL CORRIGÉ (2e lot, fichier multi-fournisseurs) : "AU" collé
+# directement au tiret introducteur de la date ("AU-25/08/2026") et la
+# date collée au tiret introducteur de la commande ("2026--135-049") —
+# les deux "\s*" d'origine n'acceptaient QUE des espaces, jamais un tiret
+# à cet endroit précis (distinct du tiret déjà toléré DANS la commande
+# elle-même) : la commande ressortait introuvable alors que le BL était
+# par ailleurs propre. "\s*" élargi en "[\s-]*" aux deux endroits.
+# BUG RÉEL CORRIGÉ (2e lot du jour, 2 documents du même lot) : le "/"
+# séparateur de date lu "7" par l'OCR ("AU16706/2026...", voire les DEUX
+# "/" lus "7" — "AU1670672026." — confirmé par la cellule date isolée du
+# même document, "1670672026", même corruption). "/" élargi en "[/.7]"
+# aux deux séparateurs de la date (sans risque de confusion : jour et mois
+# ont une longueur fixe dans le motif, "7" ne peut donc jamais être pris
+# pour un chiffre du jour/mois lui-même). Le séparateur avant la commande
+# tolère aussi "." en plus de espace/tiret (vu collé par un point dans le
+# même document, "...2026.M3.18.223").
+# BUG RÉEL CORRIGÉ (BL 143.194 GYSM.jpg) : un préfixe de nom de chantier
+# ("GYSM-143.194", collé sans espace après la date) n'était pas reconnu —
+# le groupe capturant ([A-Z]?...) ne tolère qu'UNE SEULE lettre de préfixe
+# (le "M"/"i"/"o" habituel DEVANT la commande elle-même), pas tout un mot
+# comme "GYSM". Sans ce cas, `numero_commande` ressortait vide et le BL
+# s'est archivé dans "Commande inconnue" au lieu de "143.194" — corrigé en
+# tolérant un mot de lettres majuscules suivi d'un tiret AVANT la commande
+# elle-même, optionnel pour ne rien changer aux cas déjà couverts (un seul
+# "M"/"i"/"o" isolé ne peut jamais matcher "LETTRES-", faute du tiret qui
+# suit immédiatement dans la commande réelle).
+MOTIF_BC_COMMANDE_BL_RAVATE = re.compile(r"AU[\s-]*[\dB]{1,2}[/.7]\S{2}[/.7]\d{2,4}[\s.\-]*(?:[A-Z]+-)?([A-Z]?[\dB][\dB.-]*)\s*$", re.IGNORECASE)
 # N° de BL (ex. "00312608LV0027") : motif stable sur les 6 pièces réelles
 # (préfixe variable + "LV" + 3-5 chiffres), contrairement à une position de
 # cellule fixe (la date de livraison se trouve tantôt seule sur sa propre
 # ligne, tantôt dans la même ligne que ce code — les deux cas réels
 # coexistent).
 MOTIF_NUMERO_BL_RAVATE = re.compile(r"(\d{6,10}LV\d{3,5})")
-MOTIF_DATE_BL_RAVATE = re.compile(r"(\d{1,2})/(\d{2})/(\d{4})")
+# BUG RÉEL CORRIGÉ (2e lot, fichier multi-fournisseurs) : le 2e séparateur
+# lu "." au lieu de "/" par l'OCR (ex. "25/08.2026" au lieu de
+# "25/08/2026", sur une pièce par ailleurs propre) — les deux séparateurs
+# acceptent désormais "/" OU "." indifféremment, même famille de tolérance
+# que les confusions de ponctuation déjà rencontrées chez ce fournisseur.
+MOTIF_DATE_BL_RAVATE = re.compile(r"(\d{1,2})[/.](\d{2})[/.](\d{4})")
 # Repli si le code "...LV####" est trop abîmé par l'OCR pour être reconnu
 # (cas réel : "QQ312608LV0Q48", Q à la place de 0 à plusieurs endroits) :
 # une cellule ISOLÉE (ligne entière) au format JJ/MM/AAAA, préfixe non-chiffre
 # optionnel toléré (le ":" de "Date :" parfois collé devant, cf. "：06/08/2026").
 # Exclut naturellement la ligne "BC n°... AU <date>..." (jamais isolée).
-MOTIF_DATE_ISOLEE_BL_RAVATE = re.compile(r"^\D{0,2}(\d{1,2})/(\d{2})/(\d{4})$")
+MOTIF_DATE_ISOLEE_BL_RAVATE = re.compile(r"^\D{0,2}(\d{1,2})[/.](\d{2})[/.](\d{4})$")
 MOTIF_TOTAL_HT_BL_RAVATE = re.compile(r"TOTALHT(\d[\d\s]*[,.]\d{2})")
-MOTIF_ARGENT_BL_RAVATE = re.compile(r"^(\d[\d\s]*[,.*]\d{2})[:.\d]{0,3}$")
+# BUG RÉEL CORRIGÉ (2e lot du jour) : la virgule décimale peut aussi être
+# lue ":" par l'OCR ("0:00" au lieu de "0,00", sur une ligne par ailleurs
+# propre) — même famille que la confusion "*" déjà tolérée. Sans risque de
+# confondre avec le cas COMBO ci-dessous (2 montants séparés par ":") : la
+# partie après les 2 décimales ne peut alors JAMAIS tenir dans les 3
+# caractères de fin autorisés ici, le motif échoue proprement et le repli
+# sur MOTIF_ARGENT_COMBO_BL_RAVATE prend le relais.
+MOTIF_ARGENT_BL_RAVATE = re.compile(r"^(\d[\d\s]*[,.*:]\d{2})[:.\d]{0,3}$")
 # Cas réel (commande M3.10.182) : Px Net et Remises collés dans UNE SEULE
 # cellule séparés par ":" et SANS espace ("6,75:1288,30") — même famille que
 # le bug remise/Px net Cominter (voir moteur/fournisseurs/cominter.py) mais
@@ -165,7 +207,7 @@ def _argent_bl_ravate(cellule: str):
     cellule = cellule.strip()
     m = MOTIF_ARGENT_BL_RAVATE.match(cellule)
     if m:
-        return _to_float(m.group(1).replace("*", ","))
+        return _to_float(m.group(1).replace("*", ",").replace(":", ","))
     m = MOTIF_ARGENT_COMBO_BL_RAVATE.match(cellule)
     if m:
         return _to_float(m.group(1).replace("*", ","))

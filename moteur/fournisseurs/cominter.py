@@ -478,8 +478,35 @@ def _ligne_bl_vers_article_cominter(cellules: list[str]) -> LigneBL | None:
     if not montant or not prix_net:
         return None
 
+    # BUG RÉEL CORRIGÉ (recette réelle, M2.17.006/OBL108540,
+    # M3.23.042/OBL108537 et M4.272/OBL108653) : la capacité de coupure du
+    # disjoncteur DNX³ ("4.5KA" ou "4.5 KA", partie de la désignation) se
+    # retrouve parfois dans SA PROPRE cellule OCR au lieu de rester collée
+    # au reste de la désignation — `re.match(r"^\d", ...)` (qui accepte
+    # tout ce qui COMMENCE par un chiffre) la prenait alors à tort pour la
+    # cellule Qté(+Unité), décalant tout le reste d'une cellule. Résultat
+    # concret déjà écrit dans le Suivi avant correction : "4,5"
+    # disjoncteurs livrés au lieu de 10/20 (la vraie quantité, toujours à
+    # la cellule suivante) — repéré par l'acheteur ("il ne peut y avoir
+    # que des entiers en quantité"). DEUX tentatives précédentes cassées,
+    # gardées en mémoire pour ne pas y retomber :
+    # - `fullmatch` sur 2 décimales : rejette aussi le format M4.272, où
+    #   Qté+Unité sont DANS LA MÊME cellule ("7,00 Unite" — du texte suit
+    #   les 2 décimales, un fullmatch échoue).
+    # - Exiger une VIRGULE (pas un point) : rejette à tort une vraie
+    #   quantité écrite avec un point ("3.00 Unite", bl_cominter_3.pdf) —
+    #   virgule/point ne distinguent PAS de façon fiable une vraie
+    #   quantité de "4.5KA" (les deux séparateurs existent des deux
+    #   côtés selon les documents).
+    # Signal qui tient sur TOUS les cas réels observés (2 fournisseurs
+    # confondus, virgule ET point) : une vraie cellule Qté a TOUJOURS
+    # exactement 2 chiffres après le séparateur ("10,00", "3.00", "542,00"
+    # — jamais "10,0" ni "10,000"), alors que "4.5KA"/"4.5 KA" n'en a
+    # qu'UN SEUL ("5"). `re.match` (préfixe, pas `fullmatch`) pour
+    # continuer à accepter tout ce qui suit collé ou espacé (unité,
+    # "/Unite", TVA glissée...).
     j = 1
-    while j < fin - 1 and not re.match(r"^\d", cellules[j].strip()):
+    while j < fin - 1 and not re.match(r"^\d+[,.]\d{2}", cellules[j].strip()):
         j += 1
     designation = " ".join(c.strip() for c in cellules[1:j]).strip()
 

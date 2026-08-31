@@ -1,0 +1,16 @@
+# Demande d'origine ; Reference ; Quantite
+# Une ligne par article. Separateur = point-virgule.
+# Colonne 1 = texte du demandeur (affiche en tete du comparatif)
+# Colonne 2 = reference Legrand/fabricant (pour le rapprochement)
+# Colonne 3 = quantite
+20 prises TV-R SAT ; 600353 ; 20
+15 Hublot Ø265mm E27 220VAC IP65 Blanc Rond Deimos ; ; 15
+10 Eo S19 LED 400lm 3000K PC 20VA blanc ; ; 10
+20 peignes d'alimentation universel P+N horizontal 13 modules ; 404926 ; 20
+15 griffes pour appareillage dooxie ; 600049 ; 15
+20m câble souple HO7VK 16mm² bleu ; ; 20
+20m câble souple HO7VK 16mm² rouge ; ; 20
+40 ampoules E27 A60 8W 900Lm 4000K ; ; 40
+80 couvercles de finition DCL diam. 120 excentrée SIB ; P01120 ; 80
+20 prises de courant 2P+T étanche PLEXO encastrée gris ; 069831L ; 20
+10 prises de courant 2P+T étanche PLEXO saillie gris ; 069731L ; 10

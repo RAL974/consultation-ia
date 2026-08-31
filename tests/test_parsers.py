@@ -14,6 +14,7 @@ from moteur.fournisseurs.dem import parse_dem
 from moteur.fournisseurs.dist109 import parse_109
 from moteur.fournisseurs.cominter import parse_cominter
 from moteur.fournisseurs.electricplus import parse_electricplus
+from moteur.fournisseurs.artdeco import parse_artdeco
 
 from conftest import FIXTURES
 
@@ -29,6 +30,7 @@ def test_detection_fournisseurs():
     assert detecter_fournisseur(_texte("109_distribution.pdf")) == "109 DISTRIBUTION"
     assert detecter_fournisseur(_texte("cominter.pdf")) == "COMINTER"
     assert detecter_fournisseur(_texte("electric_plus_gmr.pdf")) == "ELECTRIC PLUS"
+    assert detecter_fournisseur(_texte("artdeco_1.pdf")) == "ART DECO"
 
 
 def test_parse_ravate():
@@ -76,8 +78,22 @@ def test_parse_coredime():
 
 
 def test_parse_dem():
+    # Les 8 premières lignes (références à POINT : FILVU1.5B...) étaient
+    # SILENCIEUSEMENT PERDUES avant le correctif de MOTIF_LIGNE (la classe
+    # de la référence n'admettait pas le point) : ce fixture ne rendait que
+    # 9 lignes sur 18, sans qu'aucune anomalie ne soit levée. La somme
+    # extraite vaut désormais exactement le Total H.T. imprimé (2822,00 €).
     articles = parse_dem(_texte("dem.pdf"))
+    assert round(sum(a.montant for a in articles), 2) == 2822.00
     assert articles == [
+        Article(fournisseur='DEM', devis='821035', reference_fournisseur='FILVU1.5B', reference_distributeur='', designation='VU 1.5 BLEU C100', quantite=900.0, unite='U', prix_brut=0.195, prix_net=0.195, montant=175.5, disponibilite=''),
+        Article(fournisseur='DEM', devis='821035', reference_fournisseur='FILVU1.5R', reference_distributeur='', designation='VU 1.5 ROUGE C100', quantite=800.0, unite='U', prix_brut=0.195, prix_net=0.195, montant=156.0, disponibilite=''),
+        Article(fournisseur='DEM', devis='821035', reference_fournisseur='FILVU1.5O', reference_distributeur='', designation='VU 1.5 ORANGE C100', quantite=500.0, unite='U', prix_brut=0.195, prix_net=0.195, montant=97.5, disponibilite=''),
+        Article(fournisseur='DEM', devis='821035', reference_fournisseur='FILVU1.5N', reference_distributeur='', designation='VU 1.5 NOIR C100', quantite=200.0, unite='U', prix_brut=0.195, prix_net=0.195, montant=39.0, disponibilite=''),
+        Article(fournisseur='DEM', devis='821035', reference_fournisseur='FILVU1.5V', reference_distributeur='', designation='VU 1.5 VIOLET C100', quantite=100.0, unite='U', prix_brut=0.2, prix_net=0.2, montant=20.0, disponibilite=''),
+        Article(fournisseur='DEM', devis='821035', reference_fournisseur='FILVU2.5VJ', reference_distributeur='', designation='VU 2.5 VERT/JAUNE C100', quantite=100.0, unite='U', prix_brut=0.3, prix_net=0.3, montant=30.0, disponibilite=''),
+        Article(fournisseur='DEM', devis='821035', reference_fournisseur='FILVU2.5B', reference_distributeur='', designation='VU 2.5 BLEU C100', quantite=1100.0, unite='U', prix_brut=0.3, prix_net=0.3, montant=330.0, disponibilite=''),
+        Article(fournisseur='DEM', devis='821035', reference_fournisseur='FILVU2.5R', reference_distributeur='', designation='VU 2.5 ROUGE C100', quantite=1400.0, unite='U', prix_brut=0.3, prix_net=0.3, montant=420.0, disponibilite=''),
         Article(fournisseur='DEM', devis='821035', reference_fournisseur='CAPCAP309284', reference_distributeur='', designation='100 BORNES DE CONNEXION STAND  2 ENTREES POUR FILS RIGIDES 0,', quantite=800.0, unite='U', prix_brut=0.07, prix_net=0.07, montant=56.0, disponibilite=''),
         Article(fournisseur='DEM', devis='821035', reference_fournisseur='CAPCAP309285', reference_distributeur='', designation='100 BORNES DE CONNEXION STAND  3 ENTREES POUR FILS RIGIDES 0,', quantite=500.0, unite='U', prix_brut=0.085, prix_net=0.085, montant=42.5, disponibilite=''),
         Article(fournisseur='DEM', devis='821035', reference_fournisseur='CAPCAP309286', reference_distributeur='', designation='100 BORNES DE CONNEXION STAND  4 ENTREES POUR FILS RIGIDES 0,', quantite=300.0, unite='U', prix_brut=0.095, prix_net=0.095, montant=28.5, disponibilite=''),
@@ -86,6 +102,7 @@ def test_parse_dem():
         Article(fournisseur='DEM', devis='821035', reference_fournisseur='EUR52097', reference_distributeur='', designation="POT SIMPLE AIR'METIC            67mm PROF 50mm", quantite=100.0, unite='U', prix_brut=0.48, prix_net=0.48, montant=48.0, disponibilite=''),
         Article(fournisseur='DEM', devis='821035', reference_fournisseur='TUBFFPTT', reference_distributeur='', designation='FOURREAU FILE PTT ICT20', quantite=500.0, unite='U', prix_brut=0.43, prix_net=0.43, montant=215.0, disponibilite=''),
         Article(fournisseur='DEM', devis='821035', reference_fournisseur='TUBFFTV', reference_distributeur='', designation='FOURREAU FILE TV17VATC', quantite=200.0, unite='U', prix_brut=0.55, prix_net=0.55, montant=110.0, disponibilite=''),
+        Article(fournisseur='DEM', devis='821035', reference_fournisseur='TUBFF3G1.5ICT16', reference_distributeur='', designation='FOURREAU FILE 3G1.5 ICT16', quantite=200.0, unite='U', prix_brut=0.8, prix_net=0.8, montant=160.0, disponibilite=''),
         Article(fournisseur='DEM', devis='821035', reference_fournisseur='TUBFF3G6', reference_distributeur='', designation='FF 3G6 RGE B V/J C50', quantite=200.0, unite='U', prix_brut=3.7125, prix_net=3.7125, montant=742.5, disponibilite=''),
     ]
 
@@ -169,15 +186,73 @@ def test_parse_109_distribution_variante_devis_bpu():
     assert round(sum(a.montant for a in articles), 2) == 1909.39
 
 
-def test_parse_electricplus():
-    articles = parse_electricplus(_texte("electric_plus_gmr.pdf"))
+def test_parse_109_distribution_variante_devis_bpu_reference_longue():
+    # Même variante "devis_bpu" que ci-dessus, PAS une 3e variante malgré
+    # le message d'anomalie initial (devis ISHOP Saint-Denis n° 321051) :
+    # la référence "FRN1X6G3-3G1.5 T" fait 16 caractères, au-delà de la
+    # borne à 15 de MOTIF_REF_DEVIS_BPU — élargie à 20.
+    articles = parse_109(_texte("109_distribution_2_ref_longue_devis_bpu.pdf"))
     assert articles == [
+        Article(fournisseur='109 DISTRIBUTION', devis='321051', reference_fournisseur='FRN1X6G3-3G1.5 T', reference_distributeur='', designation='CABLE FR-N1X6G3-U 3G1,5 T500', quantite=100.0, unite='UN', prix_brut=1.2, prix_net=1.2, montant=120.0, disponibilite=''),
+    ]
+    assert round(sum(a.montant for a in articles), 2) == 120.00
+
+
+def test_parse_109_distribution_variante_devis_bpu_remise():
+    # Variante "devis_bpu" avec colonne Rem% renseignée (devis ISHOP
+    # 321106/Réglettes - Rico Carpaye) : "Rem%" (ex. "2,94") s'intercale
+    # entre Total et P.U.Net quand elle est non nulle, décalant tout le
+    # reste d'un cran — voir OFFSETS_DEVIS_BPU_REMISE dans dist109.py.
+    articles = parse_109(_texte("109_distribution_3_devis_bpu_remise.pdf"))
+    assert articles == [
+        Article(fournisseur='109 DISTRIBUTION', devis='321106', reference_fournisseur='302758', reference_distributeur='', designation='REGLETTE VEGAS III 32W 4000K-IP66-IK08-CLII 4760lm DET HF ON-OFF', quantite=14.0, unite='UN', prix_brut=45.0, prix_net=45.0, montant=630.0, disponibilite=''),
+        Article(fournisseur='109 DISTRIBUTION', devis='321106', reference_fournisseur='302759', reference_distributeur='', designation='REGLETTE VEGAS III 44W 4000K-IP66-IK08-CLII 6440lm DET HF ON-OFF', quantite=14.0, unite='UN', prix_brut=52.0, prix_net=52.0, montant=728.0, disponibilite=''),
+    ]
+    assert round(sum(a.montant for a in articles), 2) == 1358.00
+
+
+def test_parse_109_distribution_reference_avec_plus():
+    # Trouvé en vérifiant BT - Floe (devis 321273) après le correctif
+    # ci-dessus : "BTSOUT3X150+70"/"BTSOUT3X95+50" contiennent un "+",
+    # absent de la classe de caractères de MOTIF_REF_DEVIS_BPU — 2 lignes
+    # sur 5 manquaient silencieusement (1 539,00€ sur 1 626,40€), révélé
+    # par l'autocontrôle Total HT.
+    articles = parse_109(_texte("109_distribution_4_ref_avec_plus.pdf"))
+    assert articles == [
+        Article(fournisseur='109 DISTRIBUTION', devis='321273', reference_fournisseur='BTSOUT3X150+70', reference_distributeur='', designation='CABLE BT SOUTERRAIN 3x150 + 70 - NFC33210 T250M', quantite=60.0, unite='UN', prix_brut=18.4, prix_net=18.4, montant=1104.0, disponibilite=''),
+        Article(fournisseur='109 DISTRIBUTION', devis='321273', reference_fournisseur='BTSOUT3X95+50', reference_distributeur='', designation='CABLE BT SOUTERRAIN 3x95 + 50 - NFC33210 T 250M', quantite=30.0, unite='UN', prix_brut=14.5, prix_net=14.5, montant=435.0, disponibilite=''),
+        Article(fournisseur='109 DISTRIBUTION', devis='321273', reference_fournisseur='C-9-92KL', reference_distributeur='', designation='COLLIER COLSON 9 X 355', quantite=2.0, unite='UN', prix_brut=14.8, prix_net=14.8, montant=29.6, disponibilite=''),
+        Article(fournisseur='109 DISTRIBUTION', devis='321273', reference_fournisseur='C-9-62KL', reference_distributeur='', designation='COLLIER COLSON 9 X 265', quantite=2.0, unite='UN', prix_brut=11.0, prix_net=11.0, montant=22.0, disponibilite=''),
+        Article(fournisseur='109 DISTRIBUTION', devis='321273', reference_fournisseur='6880544', reference_distributeur='', designation='GAINE REMONTEE POTEAU PVC -  GPC 90 GRIS 2.75M', quantite=2.0, unite='UN', prix_brut=17.9, prix_net=17.9, montant=35.8, disponibilite=''),
+    ]
+    assert round(sum(a.montant for a in articles), 2) == 1626.40
+
+
+def test_parse_electricplus():
+    # Les 7 premières lignes (CAB0001*0C100, câbles HO7V-U) étaient
+    # SILENCIEUSEMENT PERDUES avant l'élargissement de MARQUEUR à ["PF",
+    # "PR"] (voir bandeau GABARIT electricplus.py) : leur colonne
+    # d'ancrage affiche "PR" au lieu de "PF" sur ce même document réel,
+    # jamais remarqué avant que 2 devis entiers (BT-Floe, R2V 3G1.5)
+    # ressortent à 0 article pour la même raison. Total encore incomplet
+    # de 120,00 € (WAG2273205, ligne SANS AUCUN marqueur PF/PR imprimé —
+    # un seul exemple à ce jour, non corrigé, voir "Points fragiles").
+    articles = parse_electricplus(_texte("electric_plus_gmr.pdf"))
+    assert round(sum(a.montant for a in articles), 2) == 3894.15
+    assert articles == [
+        Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='CAB000100C100', reference_distributeur='', designation='HO7V-U 1,5 BLEU CIEL      C100', quantite=900.0, unite='UN', prix_brut=0.22, prix_net=0.22, montant=198.0, disponibilite=''),
+        Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='CAB000110C100', reference_distributeur='', designation='HO7V-U 1,5 ROUGE          C100', quantite=800.0, unite='UN', prix_brut=0.22, prix_net=0.22, montant=176.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='CAB000130C100', reference_distributeur='', designation='HO7V-U 1,5 NOIR           C100', quantite=200.0, unite='UN', prix_brut=0.27, prix_net=0.27, montant=54.0, disponibilite=''),
+        Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='CAB000170C100', reference_distributeur='', designation='HO7V-U 1,5 VIOLET         C100', quantite=100.0, unite='UN', prix_brut=0.22, prix_net=0.22, montant=22.0, disponibilite=''),
+        Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='CAB000220C100', reference_distributeur='', designation='HO7V-U 2,5 V/J            C100', quantite=100.0, unite='UN', prix_brut=0.45, prix_net=0.45, montant=45.0, disponibilite=''),
+        Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='CAB000200C100', reference_distributeur='', designation='HO7V-U 2,5 BLEU CIEL      C100', quantite=1100.0, unite='UN', prix_brut=0.36, prix_net=0.36, montant=396.0, disponibilite=''),
+        Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='CAB000210C100', reference_distributeur='', designation='HO7V-U 2,5 ROUGE          C100', quantite=1400.0, unite='UN', prix_brut=0.36, prix_net=0.36, montant=504.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='COU13021540', reference_distributeur='', designation='FLEXPRO+ NOIR TAGP 20/100', quantite=500.0, unite='UN', prix_brut=0.25, prix_net=0.25, montant=125.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='COU13021940', reference_distributeur='', designation='FLEXPRO+ NOIR TAGP 25/100', quantite=200.0, unite='UN', prix_brut=0.4, prix_net=0.4, montant=80.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='WAG2273202', reference_distributeur='', designation='BORNE WAGO 2273 - 2 X 0,5 A 2,', quantite=800.0, unite='UN', prix_brut=0.12, prix_net=0.12, montant=96.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='WAG2273203', reference_distributeur='', designation='BORNE WAGO 2273 - 3 X 0,5 A 2,', quantite=500.0, unite='UN', prix_brut=0.14, prix_net=0.14, montant=70.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='WAG2273208', reference_distributeur='', designation='BORNE WAGO 2273 - 8 X 0,5 A 2,', quantite=100.0, unite='UN', prix_brut=0.29, prix_net=0.29, montant=29.0, disponibilite=''),
+        Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='COU20080035', reference_distributeur='', designation='PREFILCO V 20/100 ADSL GRADE 1', quantite=500.0, unite='UN', prix_brut=0.47, prix_net=0.47, montant=235.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='COU20080033', reference_distributeur='', designation='PREFILCO V 20/100 17VATCA', quantite=200.0, unite='UN', prix_brut=0.35, prix_net=0.35, montant=70.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='COU20020003', reference_distributeur='', designation='PREFILCO N 20/100 3G1.5 BRV/J', quantite=200.0, unite='UN', prix_brut=0.77, prix_net=0.77, montant=154.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='COU20020020', reference_distributeur='', designation='PREFILCO N 20/100 3G2.5 BRV/J', quantite=200.0, unite='UN', prix_brut=1.09, prix_net=1.09, montant=218.0, disponibilite=''),
@@ -187,6 +262,26 @@ def test_parse_electricplus():
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='COU12022724', reference_distributeur='', designation='ICTA SP NOIR TAP 32/50', quantite=100.0, unite='UN', prix_brut=0.82, prix_net=0.82, montant=82.0, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='COU10043324', reference_distributeur='', designation='ICTA SPOT G TAG 40/50 - ICTA', quantite=150.0, unite='UN', prix_brut=1.47, prix_net=1.47, montant=220.5, disponibilite=''),
         Article(fournisseur='ELECTRIC PLUS', devis='1108800', reference_fournisseur='AGI393500', reference_distributeur='', designation='RUBAN ADH ETANCHE PARE-VAPEUR', quantite=5.0, unite='UN', prix_brut=4.53, prix_net=4.53, montant=22.65, disponibilite=''),
+    ]
+
+
+def test_parse_electricplus_marqueur_pr():
+    # Devis réels (BT - Floe, D1109436.pdf) où la colonne ancrée sur "PF"
+    # sur les autres devis de ce fournisseur affiche "PR" à la place —
+    # même position, mêmes calculs (qté x prix_net = montant vérifié
+    # exact) : ressortait à 0 article avant l'élargissement de MARQUEUR.
+    articles = parse_electricplus(_texte("electric_plus_gmr_2_marqueur_pr.pdf"))
+    assert articles == [
+        Article(fournisseur='ELECTRIC PLUS', devis='1109436', reference_fournisseur='LEG031919', reference_distributeur='', designation='COLLIER COLSON NOIR 9X357', quantite=200.0, unite='UN', prix_brut=0.16, prix_net=0.16, montant=32.0, disponibilite=''),
+        Article(fournisseur='ELECTRIC PLUS', devis='1109436', reference_fournisseur='LEG031916', reference_distributeur='', designation='COLLIER COLSON NOIR 9X262', quantite=200.0, unite='UN', prix_brut=0.12, prix_net=0.12, montant=24.0, disponibilite=''),
+    ]
+
+
+def test_parse_electricplus_marqueur_pr_2():
+    # 2e devis réel (R2V 3G1.5 - Rico Carpaye, D1109369.pdf), même symptôme.
+    articles = parse_electricplus(_texte("electric_plus_gmr_3_marqueur_pr.pdf"))
+    assert articles == [
+        Article(fournisseur='ELECTRIC PLUS', devis='1109369', reference_fournisseur='CAB013000T500', reference_distributeur='', designation='RO2V-CU 3G1,5             T500', quantite=500.0, unite='UN', prix_brut=0.87, prix_net=0.87, montant=435.0, disponibilite=''),
     ]
 
 
@@ -201,3 +296,21 @@ def test_parse_cominter():
         'L404926', 'L406434', 'L406490', 'L406773', 'L406774', 'L406776',
         'L410704', 'L410705', 'L410707', 'L411524', 'L411525', 'L03901',
     ]
+
+
+def test_parse_artdeco():
+    # Nouveau fournisseur (session TRAVAUX_PARSERS.md, devis 617004507,
+    # Réglettes - Rico Carpaye) — voir bandeau GABARIT de artdeco.py :
+    # "ELECTRICITE SERVICES REUNION" dans le nom du fichier désigne
+    # l'acheteuse, pas ce fournisseur ; le vrai vendeur est "LED'S RUN"
+    # (domaine artdeco.re). Désignation reconstruite depuis 2 lignes (le
+    # texte déborde sur une ligne de continuation après tout le bloc
+    # chiffré, décalage propre à ce gabarit).
+    articles = parse_artdeco(_texte("artdeco_1.pdf"))
+    assert articles == [
+        Article(fournisseur='ART DECO', devis='617004507', reference_fournisseur='5470', reference_distributeur='', designation='Rampe led Novolight Porto 48w + DET (4000k) 1200mm IP65 (ecotaxe 0,20€)', quantite=14.0, unite='UN', prix_brut=110.0, prix_net=60.0, montant=840.0, disponibilite=''),
+        Article(fournisseur='ART DECO', devis='617004507', reference_fournisseur='5471', reference_distributeur='', designation='Télécommande RF Novolight pour Porto détecteur (ec otaxe 0,08€)', quantite=1.0, unite='UN', prix_brut=9.22, prix_net=6.45, montant=6.45, disponibilite=''),
+    ]
+    # Recoupement : la somme des lignes retombe exactement sur le "Sous
+    # Total :" HT affiché par le PDF (846,45 EUR).
+    assert round(sum(a.montant for a in articles), 2) == 846.45

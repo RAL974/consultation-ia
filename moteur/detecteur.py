@@ -64,6 +64,18 @@ _FOURNISSEURS = [
     # même principe que COMINTER MAYOTTE.
     ("YESSS MAYOTTE", r"YESSS\s+MAYOTTE"),
     ("YESSS", r"\bYESSS\b"),
+    # PROTECTHOMS — nouveau fournisseur, équipements de protection
+    # individuelle/amiante (pas du matériel électrique, mais bien présent
+    # dans la liste Fournisseurs du Suivi — voir CLAUDE.md).
+    ("PROTECTHOMS", r"PROTECTHOMS"),
+    # ART DECO — nouveau fournisseur (session TRAVAUX_PARSERS.md),
+    # showroom LED, brand "LED'S RUN", domaine artdeco.re (expéditeur réel
+    # idriss@artdeco.re). "ELECTRICITE SERVICES REUNION" figure aussi dans
+    # ces devis mais désigne l'acheteuse elle-même, pas ce fournisseur —
+    # voir bandeau GABARIT de moteur/fournisseurs/artdeco.py. Domaine
+    # utilisé plutôt que "LED'S RUN" seul (trop générique) comme ancre
+    # principale ; "LED'S RUN" gardé en repli si le domaine n'apparaît pas.
+    ("ART DECO", r"ARTDECO\.RE|LED'?S\s*RUN"),
 ]
 
 

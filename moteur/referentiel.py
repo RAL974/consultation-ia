@@ -109,9 +109,190 @@ def deduire_prefixes(lignes: list[dict]) -> dict:
     return prefixes
 
 
+def _plier_accents(texte: str) -> str:
+    """Majuscules sans accents (même pliage que cle_designation). Sans ce
+    pliage, É/Â/Ô agissent comme séparateurs dans _tokens et MUTILENT les
+    mots : "dérivations" -> "RIVATIONS", "câblage" -> "BLAGE" (cas réel,
+    consultation Rico Carpaye : 9 lignes de besoin, 0 rapprochement)."""
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", (texte or "").upper())
+        if not unicodedata.combining(c)
+    )
+
+
+_DECIMALE_FR = re.compile(r"(\d)\s*,\s*(\d)")
+
+# Mots sans pouvoir discriminant : ils diluent le Jaccard (cas réel :
+# "BOITE DERIVATION 155 PAR 110" — "PAR" et "DE" comptaient autant que
+# "DERIVATION").
+_STOPWORDS = {
+    "DE", "DU", "DES", "LE", "LA", "LES", "UN", "UNE", "ET", "EN",
+    "AU", "AUX", "PAR", "POUR", "AVEC", "SUR", "NF",
+}
+
+# Abréviations/synonymes de conditionnement observés dans les devis réels
+# (RAVATE "BTE IP55...", COMINTER "Cartouche silicone..." face à un besoin
+# "tube silicone").
+_EQUIVALENTS = {"CARTOUCHE": "TUBE", "CART": "TUBE", "BTE": "BOITE"}
+
+_NOMBRE_UNITE = re.compile(r"^(\d+(?:\.\d+)?)([A-Z]+\d*)$")
+
+
+def _normaliser_texte(designation: str) -> str:
+    d = _plier_accents(designation)
+    d = _DECIMALE_FR.sub(r"\1.\2", d)   # 1,5mm² / "2, 5MM2" -> 1.5 / 2.5
+    return d.replace("²", "2")
+
+
 def _tokens(designation: str) -> set:
-    mots = re.split(r"[^A-Z0-9.]+", (designation or "").upper())
-    return {m for m in mots if m and len(m) > 1}
+    out = set()
+    for m in re.split(r"[^A-Z0-9.]+", _normaliser_texte(designation)):
+        m = m.strip(".")
+        if not m:
+            continue
+        # "1.5MM", "40A", "290ML" : le nombre et l'unité comptent chacun
+        # pour un token, sinon "1.5mm" (besoin) ne recoupe jamais
+        # "1.5 mm²" (devis).
+        nu = _NOMBRE_UNITE.match(m)
+        parts = [nu.group(1), nu.group(2)] if nu else [m]
+        for p in parts:
+            if len(p) < 2 and not p.isdigit():
+                continue
+            # Singulier naïf : EMBOUTS ~ EMBOUT, DERIVATIONS ~ DERIVATION.
+            if len(p) > 3 and p.endswith("S") and not p.endswith("SS"):
+                p = p[:-1]
+            p = _EQUIVALENTS.get(p, p)
+            if p in _STOPWORDS:
+                continue
+            out.add(p)
+    return out
+
+
+# ----------------------------------------------------------------------
+# Attributs techniques (section, simple/double, calibre, dimensions...)
+# ----------------------------------------------------------------------
+# La ressemblance de texte seule ne peut PAS rapprocher
+# "inter sectionneur 2x40A Schneider" et "ACTI9 ISW 2P 40A 415VAC"
+# (Jaccard = 0). Comme l'étiquette "Type <code>" des bordereaux
+# architecte, un attribut technique identique des deux côtés est un
+# signal plus fiable qu'un score de mots-clés : il fait remonter le
+# score. À l'inverse, deux attributs DÉCLARÉS contradictoires (1.5 mm²
+# vs 6 mm², simple vs double) excluent le candidat — jamais de
+# proposition sciemment fausse. L'absence d'un attribut d'un côté ne
+# pénalise rien.
+
+# Sections de conducteur normalisées (mm²) : borne la détection pour ne
+# pas prendre un Ø700MM de luminaire ou un "- 50" de conditionnement
+# pour une section.
+_SECTIONS = {"0.5", "0.75", "1", "1.5", "2.5", "4", "6", "10", "16",
+             "25", "35", "50", "70", "95", "120", "150", "185", "240", "300"}
+
+_RE_DIM3 = re.compile(r"\b(\d{2,4})\s*X\s*(\d{2,4})\s*X\s*(\d{2,4})\b")
+_RE_POLES_X_CAL = re.compile(r"\b([1-4])\s*X\s*(\d{1,3})\s*A\b")
+_RE_DOUBLE_SEC = re.compile(r"\b2\s*X\s*(\d+(?:\.\d+)?)")
+_RE_SEC_MM = re.compile(r"\b(\d+(?:\.\d+)?)\s*MM2?\b")
+_RE_CAL = re.compile(r"\b(\d{1,3})\s*A\b")
+_RE_POLES = re.compile(r"\b([1-4])\s*P\b")
+_RE_VOL = re.compile(r"\b(\d{2,4})\s*ML\b")
+
+
+def _num(v: str) -> str:
+    return v.rstrip("0").rstrip(".") if "." in v else v
+
+
+def _analyser(designation: str):
+    """(tokens, attributs) d'une désignation. Les portions consommées par
+    un attribut sont retirées du texte avant tokenisation, pour que les
+    dimensions/volumes ne diluent pas le Jaccard."""
+    d = _normaliser_texte(designation)
+    attrs = {}
+
+    def _consommer(regex, action):
+        def _sub(m):
+            action(m)
+            return " "
+        return regex.sub(_sub, d)
+
+    def _dim(m):
+        attrs["DIM"] = tuple(int(m.group(i)) for i in (1, 2, 3))
+    d = _consommer(_RE_DIM3, _dim)
+
+    def _pxc(m):
+        attrs["POLES"], attrs["CAL"] = m.group(1), m.group(2)
+    d = _consommer(_RE_POLES_X_CAL, _pxc)
+
+    embout = "EMBOUT" in d
+
+    if embout:
+        def _dbl(m):
+            v = _num(m.group(1))
+            if v not in _SECTIONS:
+                return m.group(0)      # pas une section : ne rien consommer
+            attrs["NBR"] = "DOUBLE"
+            attrs["SEC"] = v
+            return " "
+        d = _RE_DOUBLE_SEC.sub(_dbl, d)
+
+    def _sec(m):
+        v = _num(m.group(1))
+        if v not in _SECTIONS:
+            return m.group(0)          # ex. Ø700MM d'un luminaire
+        attrs.setdefault("SEC", v)
+        return " "
+    d = _RE_SEC_MM.sub(_sec, d)
+
+    def _cal(m):
+        attrs.setdefault("CAL", m.group(1))
+    d = _consommer(_RE_CAL, _cal)
+
+    def _pol(m):
+        attrs.setdefault("POLES", m.group(1))
+    d = _consommer(_RE_POLES, _pol)
+
+    def _vol(m):
+        attrs.setdefault("VOL", m.group(1))
+    d = _consommer(_RE_VOL, _vol)
+
+    toks = _tokens(d)
+
+    if embout:
+        if "DOUBLE" in toks:
+            attrs.setdefault("NBR", "DOUBLE")
+        elif "SIMPLE" in toks:
+            attrs.setdefault("NBR", "SIMPLE")
+        if "SEC" not in attrs:
+            # "EMBOUT 1.5 NOIR - 50" (RAVATE) : section sans unité. Premier
+            # nombre appartenant aux sections normalisées.
+            for p in re.findall(r"\d+(?:\.\d+)?", d):
+                if _num(p) in _SECTIONS:
+                    attrs["SEC"] = _num(p)
+                    break
+
+    return toks, attrs
+
+
+_ATTRS_STRICTS = ("SEC", "NBR", "CAL", "POLES", "VOL")
+_TOLERANCE_DIM = 10  # mm par dimension
+
+
+def _dims_compatibles(a, b):
+    return all(abs(x - y) <= _TOLERANCE_DIM for x, y in zip(a, b))
+
+
+def _attributs_contradictoires(a: dict, b: dict) -> bool:
+    for k in _ATTRS_STRICTS:
+        if k in a and k in b and a[k] != b[k]:
+            return True
+    if "DIM" in a and "DIM" in b and not _dims_compatibles(a["DIM"], b["DIM"]):
+        return True
+    return False
+
+
+def _attributs_communs(a: dict, b: dict) -> int:
+    n = sum(1 for k in _ATTRS_STRICTS if k in a and k in b and a[k] == b[k])
+    if "DIM" in a and "DIM" in b and _dims_compatibles(a["DIM"], b["DIM"]):
+        n += 1
+    return n
 
 
 def _jaccard(a: set, b: set) -> float:
@@ -634,7 +815,7 @@ class Referentiel:
 
         Retourne la liste des candidats retenus (informatif).
         """
-        toks_besoin = _tokens(designation_besoin)
+        toks_besoin, attrs_besoin = _analyser(designation_besoin)
         cle_cible = cle_designation(designation_besoin)
 
         if not toks_besoin or not cle_cible:
@@ -646,7 +827,26 @@ class Referentiel:
 
         for c in candidats:
 
-            score = round(_jaccard(toks_besoin, _tokens(c["designation"])), 2)
+            toks_c, attrs_c = _analyser(c["designation"])
+
+            # Attributs techniques DÉCLARÉS contradictoires (1.5 vs 6 mm²,
+            # simple vs double, dimensions incompatibles...) : jamais
+            # proposé, quel que soit le score de texte.
+            if _attributs_contradictoires(attrs_besoin, attrs_c):
+                continue
+
+            score = round(_jaccard(toks_besoin, toks_c), 2)
+
+            # Accord d'attributs : même mécanique que l'étiquette "Type".
+            # >= 2 attributs identiques (ex. calibre 40A + 2 pôles, ou
+            # section + double) valent une quasi-certitude ; 1 attribut
+            # (ex. la section seule) suffit à franchir le seuil, le texte
+            # départage ensuite entre fournisseurs.
+            communs = _attributs_communs(attrs_besoin, attrs_c)
+            if communs >= 2:
+                score = max(score, 0.9)
+            elif communs == 1:
+                score = max(score, 0.55)
 
             if etiquette_besoin and etiquette_besoin == _etiquette_type(c["designation"]):
                 score = max(score, 0.9)

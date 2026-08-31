@@ -48,15 +48,27 @@ MOTIF_MONTANT_BL_YESSS = re.compile(r"^Montant$", re.IGNORECASE)
 MOTIF_PRIX_NET_BL_YESSS = re.compile(r"^Prix\s*net$", re.IGNORECASE)
 MOTIF_DESIGNATION_BL_YESSS = re.compile(r"^D.signation$", re.IGNORECASE)
 MOTIF_CATALOGUE_BL_YESSS = re.compile(r"^Catalogue$", re.IGNORECASE)
-MOTIF_COMMANDE_BL_YESSS = re.compile(r"N.\s*commande\s+([A-Z]?\d[\w.\-]*)", re.IGNORECASE)
+# BUG RÉEL CORRIGÉ (2e vrai BL vu, `BL M4.276.pdf`) : ce document imprime
+# la commande sous la forme "BC N°M4.276" (token unique, sans espace entre
+# "N°" et la valeur) — un format DIFFÉRENT du 1er document ("N° commande
+# M4.273", avec le mot "commande" en toutes lettres). Le label "N°
+# commande" existe bien aussi sur ce 2e document, mais comme un LABEL DE
+# COLONNE isolé (aucune valeur adjacente dans le même mot OCR) — les deux
+# formes sont donc essayées, sans risque de faux positif sur ce label
+# isolé (rien à capturer juste après "commande" dans son propre mot).
+MOTIF_COMMANDE_BL_YESSS = re.compile(r"(?:N.\s*commande\s+|BC\s*N[o°]?\s*)([A-Z]?\d[\w.\-]*)", re.IGNORECASE)
 MOTIF_NUMERO_BL_YESSS = re.compile(r"\b([A-Z]{2,4}/\d{5,7})\b")
 MOIS_FR_YESSS = {
     "janvier": 1, "février": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6,
     "juillet": 7, "août": 8, "aout": 8, "septembre": 9, "octobre": 10,
     "novembre": 11, "décembre": 12,
 }
+# Groupe captant 1 (jour) OPTIONNEL : sur le 1er BL vu, le jour ressort
+# comme un mot OCR séparé du mois+année ; sur le 2e (BL M4.276.pdf), les
+# trois sont lus comme UN SEUL mot bien formé ("25 aout 2026") — les deux
+# cas sont gérés dans _date_bl_yesss().
 MOTIF_MOIS_ANNEE_BL_YESSS = re.compile(
-    r"(" + "|".join(MOIS_FR_YESSS) + r")\s+(\d{4})", re.IGNORECASE,
+    r"(?:(\d{1,2})\s*)?(" + "|".join(MOIS_FR_YESSS) + r")\s+(\d{4})", re.IGNORECASE,
 )
 MOTIF_JOUR_SEUL_BL_YESSS = re.compile(r"^\d{1,2}$")
 MOTIF_LABEL_DATE_BL_YESSS = re.compile(r"^Date$", re.IGNORECASE)
@@ -128,14 +140,18 @@ def _nombre_non_nul_proche(mots: list[dict], motif_label) -> float | None:
 
 
 def _date_bl_yesss(mots: list[dict]) -> str:
-    """"24 août 2026" : le mois+année ressort comme un seul mot OCR
-    ("aout 2026" ou "août 2026"), mais le jour ("24") ressort SÉPARÉMENT,
-    ailleurs sur la page (même repli que d'autres champs de ce gabarit —
-    voir bandeau). Le document contient D'AUTRES mentions mois+année SANS
-    RAPPORT (le pavé légal cite une loi du "25 janvier 1985") ainsi que
-    d'autres mots à 1-2 chiffres (quantité, bouts de code postal...) : le
-    bon mot mois+année est retrouvé par proximité au label "Date" (comme
-    le reste du gabarit, voir bandeau du module), PUIS le jour par
+    """"24 août 2026" : sur le 1er BL vu, le mois+année ressort comme un
+    seul mot OCR ("aout 2026"), mais le jour ("24") ressort SÉPARÉMENT,
+    ailleurs sur la page. Sur le 2e BL vu (`BL M4.276.pdf`), les trois
+    (jour, mois, année) sont lus comme UN SEUL mot bien formé
+    ("25 aout 2026") — le jour est alors directement dans le même match,
+    pas besoin de le chercher ailleurs.
+
+    Le document contient D'AUTRES mentions mois+année SANS RAPPORT (le
+    pavé légal cite une loi du "25 janvier 1985") ainsi que d'autres mots
+    à 1-2 chiffres (quantité, bouts de code postal...) : le bon mot
+    mois+année est retrouvé par proximité au label "Date" (comme le reste
+    du gabarit, voir bandeau du module), PUIS le jour (si séparé) par
     proximité à CE mot mois+année précisément — jamais le premier trouvé
     dans un ordre arbitraire."""
 
@@ -147,8 +163,12 @@ def _date_bl_yesss(mots: list[dict]) -> str:
         return ""
 
     match = MOTIF_MOIS_ANNEE_BL_YESSS.search(mot_mois_annee["texte"].strip())
-    mois = MOIS_FR_YESSS.get(match.group(1).lower())
-    annee = match.group(2)
+    mois = MOIS_FR_YESSS.get(match.group(2).lower())
+    annee = match.group(3)
+
+    if match.group(1):
+        return f"{int(match.group(1)):02d}/{mois:02d}/{annee}"
+
     yc_ref = (mot_mois_annee["y0"] + mot_mois_annee["y1"]) / 2
 
     candidats = sorted(

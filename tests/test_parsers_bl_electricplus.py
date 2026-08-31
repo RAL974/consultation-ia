@@ -197,3 +197,38 @@ def test_parse_bl_electricplus_9_deux_factures_dans_un_seul_fichier():
     for facture in bls:
         total_extrait = round(sum(l.montant for l in facture.lignes), 2)
         assert abs(facture.total_ht_affiche - total_extrait) <= 0.02
+
+
+def test_parse_bl_electricplus_10_entete_fusionne_avec_1er_article():
+    """Cas réel (fichier multi-fournisseurs, commande M4.269) : l'en-tête
+    de colonnes ("DESIGNATION QTE PRIX UNIT.HT...") s'est retrouvé groupé
+    par l'OCR sur la MÊME ligne visuelle que la référence+désignation du
+    1er article ("PLA11525 EMBTMOULUREKEVA32MMX12MM DESIGNATION QTE...").
+    Sans correctif, cette ligne échouait entièrement (cellules[-2]/[-1] =
+    "MONTANT HT"/"TVA", pas des nombres) et la référence du 1er article se
+    retrouvait perdue — la ligne suivante (ses propres nombres) récupérait
+    à tort "PVC B ARTIC" (un bout de désignation) comme référence.
+    _zone_tableau_electricplus() détache désormais les cellules qui
+    précèdent le mot d'en-tête et les reporte sur la ligne suivante.
+
+    Une 3e ligne chiffrée existe sur ce document (montant 56,70€, Total HT
+    global 86,40€) mais SANS aucune référence/désignation adjacente
+    (regroupement Y de l'OCR défavorable, ou véritablement absente sur ce
+    document) — cellules[0] vaut alors la quantité elle-même ("70,00MTR"),
+    jamais une vraie référence : _ligne_vers_article_electricplus() refuse
+    désormais de produire une ligne dans ce cas plutôt que d'écrire une
+    fausse référence — l'écart de Total HT (86,40€ affiché vs 29,70€
+    extrait) signale honnêtement qu'une ligne manque."""
+
+    [bl] = parse_bl_electricplus(_mots("bl_electricplus_10_entete_fusionne_1er_article.pdf"))
+
+    assert bl.numero_commande == "M4.269"
+    assert bl.total_ht_affiche == 86.4
+
+    assert bl.lignes == [
+        LigneBL(reference_fournisseur='PLA11525', designation='EMBTMOULUREKEVA32MMX12MM PVC B ARTIC', quantite_livree=10.0, prix_net=0.55, montant=5.5),
+        LigneBL(reference_fournisseur='CAB012000T', designation='RO2V-CU 2X1,5', quantite_livree=10.0, prix_net=2.42, montant=24.2),
+    ]
+
+    total_extrait = round(sum(l.montant for l in bl.lignes), 2)
+    assert abs(bl.total_ht_affiche - total_extrait) > 0.02

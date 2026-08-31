@@ -1127,6 +1127,85 @@ facilement consultable, et nous pourrons très facilement repérer les
   BC supplémentaires retrouvés et copiés (142.036, M2.17.005, M3.10.175,
   M3.14.360, M3.14.361, M3.23.037) — 0 commande sans BC après ce backfill.
 
+**Session suivante — lot de 7 BL, bug réel de fusion de lignes OCR (109
+Distribution), reconstruction manuelle RAVATE, règle générale câbles/fils
+au mètre confirmée par l'acheteuse (fait) :**
+
+- **BUG RÉEL TROUVÉ — `moteur.ocr.regrouper_lignes()` peut fusionner DEUX
+  rangées physiquement distinctes d'un tableau en une seule "ligne
+  visuelle"** quand les rangées sont très rapprochées verticalement : la
+  fonction utilise une MOYENNE MOBILE (`y_ref`) comme référence de
+  tolérance (12px), qui peut DÉRIVER progressivement d'un mot à l'autre —
+  chaque écart individuel reste sous les 12px mais la chaîne complète
+  dérive de 30-35px, au-delà d'une rangée de tableau entière. Cas réel
+  (`BL M3.13.332.pdf`, 109 Distribution) : la référence "R2V5G16ECC" (1re
+  rangée) et la référence "7431256" (2e rangée, désignation "MANCHON
+  JONCTION XGT7T16") se sont retrouvées fusionnées avec les prix/quantité
+  de la 1re rangée dans UN SEUL groupe — `_ligne_bl_vers_article()`
+  (dist109.py) a alors attribué la quantité de R2V5G16ECC (40) à la
+  référence 7431256 (qui ne commandait que 5), et la DÉSIGNATION de
+  7431256 ("MANCHON JONCTION XGT7T16") s'est retrouvée traitée comme une
+  fausse "référence" à part entière par le rapprochement — même schéma
+  sur la ligne suivante (16042708/59210). Le rapprochement automatique a
+  donc classé ce BL à 0% correct : 2 "sur-livraisons" fantômes (40 pour 5
+  commandé, 30 pour 1 commandé) et 2 "références inconnues" fantômes
+  (en réalité des bouts de désignation). **Détecté par l'acheteuse qui a
+  contesté l'analyse initiale** ("M3.10.186 n'a pas de problème pour moi"
+  — un cas voisin qui a motivé une relecture plus attentive de tout le
+  lot) : reconstruit à la main en recoupant chaque quantité candidate
+  contre la quantité commandée ET contre le Total HT imprimé (518,00€) —
+  les 4 vraies valeurs (R2V5G16ECC=40/11,75€, 7431256=5/0,70€,
+  16042708=30/0,85€, 59210=1/19,00€) retombent EXACTEMENT sur les 2
+  signaux à la fois. **Pas de correctif de code** (un seul exemple à ce
+  jour, `regrouper_lignes()` est partagé par TOUS les fournisseurs et
+  déjà éprouvé sur des dizaines de vrais documents — la modifier
+  risquerait de régresser des fixtures déjà validées ; règle d'or) —
+  traité comme une correction manuelle ponctuelle. **À surveiller** : tout
+  futur BL avec des rangées de tableau anormalement rapprochées pourrait
+  reproduire ce symptôme (quantité/référence qui ne matche ni le total ni
+  la commande, alors que le Total HT global reste cohérent une fois
+  reconstruit à la main) — le réflexe est de recouper chaque ligne contre
+  le Total HT imprimé ET contre la quantité commandée avant de conclure à
+  une vraie sur-livraison ou une vraie référence inconnue.
+- **RAVATE (`BL M3.27.005.jpg`), scan de qualité moyenne, cellules très
+  éclatées** — 1 seule ligne extraite automatiquement (915210, qté=30)
+  pour un Total HT de 584,82€ contre 162,00€ extraits. Reconstruit à la
+  main en recoupant chaque bloc de cellules contre sa quantité commandée
+  et contre le solde du Total HT : la quantité "30" appartenait en
+  réalité à la référence **915205** (qte_cmd=30, 30×5,40=162,00€ pile),
+  pas à 915210 (qte_cmd=9) — la ligne automatique avait donc le mauvais
+  couple référence/quantité. Les 2 lignes restantes (915210=9/6,98€,
+  062525=9/40,00€) déduites par élimination : 62,82+162,00+360,00 =
+  584,82€ = Total HT imprimé exactement. Aucune des 3 lignes n'était donc
+  une vraie sur-livraison — encore un cas de mauvaise association
+  référence/quantité, cette fois côté RAVATE (scan visiblement plus
+  dégradé que les autres BL du même lot, déjà connu comme point fragile
+  documenté de ce fournisseur).
+- **RÈGLE GÉNÉRALE confirmée par l'acheteuse, à appliquer chaque fois
+  qu'un article de type câble/fil est livré en COURONNE (unité imprimée
+  "COU" chez RAVATE, distincte de "UN")** : la quantité à enregistrer dans
+  le Suivi est en MÈTRES LINÉAIRES, pas en nombre de couronnes — "de
+  manière générale, tous les prix des câbles et fils s'entendent en
+  mètres linéaires de notre côté." Cas réel (`BL M3.10.187.jpg`,
+  référence RAVATE tronquée par l'OCR "R2V3G1.5C1", vraie référence
+  probable "R2V3G1.5C100" d'après la désignation "...3G1.5C1O0" = C100) :
+  1 couronne de 100m livrée, Suivi "R2V3G1.5T1" attend qte_cmd=100 —
+  enregistré qté=100 (pas 1) et tarif ramené au mètre (70,00€/couronne →
+  0,70€/m), jamais deviné seule (même famille que le cas boîte/pièce
+  Coredime déjà documenté : conversion d'unité toujours confirmée par
+  l'acheteuse, jamais automatisée — ici confirmée explicitement).
+  **Portée** : ce n'est PAS qu'un cas RAVATE — vérifier l'unité imprimée
+  (ou son équivalent) sur tout futur article câble/fil, quel que soit le
+  fournisseur, avant d'enregistrer une quantité qui semble anormalement
+  petite face à la commande.
+- **Fichiers déposés au mauvais endroit** (`a_traiter/` au lieu de
+  `a_traiter/BL/`) — déplacés manuellement avant traitement ; à vérifier
+  systématiquement si le dossier `a_traiter/BL/` semble vide après un
+  dépôt annoncé par l'acheteuse.
+- **Recette réelle sur les 7 fichiers** : 21 lignes écrites (14 sûres
+  automatiquement + 7 reconstruites à la main), 7 BL archivés avec leur
+  BC.
+
 **Session suivante — traitement du reste du backlog "à vérifier", fix
 Electric Plus factures multiples (fait)** : suite directe de la session
 précédente, l'acheteur a traité plusieurs cas un par un.
@@ -2456,6 +2535,242 @@ commandes retrouvées à la main (fait)
   ligne inconnue — référence "T4" absente du Suivi pour cette commande,
   potentiellement un article réellement différent).
 
+## Session suivante — recette d'un lot de 11 fichiers/12 BL, incident de
+sécurité sur le Suivi (écriture pendant qu'il était ouvert) et
+récupération complète, puis 4 cas "à vérifier" tranchés (fait)
+
+- **INCIDENT DE SÉCURITÉ, leçon retenue pour toute session future sur ce
+  projet** : l'acheteur avait explicitement prévenu "attention le suivi
+  est ouvert, demande-moi quand tu veux y accèder" — une écriture a quand
+  même été lancée sans lui redemander confirmation explicite au moment
+  précis d'écrire, en se fiant au fait que le verrou technique
+  (`ClasseurVerrouille`, basé sur la présence d'un fichier `~$...` créé
+  par Excel) ne remonterait probablement pas d'erreur. Cette fois-là, le
+  verrou n'a PAS bloqué l'écriture (cause exacte non identifiée avec
+  certitude — partage réseau, mode d'ouverture Excel différent, fichier
+  `~$` pas encore créé ou déjà disparu au moment du test) alors que le
+  fichier était réellement ouvert côté acheteur. Sa sauvegarde de sa
+  propre session Excel (qui ne contenait pas ces écritures) a ensuite
+  écrasé le fichier, faisant apparemment perdre 10 lignes fraîchement
+  écrites — "tu as ecris sur le fichier alors qu'il était ouvert de mon
+  côté, c'est vraiment pas bien". **Récupération complète faite sans
+  jamais toucher à l'état Excel de l'acheteur** : les 9 lignes
+  récupérables ont été re-dérivées à partir des BL déjà archivés
+  (relecture OCR + rapprochement + réécriture), vérifiées identiques aux
+  valeurs d'origine — rien perdu au final, mais un incident évitable et
+  un moment de confiance entamé. **Règle désormais appliquée sur ce
+  projet, retenue en mémoire (feedback)** : l'absence d'exception
+  `ClasseurVerrouille` n'est JAMAIS une confirmation suffisante que le
+  Suivi est fermé — dès qu'un accès a été signalé ouvert (ou pourrait
+  l'être), ne plus écrire tant que l'acheteur n'a pas répondu
+  explicitement "c'est fermé" à une question posée dans le chat, même si
+  le code ne remonte aucune erreur. **Confirmé utile de nouveau plus tard
+  dans cette même session** (voir M4.277 ci-dessous) : le verrou technique
+  a cette fois bien bloqué une écriture alors que le Suivi était
+  effectivement rouvert — reste un filet de sécurité réel, mais jamais
+  suffisant seul, toujours la parole de l'acheteur qui prime.
+- **M3.27.002, ISHOP.pdf/ISHOP2.pdf confirmés comme 2 BL réellement
+  différents par l'acheteur** ("On voit clairement qu'il s'agit de deux
+  BL différents !") — le désamorçage anti-doublon avait à raison empêché
+  d'écrire les deux en même temps (même ligne Suivi visée, référence
+  251745). Vérification a posteriori : BL 741681 (8 unités) + BL 741706/
+  ISHOP2 (6 unités) = 14, exactement la quantité commandée — confirmation
+  numérique forte qu'il s'agit de deux livraisons partielles réelles, pas
+  d'un doublon de scan. Écrit (14 livrées) et archivé dans
+  `Traités/M3.27.002/`.
+- **M3.15.399 (PROTECTHOMS), 2e livraison réelle confirmée par
+  l'acheteur, mais PAS uniforme sur les 5 lignes du 2e BL** — leçon à
+  retenir pour tout futur cas "2e BL du même fournisseur/commande" :
+  comparer chaque ligne individuellement à la quantité commandée, ne
+  jamais supposer que tout le document représente une livraison nouvelle
+  sous prétexte qu'au moins une ligne l'est (ni l'inverse). BL097191
+  (22/08, déjà traité) vs BL097312 (26/08, nouveau) : sur les 5 articles
+  listés sur le 2e BL, un seul (**2VU043004**, combinaison XL) est une
+  vraie nouvelle livraison (20 de plus, 30+20=50=exactement la quantité
+  commandée) — écrit. Les 4 autres (2VU043003, 2VU061300, 5CO010100,
+  1MA010701) réapparaissent avec EXACTEMENT la même quantité que la 1ère
+  livraison ; 3 des 4 étaient déjà à 100% de leur quantité commandée
+  (150/150, 30/30, 300/300) — une redélivraison identique d'un article
+  déjà soldé n'ayant pas de sens commercial, ces 4 lignes ont été
+  laissées SANS écriture (le 2e BL les reliste simplement, sans nouvelle
+  livraison réelle pour elles). Décision communiquée à l'acheteur, pas
+  encore commentée par elle au moment de la rédaction de cette note — à
+  corriger si son avis diffère.
+- **M3.23.046 (DEM), confirmé comme un vrai doublon de scan** (tranché
+  par les données elles-mêmes, sans avoir besoin de redemander à
+  l'acheteur) : le "nouveau" BL (n°741449 du 21/08, contre 706994 du
+  24/08 déjà archivé) montre des quantités IDENTIQUES sur 5 des 6 lignes
+  (la 6e, LEG031490, absente de l'OCR sur ce 2e scan) — et les 6 articles
+  de la commande sont déjà TOUS à 100% de leur quantité commandée dans le
+  Suivi. Contrairement au cas M3.15.399 ci-dessus (où 1 ligne sur 5
+  montrait un delta réel qui complétait exactement la commande), ici
+  AUCUNE ligne ne montre de delta — signal net de duplication plutôt que
+  de 2e livraison. Déplacé vers `À vérifier/Doublons confirmés (à
+  supprimer)/` (jamais supprimé directement par la session).
+- **M4.277 (COMINTER), commande retrouvée depuis un passage précédent de
+  cette session** : absente du Suivi la première fois, elle y figure
+  maintenant (probablement saisie entre-temps par l'acheteur) —
+  référence Suivi "A9F87463" correspond à la référence BL "MEA9F87463"
+  (préfixe "ME" en trop, même famille que les cas déjà connus type
+  MEA9Y13625). 1ère tentative bloquée par le verrou Excel (Suivi rouvert
+  par l'acheteur en cours de session, voir l'incident ci-dessus) ; écrite
+  et archivée dans `Traités/M4.277/` après confirmation explicite de
+  l'acheteur que le classeur était refermé.
+- **M3.10.186 (COREDIME), 0 ligne à l'OCR par défaut — PAS une limite du
+  document, une résolution de rendu insuffisante.** L'acheteur a
+  directement contesté la conclusion "limite OCR connue" en partageant un
+  extrait du PDF où les quantités ("1" et "4") sont parfaitement lisibles
+  — à raison : à l'OCR par défaut (200 DPI), les deux chiffres de
+  quantité ET le début de leur confirmation ("1 X 1 unite"/"4 X 1 unite")
+  ont totalement disparu (ne restait que "unite" seul), pas seulement
+  tronqués comme dans les cas déjà documentés ailleurs. En relançant l'OCR
+  de cette seule page à 350 DPI (`mots_document(..., dpi=350)`), les deux
+  lignes ressortent immédiatement complètes et exactes
+  ("1 x 1 unite"/"4 X 1 unite"). **Pas généralisé au reste du pipeline**
+  (un seul exemple à ce jour, règle d'or — passer tout le rapprochement
+  BL à 350 DPI par défaut ralentirait chaque lecture d'environ 3× la
+  surface de pixels, pour un gain qui n'a été nécessaire qu'une fois) :
+  traité comme une correction ponctuelle sur ce document précis. Écrit
+  (SCHA9P22602 qté=1, LEG033327/033327 qté=4, aucun prix — comme toujours
+  chez ce fournisseur) et archivé. **Leçon générale à retenir** : avant de
+  conclure à une "limite OCR connue" sur un nouveau document, essayer une
+  résolution plus élevée sur CE document précis avant d'abandonner —
+  certains cas qui semblent être une vraie limite structurelle ne sont en
+  réalité qu'un problème de résolution de rendu, résoluble sans toucher
+  au code.
+
+## Session suivante — incident critique "quantités non entières", audit
+complet du Suivi et de Traités/, 2 bugs réels corrigés (Cominter, RAVATE)
+(fait)
+
+**Signalement critique de l'acheteuse** : appelée par le responsable
+d'affaires du GYSM pour savoir si la commande 143.194 avait été livrée,
+elle constate en ouvrant le Suivi des quantités livrées ABERRANTES —
+"1,32 cutter livrés sur 4 commandés", "1,3015 boîte d'embouts sur 2",
+tarifs "totalement fantaisistes" — et signale qu'en cherchant le BL dans
+"Traités/143.194/" elle ne trouve que le BdC, pas le BL. Règle donnée,
+générale et sans exception cochée par elle : **"à part s'il s'agit de
+main d'œuvre, d'une prestation ou d'une location, il ne peut y avoir que
+des entiers en quantité."** Elle demande explicitement une remise à plat
+de la procédure de classement ("si commandes et BL ne sont pas attachés
+dans le dossier de rapprochement, alors il ne faut pas écrire") et un
+audit de bout en bout de ce qui est dans "Traités". Ces quantités non
+entières traînaient dans le Suivi depuis un peu plus tôt dans CETTE MÊME
+session (récupération après l'incident du verrou Excel, voir plus haut) —
+un vrai signal de bon sens (qté non entière = alerte immédiate) qui
+aurait dû être vérifié avant d'écrire et ne l'a pas été.
+
+- **Audit complet du Suivi (~6 370 lignes, toutes années/sessions
+  confondues), sur décision explicite de l'acheteuse** : scan de toute la
+  colonne "Qté livrée" à la recherche de valeurs non entières. **11
+  anomalies trouvées, dont 2 légitimes** (LECHER0618, une LOCATION
+  d'échafaudage, qté=2,5 — une durée peut être fractionnaire ; MOA2, MAIN
+  D'ŒUVRE, qté=0,5 — explicitement les 2 exceptions de la règle) — **9
+  vraies anomalies** réparties sur 5 commandes (M2.17.006 ×4, M3.23.042
+  ×1, M4.272 ×1 déjà présente + 4 manquantes découvertes en creusant,
+  143.194 ×2, M3.27.002 ×1). Aucune colonne "unité" n'existe dans le
+  Suivi — seule la désignation permet de juger au cas par cas si une
+  ligne est légitimement non entière.
+- **BUG RÉEL CORRIGÉ (Cominter, code) — la capacité de coupure du
+  disjoncteur DNX³ ("4.5KA"/"4.5 KA", normalement collée en fin de
+  désignation) se retrouve parfois dans SA PROPRE cellule OCR**, sur 3
+  documents réels distincts (M2.17.006/OBL108540, M3.23.042/OBL108537,
+  M4.272/OBL108653). Comme elle commence aussi par un chiffre, l'ancien
+  test `re.match(r"^\d", ...)` (dans `_ligne_bl_vers_article_cominter()`,
+  boucle de détection de fin de désignation) la prenait à tort pour la
+  cellule Qté(+Unité), décalant tout le reste d'une cellule — d'où les
+  "4,5" disjoncteurs livrés (au lieu de 10/20/7/5/4/1, la vraie quantité,
+  toujours à la cellule suivante). **DEUX correctifs cassés avant le
+  bon, gardés en commentaire dans le code pour ne pas y retomber** :
+  1. Exiger un `fullmatch` sur exactement 2 décimales — cassait le format
+     M4.272, où Qté+Unité sont dans la MÊME cellule ("7,00 Unite", du
+     texte suit les 2 décimales, un fullmatch échoue).
+  2. Exiger une VIRGULE (pas un point) comme séparateur — cassait une
+     vraie quantité écrite avec un point ("3.00 Unite",
+     bl_cominter_3.pdf, test déjà existant) : virgule/point ne
+     distinguent PAS de façon fiable une vraie quantité de "4.5KA" (les
+     deux séparateurs existent des deux côtés selon les documents).
+  Signal qui tient sur TOUS les cas réels observés (2 fournisseurs
+  confondus, virgule ET point) : une vraie cellule Qté a TOUJOURS
+  exactement 2 chiffres après le séparateur ("10,00", "3.00", "542,00"),
+  jamais un seul comme "4.5KA". `re.match` (préfixe, pas `fullmatch`)
+  pour continuer d'accepter tout ce qui suit, collé ou espacé. Fixture
+  réelle ajoutée (`tests/fixtures/bl_cominter_8_kA_dans_sa_propre_cellule.pdf`,
+  `test_parse_bl_cominter_8_capacite_de_coupure_dans_sa_propre_cellule`),
+  suite complète Cominter (10 tests) et suite complète du projet (262
+  tests) vertes après ce correctif.
+- **M2.17.006 et M3.23.042 (déjà archivés)** : simplement re-parsés avec
+  le code corrigé — les valeurs correctes (10/10/20/10 et 10) tombent
+  directement, sans aucune reconstruction manuelle nécessaire. Écrites en
+  correction directe.
+- **M4.272 (BL resté dans "à vérifier", jamais écrit ni archivé
+  auparavant)** : re-parsé avec le code corrigé, les 11 lignes tombent
+  TOUTES exactement sur leur quantité commandée (confirmation que la
+  commande est entièrement soldée). 2 références corrompues par le même
+  phénomène "4.5KA" mais différemment cette fois (touchant la référence
+  elle-même, pas seulement la quantité) : "L4067734" → 406773 (un "4" de
+  trop, probablement un fragment de "4.5KA" glissé dans la référence) et
+  "L41165C" → 411650 (dernier chiffre "0" lu "C") — reconnues par
+  élimination (qté déduite matchant exactement la seule ligne Suivi
+  restante de cette commande) et corrigées à la main (un seul exemple de
+  ce sous-cas précis, pas de règle générale codée). Écrit et archivé.
+- **143.194 (BL resté dans "à vérifier" avec 1 ligne A_CONFIRMER
+  ancienne, jamais archivé)** : reconstruit entièrement à la main à
+  partir de l'OCR brut (cellules très éclatées sur ce document RAVATE) —
+  1004683 (qté 4, prix 6,70€), DT7172 (qté 2, prix 5,59€), DT7386T/le cas
+  "DT73B6T" déjà documenté (qté 2, prix 5,98€), DT7520 (déjà correct,
+  qté 4). **Vérifié par DEUX signaux convergents** : chacune des 4
+  quantités correspond EXACTEMENT à sa quantité commandée, ET la somme
+  des montants reconstruits (26,80+11,18+11,96+18,44 = 68,38€) retombe
+  EXACTEMENT sur le Total HT imprimé — confirmation qu'aucune des 4
+  lignes n'était une vraie anomalie, seulement des quantités mal
+  extraites par l'ancien code (division bruitée / cellule mal appariée).
+  Écrit et archivé.
+- **BUG RÉEL CORRIGÉ (RAVATE, code) — préfixe de nom de chantier collé
+  devant la commande sans espace**, découvert en archivant 143.194 : le
+  document affiche "AU 24/0B/2026GYSM-143.194" — le motif de commande ne
+  tolérait qu'UNE SEULE lettre de préfixe (le "M"/"i"/"o" habituel FAISANT
+  PARTIE de la commande elle-même), pas tout un mot comme "GYSM".
+  `numero_commande` ressortait vide et le BL s'est d'abord archivé à tort
+  dans "Commande inconnue" au lieu de "143.194" (repéré et corrigé dans
+  la foulée, avant que l'acheteuse ne le voie). Motif élargi pour
+  tolérer un mot de lettres majuscules suivi d'un tiret, optionnel, AVANT
+  la commande elle-même — ne change rien aux cas déjà couverts (un "M"
+  isolé ne peut jamais matcher "LETTRES-", faute du tiret qui suit
+  immédiatement dans la commande réelle). Fixture réelle ajoutée
+  (`tests/fixtures/bl_ravate_12_prefixe_chantier_colle_commande.jpg`,
+  `test_parse_bl_ravate_12_prefixe_chantier_colle_commande`), suite
+  RAVATE (27 tests) et suite complète (262 tests) vertes.
+- **260630 (M3.27.002, 109 Distribution, déjà archivé)** : qté 1,0001 →
+  1,0 — bruit d'arrondi pur (Total HT affiché "39,56" est le P.U.Net
+  "39,55502" arrondi à 2 décimales pour un seul article, pas une vraie
+  division qté×prix) sur un fournisseur dont le mécanisme (Total/PxNet
+  systématique, jamais de cellule Qté imprimée préférée) reste
+  correct pour la quasi-totalité des documents déjà traités — traité en
+  correction manuelle ponctuelle (un seul exemple de ce bruit résiduel à
+  ce jour), pas un correctif de code sur `dist109.py`.
+- **Audit complet de `a_traiter/BL/Traités/`, sur décision explicite de
+  l'acheteuse (136 dossiers commande)** : seulement 2 écarts trouvés.
+  143.194 (BdC présent, BL absent — en cours de résolution ci-dessus,
+  désormais réglé) et M3.15.399 (Protecthoms, BdC absent mais les 2 vrais
+  BL bien présents — recherché explicitement dans l'archive externe des
+  BC, réellement introuvable là-bas, pas un bug de la recherche ; gap
+  mineur, signalé mais non bloquant). Aucun dossier vide. Tous les autres
+  dossiers ont bien leur BdC ET leur BL.
+- **Récapitulatif des écritures de cette session** : 15 lignes
+  corrigées/écrites au total sur 5 commandes, suite complète du projet
+  (262 tests) verte après les 2 correctifs de code, plus aucune quantité
+  non entière dans tout le Suivi hors les 2 cas légitimes (location,
+  main d'œuvre).
+
+**Leçon générale retenue (feedback), à appliquer systématiquement dans
+toute session future** : une quantité livrée non entière (hors main
+d'œuvre/prestation/location) est TOUJOURS un signal d'alerte — jamais
+l'écrire sans d'abord vérifier qu'elle correspond à un signal fort
+(quantité commandée exacte, ou reconstruction qui retombe sur le Total HT
+affiché). Ce contrôle de bon sens, simple et rapide, aurait évité tout cet
+incident.
+
 ## Tests
 
     py -3 -m pytest          # tout le socle
@@ -2481,7 +2796,7 @@ considérer un parser fiable.
 | COREDIME | `_gabarit.scan_regex` | ✅ couvert | Garde-fou qté×prix propre en plus de l'autocontrôle global |
 | DEM | `_gabarit.scan_regex` (devis) + procédural (BL) | ✅ couvert devis ET BL | Prix affichés AU CENT (/C) ; prix_net dérivé de montant/qté. Côté BL, chaque page = un BL indépendant (jamais de fusion inter-pages) |
 | ELECTRIC PLUS (alias GMR) | `_gabarit.scan_ancre` | ✅ couvert | "GMR" = marque publique du canal Electric Plus, même gabarit |
-| 109 DISTRIBUTION | `_gabarit.scan_ancre`, 2 variantes essayées | ✅ couvert (corrigé cette session) | **2 structures réelles différentes** chez ce fournisseur (réf avant ou après le bloc chiffré) — voir "Points fragiles" |
+| 109 DISTRIBUTION | `_gabarit.scan_ancre`, 3 variantes essayées | ✅ couvert (étendu session TRAVAUX_PARSERS.md) | **3 structures réelles différentes** chez ce fournisseur (réf avant le bloc chiffré, réf après, réf après + colonne Rem% renseignée) — voir "Points fragiles" |
 | COMINTER | procédural (2 formats v1/v2) | ✅ couvert (v1 confirmé réel ; v2 toujours non confronté à un PDF réel) | — |
 | COMINTER MAYOTTE | procédural, module dédié `cominter_mayotte.py` | ✅ couvert | **Entité et gabarit DIFFÉRENTS de Cominter Réunion** (répond à la question posée en début de session) — voir "Points fragiles" |
 | EDOI | `_gabarit.scan_regex` | ✅ couvert (3 PDF réels) | Basé à Mamoudzou (Sonepar) ; dispo = "DISPO" ou délai en semaines ("12sem") |
@@ -2495,18 +2810,50 @@ considérer un parser fiable.
 | LEGRAND | code préexistant, jamais vérifié | ❌ non couvert (probablement non pertinent) | **Précision de l'acheteur** : "Legrand" n'est pas un fournisseur distinct — certains distributeurs transmettent tel quel, sans reformatage, le devis que Legrand leur a fourni. Le motif de détection existant restera donc rarement déclenché à raison ; pas de PDF dédié à chercher |
 | YESSS | procédural, `moteur/fournisseurs/yesss.py`, **BL uniquement** | ✅ couvert côté BL (1 PDF réel) — pas de devis connu pour ce fournisseur | Texte imprimé pivoté à 90° sur le BL (voir section Rapprochement AI) — valeurs retrouvées par proximité X/Y à leur label, pas par un ordre de lecture haut/bas |
 | PROTECTHOMS | procédural, `moteur/fournisseurs/protecthoms.py`, **BL uniquement** | ✅ couvert côté BL (1 PDF réel) — pas de devis connu, équipements de protection/amiante | Référence repérée par sa FORME (1 chiffre + 2 lettres + 6 chiffres), pas d'en-tête/pied de tableau. Aucun prix sur ce document (comme Coredime) |
+| ART DECO | procédural, `moteur/fournisseurs/artdeco.py`, **devis uniquement** | ✅ couvert (1 PDF réel, 2 lignes, total exact) | Brand "LED'S RUN", domaine artdeco.re (expéditeur idriss@artdeco.re) — "ELECTRICITE SERVICES REUNION" présent dans ces devis désigne l'acheteuse, pas ce fournisseur. Zone de tableau bornée par indice de texte (l'en-tête de colonnes apparaît APRÈS les lignes d'articles sur ce document) |
 
 ## Points fragiles connus
 
-- **109 Distribution : DEUX structures réelles coexistent** chez ce même
+- **109 Distribution : TROIS structures réelles coexistent** chez ce même
   fournisseur (voir `moteur/fournisseurs/dist109.py`) : la référence vient
   tantôt AVANT le bloc chiffré ("Commande client n°..."), tantôt APRÈS
-  ("Devis n°..."). Les deux sont essayées sur chaque bloc, celle dont la
-  référence "a la bonne forme" est retenue. Sur le 1er PDF vu, 5 lignes/38
-  (câbles HO7VU 1.5mm²) ont un Total 2 % plus bas que Qté × P.U.Net affiché
-  — jamais expliqué par une colonne visible. `prix_net` est donc calculé
-  par Total/Qté (toujours exact), pas recopié du "P.U.Net" affiché (gardé
-  à titre indicatif dans `prix_brut`).
+  ("Devis n°..."), et dans cette 2e forme la colonne "Rem%" (remise) peut
+  en plus être RENSEIGNÉE (ex. "2,94") — elle n'apparaît alors dans le
+  texte extrait QUE si elle est non nulle, décalant tout le reste d'un
+  cran (3e variante, `OFFSETS_DEVIS_BPU_REMISE`, session
+  TRAVAUX_PARSERS.md — devis ISHOP 321106/Réglettes - Rico Carpaye). Les
+  trois sont essayées sur chaque bloc, celle dont la référence "a la bonne
+  forme" est retenue. Sur le 1er PDF vu, 5 lignes/38 (câbles HO7VU 1.5mm²)
+  ont un Total 2 % plus bas que Qté × P.U.Net affiché — jamais expliqué
+  par une colonne visible. `prix_net` est donc calculé par Total/Qté
+  (toujours exact), pas recopié du "P.U.Net" affiché (gardé à titre
+  indicatif dans `prix_brut`). Classe de caractères de référence élargie
+  deux fois cette même session : borne haute 15→20 (référence 16
+  caractères, "FRN1X6G3-3G1.5 T") et "+" ajouté (références
+  "BTSOUT3X150+70"/"BTSOUT3X95+50", devis BT - Floe 321273) — les deux
+  fois révélées par l'autocontrôle Total HT (ligne(s) manquante(s)
+  silencieusement), pas par un 0 article direct.
+- **Electric Plus : colonne d'ancrage devis "PF" a aussi une variante
+  réelle "PR"** (session TRAVAUX_PARSERS.md, 2 devis réels, BT - Floe et
+  R2V 3G1.5 - Rico Carpaye — texte PDF natif, pas un artefact OCR comme le
+  repli P[FR] déjà en place côté BL). `MARQUEUR` élargi à `["PF", "PR"]`
+  dans `moteur/fournisseurs/electricplus.py`. A aussi révélé que la
+  fixture `electric_plus_gmr.pdf` déjà en place perdait silencieusement 7
+  lignes marquées "PR" depuis le début (pas de contrôle Total HT sur ce
+  parser devis, contrairement au BL) — corrigé, verrouillé par un nouveau
+  total dans le test. Limite résiduelle NON corrigée (un seul exemple à ce
+  jour) : sur cette même fixture, une ligne (WAG2273205, 120,00€) n'a
+  AUCUN marqueur PF/PR du tout — reste non extraite.
+- **Documents "fiche technique" sans marqueur textuel de fournisseur**
+  (session TRAVAUX_PARSERS.md, en creusant les PDF signalés "non
+  reconnus" pour ART DECO/DEM/COREDIME dans un même lot) : plusieurs PDF
+  reçus par mail sont en réalité des fiches produit FABRICANT (Novolight,
+  Exalum Lighting, Thorn) jointes par le distributeur — sans prix, sans
+  quantité, sans AUCUNE mention textuelle du distributeur qui les a
+  envoyées (identifiable seulement via l'expéditeur e-mail, hors de
+  portée du détecteur qui ne lit que le texte du PDF). Traités comme
+  `FT-STELLAR.pdf` (déjà documenté, "Non bloquant") : correctement
+  ignorés (`INCONNU`), pas une régression du détecteur.
 - **Cominter Mayotte : 1 ligne/19 non extraite sur le PDF vu**
   (`moteur/fournisseurs/cominter_mayotte.py`) : le dernier article d'une
   page a ses valeurs numériques extraites AVANT sa référence dans le flux

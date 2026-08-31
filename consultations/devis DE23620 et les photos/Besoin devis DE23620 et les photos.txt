@@ -1,0 +1,15 @@
+# Demande d'origine ; Reference ; Quantite
+# Source : citation dans le corps du devis recu (De : William AIMAR, 28/08/2026 12:18, Objet : Nouvelle commande)
+# Fournisseur : RESEAU CARTOUCHES (devis DE23620)
+Marqueur blanc pointe fine ; ; 5
+Papier A4 ; ; 15
+Boite petits trombones ; ; 1
+Boîte grands trombones ; ; 1
+Grands élastiques pour attacher dossiers A4 ; ; 50
+Classeurs noirs ; 53341E ; 20
+Classeurs verts ; 53543E ; 10
+Pots à craons ; ; 2
+ôte-agrafe ; ; 1
+grande agrafeuse 24/6 ; ; 1
+petite agrafeuse 10 ; ; 1
+Pochettes simples cartonnées A4 multicolores ; ; 50
