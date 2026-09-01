@@ -410,6 +410,53 @@ def test_appliquer_et_archiver_factures_bloc_non_resolu_va_en_a_verifier(tmp_pat
     assert "référence inconnue" in raisons[0]
 
 
+def test_appliquer_et_archiver_factures_sans_parser_reste_en_place():
+    """Un fournisseur RECONNU mais sans parser facture n'est pas déplacé
+    vers À vérifier/ (ce n'est pas une décision humaine en attente, juste
+    un fournisseur pas encore couvert) — laissé tel quel dans
+    a_traiter/Factures/, listé dans resume["factures_sans_parser"]."""
+
+    from moteur.rapprochement.pipeline_facture import _est_anomalie_sans_parser
+    assert _est_anomalie_sans_parser("Fournisseur RAVATE reconnu mais pas encore de parser facture")
+    assert not _est_anomalie_sans_parser("Fournisseur non reconnu")
+    assert not _est_anomalie_sans_parser("PDF illisible (corrompu)")
+
+
+def test_appliquer_et_archiver_factures_sans_parser_vs_vraie_anomalie(tmp_path):
+    """Confronte les deux cas dans le MÊME lot : le fichier "sans parser"
+    reste en place et est reporté à part ; le fichier avec une vraie
+    anomalie de lecture (fournisseur non reconnu) part, lui, vers
+    À vérifier/ comme avant — comportement inchangé pour ce cas."""
+
+    chemin_suivi = tmp_path / "suivi.xlsx"
+    _classeur_avec_colonnes_facture(chemin_suivi)
+
+    dossier_a_traiter = tmp_path / "a_traiter" / "Factures"
+    dossier_a_traiter.mkdir(parents=True)
+    (dossier_a_traiter / "ravate.pdf").write_bytes(b"1")
+    (dossier_a_traiter / "illisible.pdf").write_bytes(b"2")
+
+    rapport = RapportRapprochementFacture(
+        anomalies_lecture=[
+            ("ravate.pdf", "Fournisseur RAVATE reconnu mais pas encore de parser facture"),
+            ("illisible.pdf", "Fournisseur non reconnu"),
+        ],
+        fichier_suivi=chemin_suivi,
+    )
+
+    resume = appliquer_et_archiver_factures(tmp_path, dossier_a_traiter, rapport, [])
+
+    assert resume["factures_sans_parser"] == [
+        ("ravate.pdf", "Fournisseur RAVATE reconnu mais pas encore de parser facture"),
+    ]
+    assert (dossier_a_traiter / "ravate.pdf").exists()  # jamais déplacé
+
+    [(fichier, cible, _)] = resume["factures_a_verifier"]
+    assert fichier == "illisible.pdf"
+    assert cible == dossier_a_traiter / "À vérifier" / "illisible.pdf"
+    assert not (dossier_a_traiter / "illisible.pdf").exists()  # bien déplacé, comportement inchangé
+
+
 def test_ecriture_echoue_proprement_sans_les_colonnes_facture(tmp_path):
     """Un classeur qui n'a pas (ou plus) les 5 colonnes facture (ex. un
     export périmé, ou un poste dont le Suivi n'a pas encore été mis à jour —

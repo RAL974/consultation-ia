@@ -20,6 +20,14 @@ moteur/rapprochement/pipeline_bl.py (BL), en deux temps :
    - au moins une ligne non résolue (inconnue, "à confirmer" non cochée,
      commande introuvable, avoir) -> a_traiter/Factures/À vérifier/, fichier
      entier, jamais découpé (voir ci-dessus).
+   - fournisseur RECONNU mais SANS parser facture (`parser_facture()` de
+     moteur.rapprochement.parsers_facture retourne None, voir lecture_facture.
+     lire_facture) -> laissé EN PLACE dans a_traiter/Factures/, jamais
+     déplacé vers À vérifier/ (ce n'est pas une décision humaine en attente,
+     c'est un fournisseur qui n'est simplement pas encore couvert — voir
+     `_est_anomalie_sans_parser`) — juste listé dans le rapport et dans
+     `resume["factures_sans_parser"]`. Seules les VRAIES anomalies de
+     lecture (fournisseur non reconnu, PDF illisible) partent en À vérifier/.
    Puis écrit un rapport dans rapports/, avec le compteur de résorption
    (lignes livrées sans facture, voir `compter_lignes_a_facturer`).
 
@@ -418,6 +426,19 @@ def _raisons_non_resolu_facture(g: dict, cles_ecrites: set) -> list:
     ] + list(g["anomalies"])
 
 
+_MOTIF_SANS_PARSER = "pas encore de parser facture"  # voir lecture_facture.lire_facture, texte exact de la raison
+
+
+def _est_anomalie_sans_parser(raison: str) -> bool:
+    """True si `raison` (une entrée de RapportRapprochementFacture.
+    anomalies_lecture) signale un fournisseur RECONNU mais sans parser
+    facture (voir lecture_facture.lire_facture) — à distinguer d'une VRAIE
+    anomalie de lecture (fournisseur non reconnu, PDF illisible), qui,
+    elle, part vers À vérifier/ (voir appliquer_et_archiver_factures)."""
+
+    return _MOTIF_SANS_PARSER in raison
+
+
 def compter_lignes_a_facturer(chemin_suivi, fournisseur: str) -> dict:
     """Diagnostic de résorption — l'indicateur du chantier F2 (voir
     CLAUDE.md) : lignes du Suivi, pour `fournisseur`, avec une Qté livrée
@@ -462,7 +483,7 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
         "sauvegarde": None, "lignes_ecrites": 0,
         "factures_archivees": [], "factures_a_verifier": [],
         "archivage_echoue": [], "chemin_rapport": None, "resorption": None,
-        "montants_recalcules": [],
+        "montants_recalcules": [], "factures_sans_parser": [],
     }
 
     if correspondances_a_ecrire:
@@ -479,10 +500,20 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
     dossier_a_traiter = Path(dossier_a_traiter)
 
     fichiers_avec_facture = {g["facture"].fichier for g in groupes.values()}
-    fichiers_en_echec_total = {
-        fichier for fichier, _ in rapport.anomalies_lecture
-        if fichier not in fichiers_avec_facture
-    }
+
+    # Un fournisseur RECONNU mais sans parser facture n'est pas une
+    # "anomalie" au sens où une décision humaine serait attendue — c'est
+    # simplement un fournisseur pas encore couvert. Laissé EN PLACE dans
+    # a_traiter/Factures/ (jamais déplacé vers À vérifier/), juste
+    # rapporté — voir bandeau du module et `_est_anomalie_sans_parser`.
+    fichiers_en_echec_total = set()
+    for fichier, raison in rapport.anomalies_lecture:
+        if fichier in fichiers_avec_facture:
+            continue
+        if _est_anomalie_sans_parser(raison):
+            resume["factures_sans_parser"].append((fichier, raison))
+        else:
+            fichiers_en_echec_total.add(fichier)
 
     for fichier in fichiers_en_echec_total:
 
@@ -551,6 +582,9 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
         + "; ".join(f"{f} ({r})" for f, r in rapport.anomalies_lecture),
         f"{len(rapport.anomalies_facture)} bloc(s) non rapproché(s) (avoir, commande introuvable...) : "
         + "; ".join(f"{f.fichier} ({r})" for f, r in rapport.anomalies_facture),
+        f"{len(resume['factures_sans_parser'])} fichier(s) non traité(s) — pas de parser (laissé(s) en place "
+        f"dans {DOSSIER_A_TRAITER_FACTURES}/, PAS déplacé(s)) : "
+        + ", ".join(f for f, _ in resume["factures_sans_parser"]),
     ]
 
     if resume["resorption"]:
