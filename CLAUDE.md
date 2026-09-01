@@ -3554,6 +3554,108 @@ formules.
   n'ont été touchés, y compris la dérive entre les deux découverte cette
   session (voir plus haut).
 
+## Rapprochement factures — 1ère écriture réelle (F2 suite, 2026-09-01)
+
+Suite directe de la session "colonnes créées dans le Suivi vivant" —
+`pipeline_facture.py`/`matching_facture.py` adaptés aux 5 colonnes réelles,
+puis 1ère vraie recette d'écriture (109 Distribution) sur le classeur
+vivant.
+
+- **`ecritures_pour_facture()` réutilise `ecriture.ENTETES_FACTURE`**
+  (jamais une 2e liste de noms redéfinie) et écrit désormais les 5 colonnes,
+  "Montant facturé HT" compris — colonne de SAISIE, pas une formule Excel
+  (voir session précédente). Reprend le montant IMPRIMÉ sur la facture
+  (`LigneFacture.montant_ht`, toujours renseigné chez 109 Distribution) ;
+  un futur fournisseur qui n'imprimerait pas ce montant ligne à ligne le
+  ferait recalculer (Qté × PU) avec un signalement explicite dans
+  `resume["montants_recalcules"]` et le rapport écrit — **jamais
+  silencieusement**, aucun cas réel à ce jour (109 Distribution imprime
+  toujours son montant de ligne).
+- **Correctif : un fournisseur reconnu mais sans parser facture reste EN
+  PLACE dans `a_traiter/Factures/`**, jamais déplacé vers `À vérifier/`
+  (`_est_anomalie_sans_parser`, `resume["factures_sans_parser"]`) — ce
+  n'est pas une décision humaine en attente, juste un fournisseur pas
+  encore couvert. Sans objet sur ce lot (les 79 fichiers du dossier sont
+  tous 109 Distribution, vérifié via le détecteur), mais nécessaire pour
+  la suite (Coredime, Cominter... dès que de vraies factures seront
+  déposées pour eux).
+- **BUG D'EXÉCUTION (pas un bug du moteur) — script `py -3 <fichier>.py`
+  depuis un chemin hors du dépôt ne trouve pas le paquet `moteur`** :
+  contrairement à `py -3 -c "..."` (qui ajoute le répertoire courant à
+  `sys.path`), `py -3 <script>` ajoute le répertoire DU SCRIPT — un script
+  d'exécution ponctuel dans le scratchpad de session doit donc faire
+  `sys.path.insert(0, str(PROJET))` explicitement. Repéré avant toute
+  écriture (échec à l'import), rien perdu — mais à retenir pour toute
+  future session qui écrirait un script d'exécution hors du dépôt plutôt
+  que d'utiliser `py -3 -c`.
+- **LEÇON RÉELLE — le Suivi peut changer ENTRE la simulation (lecture
+  seule) montrée à l'acheteur et l'écriture confirmée, même à quelques
+  minutes d'intervalle, si elle continue à y travailler.** Constaté en
+  conditions réelles cette session : la simulation montrée pour
+  confirmation donnait 146 sûres ; une 1ère relecture juste avant
+  d'écrire en donnait 147 (`Facture_365379.pdf`, réf. 59210, commande
+  M3.14.350, passée d'inconnue à sûre — la ligne Suivi avait dû être
+  éditée entre-temps) ; puis, l'exécution réelle (après un aller-retour de
+  diagnostic) l'a retrouvée à nouveau à 146, la ligne 59210 étant repassée
+  "à vérifier" (`Aucune ligne du Suivi ne correspond...`) — signe que
+  l'acheteur retouchait activement cette ligne pendant la session (essai/
+  annulation probable). **Le nombre réellement écrit (146) correspond
+  exactement à ce qui avait été confirmé** — coïncidence de calendrier,
+  pas une garantie générale. Leçon retenue, à appliquer systématiquement :
+  ne JAMAIS réutiliser un rapport de simulation périmé pour construire les
+  `Ecriture` à écrire — toujours relire fraîchement (`rapprocher_dossier_
+  factures()`) juste avant `appliquer_et_archiver_factures()`, et
+  comparer les comptes (à_confirmer, anomalies_facture inchangés ; sûres
+  jamais en dessous du nombre confirmé) avant d'écrire quoi que ce soit —
+  exactement le garde-fou déjà appliqué cette session (voir script de
+  recette, conservé hors dépôt).
+- **LIMITE CONFIRMÉE SUR DONNÉES RÉELLES (déjà repérée en test la session
+  précédente, désormais vérifiée sur la vraie écriture) : "Date facture"
+  se relit comme un NOMBRE DE SÉRIE Excel brut (ex. 46218.0), pas comme
+  une date, tant que la colonne n'a pas encore de format de date
+  appliqué** — une cellule fraîchement créée (colonne née le 2026-09-01,
+  jamais écrite avant sur AUCUNE ligne) n'hérite d'aucun style, donc
+  aucun format d'affichage. La VALEUR écrite est correcte (vérifié :
+  46218 = 15/07/2026, cohérent avec la date de la facture 360311) — seul
+  l'AFFICHAGE dans Excel restera "46218" tant que l'acheteur n'aura pas
+  appliqué un format de date à cette colonne (une seule fois, dans Excel —
+  hors périmètre de l'outil, qui n'a pas vocation à poser des formats de
+  cellule). À signaler à l'acheteur à la prochaine occasion.
+- **Recette réelle du 2026-09-01 : 146 lignes écrites** (exactement le
+  nombre confirmé par l'acheteur après la simulation), sauvegarde
+  horodatée créée avant écriture (`backups/1.3.0.1. Suivi commandes -
+  2026_20260901_153637.xlsx`). **46 factures entièrement résolues**
+  archivées individuellement dans `a_traiter/BL/Traités/<n° commande>/`
+  (aux côtés du BdC et des BL de la même commande), **33 factures avec au
+  moins une ligne non résolue** déplacées vers `a_traiter/Factures/À
+  vérifier/` (fichier entier, jamais découpé — une facture 109 Distribution
+  tient sur une seule page utile). 0 échec d'archivage, 0 montant
+  recalculé (tous les montants de ligne de ce lot étaient imprimés).
+  **Compteur de résorption après écriture, 109 DISTRIBUTION : 854 lignes
+  livrées encore sans facture sur 1 000 livrées au total (146 désormais
+  facturées)** — premier vrai chiffre non trivial pour cet indicateur,
+  jusque-là toujours 100% "à facturer" faute d'écriture. Rapport détaillé :
+  `rapports/rapprochement_facture_20260901_154355.txt`.
+- **Pattern réel à approfondir en F4 — 13 blocs "commande introuvable" sur
+  9 factures, TOUS avec N°Réf.Client LITTÉRALEMENT VIDE** (pas un format
+  interne 109 non reconnu comme "BC 241659" — ici rien du tout n'est
+  imprimé). Différent des cas déjà documentés (code interne 109, texte
+  libre partiellement exploitable) : une absence totale et cohérente sur
+  ces 9 factures précises pourrait signaler des commandes passées sans
+  transmettre notre référence à 109 (retrait comptoir, commande
+  téléphonique, carnet manuel d'un chargé de travaux — même famille que
+  les "carnets manuels des gars" déjà documentés côté BL, voir plus haut)
+  — **hypothèse non confirmée avec l'acheteur à ce jour**, juste une
+  observation factuelle sur les 79 pièces de ce lot (règle d'or : rien
+  inventé au-delà de ce qui est réellement observé). À vérifier avec elle
+  avant de construire quoi que ce soit dessus.
+- **Ouvert pour la suite** : le cas de précision 365387/260630 (écart
+  0,5 centime, Tarif BL à 3 décimales) réapparaît identique à cette
+  recette — toujours pas retranché avec l'acheteur si "aucune tolérance"
+  doit rester strict à ce niveau. "Écart facture"/"Statut facture" restent
+  à construire (session dédiée aux formules). Étendre à d'autres
+  fournisseurs dès que de vraies factures seront déposées pour eux.
+
 ## Tests
 
     py -3 -m pytest          # tout le socle
