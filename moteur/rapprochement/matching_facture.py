@@ -215,16 +215,31 @@ def lire_lignes_fournisseur_facture(chemin_suivi, fournisseur: str) -> list[Lign
 def _comparer_facture(ligne_facture: LigneFacture, ligne_suivi: LigneSuiviFacture, numero_facture: str) -> CorrespondanceFacture:
     """Une facture n'est jamais "cumulée" comme un BL : elle est confrontée
     à ce qui est DÉJÀ enregistré (Qté livrée, Tarif BL/Tarif convenu, et le
-    N° de facture déjà présent le cas échéant — idempotence)."""
+    N° de facture déjà présent le cas échéant — idempotence).
+
+    Une facture reçue AVANT que son BL soit rapproché dans le Suivi (Qté
+    livrée encore à 0) N'EST PAS un motif de blocage — décision explicite
+    de l'acheteur (session F4, Coredime) : "ce ne sont pas des factures non
+    parvenues puisqu'on les a reçues ! [...] il y a les BL manquants
+    là-dedans, ils sont signés" — la livraison est réellement survenue
+    (BL papier signé), seul son rapprochement dans l'outil n'a pas encore
+    eu lieu. Le contrôle de cohérence de quantité (facturée vs livrée) est
+    alors simplement IGNORÉ (rien à comparer, ce n'est pas signe d'anomalie).
+
+    Le PRIX facturé N'EST PLUS NON PLUS un motif de blocage — décision
+    explicite de l'acheteur, qui affine sa position dans la même session :
+    d'abord une tolérance de 0,01€ envisagée (bruit d'arrondi type
+    GEWDX40020/GEWDX27720), puis, quelques secondes plus tard : "il faut
+    écrire tout ce qui apparaît sur les factures rapprochables à des
+    commandes, quel que soit le prix". Revient donc entièrement sur le
+    "aucune tolérance" du cadrage initial (Volet 3, CLAUDE.md). Le PU
+    facturé est écrit tel quel (voir pipeline_facture.ecritures_pour_facture)
+    ; tout écart avec Tarif BL/Tarif convenu reste visible directement dans
+    le Suivi (colonnes côte à côte), sans jamais bloquer l'écriture. Seul ce
+    qui concerne l'IDENTITÉ du rapprochement (bon n° de facture, bonne
+    ligne — pas son prix) reste un motif de blocage."""
 
     raisons = []
-
-    if ligne_suivi.qte_livree <= 0:
-        raisons.append(
-            "Aucune quantité livrée enregistrée pour cette ligne — facture arrivée avant "
-            "son BL, ou BL pas encore rapproché"
-        )
-        return CorrespondanceFacture(ligne_facture, ligne_suivi, StatutFacture.A_CONFIRMER, raisons)
 
     if ligne_suivi.numero_facture:
         if ligne_suivi.numero_facture == numero_facture:
@@ -238,27 +253,10 @@ def _comparer_facture(ligne_facture: LigneFacture, ligne_suivi: LigneSuiviFactur
         )
         return CorrespondanceFacture(ligne_facture, ligne_suivi, StatutFacture.A_CONFIRMER, raisons)
 
-    if abs(ligne_facture.quantite_facturee - ligne_suivi.qte_livree) > 0.001:
+    if ligne_suivi.qte_livree > 0 and abs(ligne_facture.quantite_facturee - ligne_suivi.qte_livree) > 0.001:
         raisons.append(
             f"Qté facturée ({ligne_facture.quantite_facturee:g}) différente de la Qté livrée "
             f"déjà enregistrée ({ligne_suivi.qte_livree:g}) — facturation partielle/multiple ?"
-        )
-
-    # Aucune tolérance sur l'écart de prix — décision explicite de l'acheteur
-    # (voir CLAUDE.md, Volet 3 : "il y a énormément d'articles à très faible
-    # valeur, pas de tolérance, prix BL = prix facture"). Tarif BL prioritaire
-    # sur Tarif convenu, même repli que "Facturé BL" côté formule Excel.
-    tarif_bl = to_float(ligne_suivi.tarif_bl) if ligne_suivi.tarif_bl else 0.0
-    tarif_reference = tarif_bl or to_float(ligne_suivi.tarif_convenu)
-    pu_facture = to_float(ligne_facture.prix_unitaire_ht)
-
-    if not tarif_reference:
-        raisons.append("Aucun tarif de référence (ni Tarif BL, ni Tarif convenu) pour vérifier le prix facturé")
-    elif abs(pu_facture - tarif_reference) > 0.001:
-        source = "Tarif BL" if tarif_bl else "Tarif convenu"
-        raisons.append(
-            f"PU facturé ({pu_facture:g}€) différent du tarif de référence "
-            f"({tarif_reference:g}€, {source}) — aucune tolérance (décision de l'acheteur)"
         )
 
     statut = StatutFacture.A_CONFIRMER if raisons else StatutFacture.SUR

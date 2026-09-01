@@ -259,12 +259,12 @@ class FenetreRapprochementFacture(tk.Toplevel):
             )
 
         texte_resorption = ""
-        if resume["resorption"]:
-            r = resume["resorption"]
-            texte_resorption = (
-                f"\nRésorption 109 DISTRIBUTION : {r['a_facturer']} ligne(s) livrée(s) encore sans "
-                f"facture sur {r['livrees']} au total.\n"
-            )
+        for fournisseur, r in (resume.get("resorption") or {}).items():
+            if r:
+                texte_resorption += (
+                    f"\nRésorption {fournisseur} : {r['a_facturer']} ligne(s) livrée(s) encore sans "
+                    f"facture sur {r['livrees']} au total.\n"
+                )
 
         messagebox.showinfo(
             "Rapprochement terminé",

@@ -3661,6 +3661,184 @@ vivant.
   à construire (session dédiée aux formules). Étendre à d'autres
   fournisseurs dès que de vraies factures seront déposées pour eux.
 
+## Rapprochement factures — F4 : Coredime, 2e fournisseur (fait, 2026-09-01)
+
+Suite directe de F2 (109 Distribution). Cadrage donné par l'acheteur avant
+tout code : attaquer les fournisseurs dans l'ordre du poids réel du
+backlog (Coredime d'abord, puis Cominter), ne jamais mélanger le flux BL
+et Facture pour Electric Plus/GMR (déjà couvert côté BL), rester prudent
+sur les scans Ravate (toujours "à confirmer"), et une exception ENCADRÉE
+proposée pour Tarif BL depuis la facture — validée en une phrase ("ok
+100% !") : whitelist explicite (Coredime pour commencer), uniquement si
+Tarif BL est vide, uniquement pour une ligne réellement écrite, tracée
+dans le rapport (`FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE`,
+`moteur/rapprochement/pipeline_facture.py`).
+
+**Pièces réelles** : 70 vraies factures Coredime de juillet-août 2026,
+récupérées depuis un mail de Prisca LEBLÉ (comptable) contenant un .msg
+imbriqué par facture — extraites une par une via `win32com.client`
+(`OpenSharedItem`/`Attachments`/`SaveAsFile`, `sous_item.Close(0)` dans un
+`finally` pour libérer le handle avant `unlink()` — sinon `PermissionError`
+sur une extraction relancée).
+
+**Parser facture Coredime** (`moteur/fournisseurs/coredime.py`, section
+GABARIT FACTURE, 8 fixtures réelles, `tests/test_parsers_facture_coredime.py`) :
+- **Bornage de page = le VRAI repère structurel, jamais un repère de
+  contenu.** Un premier essai bornait chaque bloc "BON D'EXPEDITION" sur
+  la mention "----- IMPORTANT -----" — texte qui peut apparaître n'importe
+  où selon le document (pas une vraie limite de page) — perdant des lignes
+  imprimées APRÈS ce repère dans le flux PyMuPDF scramblé. Corrigé en
+  bornant sur le vrai repère de page, un bloc de métadonnées répété
+  `##ESIGUID;...` — présent sur CHAQUE début de page, fiable sur les 70
+  pièces.
+- **Référence avec tiret** (`WAG221-425`) et **référence purement
+  numérique** (`227060133`, un vrai article, à distinguer de `9993`
+  "LIVRAISON AVION" — un frais de port qui ressort simplement "inconnu" au
+  rapprochement, jamais un mauvais rattachement) : classe de caractères de
+  `MOTIF_LIGNE_FACTURE_COREDIME` élargie aux deux formats.
+- **Remise double ("35,00+26,00%") imprimée sur une ligne totalement
+  disjointe** de sa référence/désignation/quantité dans le flux PyMuPDF —
+  `_lignes_remise_double_coredime()` : appariement 1:1 UNIQUEMENT quand il
+  n'y a qu'UNE ligne incomplète et UNE ligne "Remise" dans le bloc (aucune
+  ambiguïté) ; dès que plusieurs lignes de chaque sorte coexistent dans le
+  même bloc, l'appariement devient ambigu et ces lignes restent NON
+  extraites — extraction partielle honnête, l'écart avec le Total HT
+  affiché le signale (`test_parse_facture_coredime_8...`, 12 lignes sur 19
+  réelles, jamais deviné).
+- **AVOIR détecté via la ligne de métadonnées** (`...;Avoir;...` dans le
+  bloc `##ESIGUID`/`#####DEMAT-FJ`) — `type_document="AVOIR"`, retourne
+  immédiatement SANS extraire aucune ligne (jamais rapproché
+  automatiquement, format numérique de toute façon différent).
+- **Total HT recalculé et comparé à chaque parse** (`_total_ht_facture_coredime`,
+  ancré sur la ligne nue `COR [FA]<num>`) — tout écart imprime un `!!` en
+  clair, jamais silencieux (5 des 70 pièces réelles ont un écart résiduel
+  connu, dû à ce garde-fou remise-double volontairement conservateur).
+
+**Deux changements de règle sur `_comparer_facture()`
+(`moteur/rapprochement/matching_facture.py`), tous deux des décisions
+explicites de l'acheteur données EN COURS de session, chacune corrigeant
+la précédente — leçon générale : un plan déjà validé reste ouvert à une
+vraie décision de l'acheteur, y compris quelques secondes après l'avoir
+donnée :**
+
+1. **Une facture reçue AVANT que son BL soit rapproché (Qté livrée encore
+   à 0) n'est plus un motif de blocage.** Mot de l'acheteur : *"il faut
+   l'écrire ! Ce ne sont pas des factures non parvenues puisqu'on les a
+   reçues !"*, puis, en creusant pourquoi tant de lignes Coredime
+   traînaient en "à confirmer" : *"en plus, il y a les BL manquants
+   là-dedans ! Ils sont signés"* — la livraison a réellement eu lieu (BL
+   papier signé), seul son rapprochement dans l'outil n'a pas encore eu
+   lieu. Le contrôle de cohérence de quantité (facturée vs livrée) est
+   simplement IGNORÉ dans ce cas (rien à comparer, pas un signe
+   d'anomalie) — condition `ligne_suivi.qte_livree > 0 and abs(...) > 0.001`
+   au lieu d'un retour anticipé bloquant.
+2. **Le PRIX facturé n'est PLUS DU TOUT un motif de blocage non plus** —
+   décision affinée en une seule respiration dans le chat : d'abord une
+   tolérance de 0,01€ envisagée (pour absorber le bruit d'arrondi type
+   `GEWDX40020`/`GEWDX27720`, Tarif BL/convenu stocké à 3-4 décimales,
+   jamais arrondi comme une facture l'imprime toujours à 2), PUIS,
+   quelques secondes plus tard : *"pardon changeons ça, 0,01€ de
+   tolérance"* suivi immédiatement de *"en fait il faut écrire tout ce qui
+   apparaît sur les factures rapprochables à des commandes, quel que soit
+   le prix"* — la tolérance à 0,01€ a été codée puis testée, puis
+   entièrement retirée avant même d'être exploitée en écriture réelle.
+   Toute la section prix de `_comparer_facture()` (comparaison PU
+   facturé/Tarif BL/Tarif convenu) a été supprimée : le PU facturé est
+   désormais écrit tel quel, l'écart avec Tarif BL/Tarif convenu reste
+   visible directement dans le Suivi (colonnes côte à côte) sans plus
+   jamais bloquer l'écriture. Revient entièrement sur le "aucune
+   tolérance" du cadrage F1 (Volet 3). **Seul ce qui concerne l'IDENTITÉ
+   du rapprochement reste un motif de blocage** : un autre n° de facture
+   déjà présent sur la ligne (doublon/litige), une quantité facturée
+   incohérente avec une quantité RÉELLEMENT déjà livrée, une commande
+   déduite (jamais "sûr" automatiquement, inchangé), ou une référence
+   ambiguë/introuvable (inchangé, matching de référence non touché).
+   Testé de bout en bout (`tests/test_rapprochement_matching_facture.py`,
+   tous les tests de prix réécrits pour refléter "SUR quel que soit le
+   prix" plutôt que "à confirmer si écart").
+   **Portée** : ce changement s'applique à TOUS les fournisseurs (pas
+   propre à Coredime, contrairement à l'exception Tarif BL) — a
+   immédiatement débloqué des lignes 109 Distribution qui traînaient dans
+   `À vérifier/` depuis la session F2 (ex. `F2R160T`, `59210`), sans
+   action spécifique nécessaire.
+
+**BUG RÉEL TROUVÉ ET CORRIGÉ EN CONDITIONS RÉELLES — même piège que côté
+BL, mais jamais rencontré côté Facture avant cette session** :
+`appliquer_et_archiver_factures()` suppose que `dossier_a_traiter` est
+TOUJOURS `a_traiter/Factures/` lui-même, jamais un de ses sous-dossiers.
+Pour retraiter directement les 84 factures déjà déplacées dans
+`a_traiter/Factures/À vérifier/` (après le correctif "prix jamais
+bloquant"), un appel a pointé `dossier_a_traiter` DIRECTEMENT sur ce
+sous-dossier — créant un `À vérifier/À vérifier/` imbriqué pour les
+factures encore non résolues au lieu de les y laisser à plat. **Aucune
+perte de données** (repéré en quelques minutes via 3 vérifications
+PowerShell indépendantes — Get-ChildItem, Test-Path, contenu détaillé —
+après que deux lectures consécutives, Python puis PowerShell, aient
+d'abord semblé montrer un dossier VIDE, un faux symptôme dû au délai de
+cohérence du partage réseau juste après l'opération de masse) : les 78
+fichiers ont été remontés à la main (`Move-Item`) dans
+`a_traiter/Factures/À vérifier/`, le dossier imbriqué vide supprimé, puis
+RE-remontés une 2e fois jusqu'à `a_traiter/Factures/` (racine) pour
+reproduire le pattern normal d'usage (l'acheteur redépose dans le dossier
+principal pour un nouveau passage, jamais directement dans "À vérifier"),
+avant de relancer proprement. Avertissement ajouté dans le docstring de
+`appliquer_et_archiver_factures()`, symétrique à celui déjà en place côté
+`pipeline_bl.appliquer_et_archiver` — **leçon générale pour toute session
+future qui voudrait retraiter un lot déjà dans "À vérifier"** : toujours
+remonter les fichiers dans le dossier principal (`a_traiter/BL/` ou
+`a_traiter/Factures/`) avant un appel à la fonction d'écriture,
+`rapprocher_dossier(_factures)()` (lecture seule) pouvant lui, seul, être
+pointé sans risque directement sur "À vérifier" pour diagnostic.
+
+**Clarification de l'acheteur sur le paquet de commandes "24X.XXX"/"242.5XX"
+introuvables dans le Suivi** (repéré comme un motif net : 18 des 20 blocs
+"commande introuvable" du 1er passage de recette concentrés dans cette
+même plage numérique) : *"les factures sous le format '24XXXX' (X =
+chiffre) sont des BdC manuels, F4 s'en occupera"* — catégorie déjà connue
+(carnets manuels des "gars", voir sessions BL précédentes), différée à une
+prochaine étape de cette même branche F4, pas une anomalie de
+rapprochement à corriger maintenant. Le seul fichier "fournisseur non
+reconnu" du lot (`BC241723.pdf`) colle à cette même famille de numéros —
+vraisemblablement le BdC papier scanné d'une de ces commandes manuelles,
+pas une facture, jamais forcé dans le pipeline.
+
+**Recette réelle — 3 écritures successives sur le vrai Suivi vivant, même
+soir** (chaque écriture précédée d'une relecture fraîche du Suivi et d'une
+reconfirmation explicite "Suivi fermé ?" — jamais réutilisé un rapport de
+simulation périmé, leçon retenue de la session F2) :
+
+| Écriture | Lignes | Montant | Factures archivées | Tarif BL complété |
+|---|---|---|---|---|
+| 1 (sûres initiales) | 55 | 19 197,77 € | 19 | 15 |
+| 2 (facture avant BL débloqué) | 21 | 2 692,46 € | 6 | 17 |
+| 3 (prix jamais bloquant débloqué) | 28 | 3 443,39 € | 15 | 22 |
+| **Total session** | **104** | **25 333,62 €** | **40** | **54** |
+
+Résorption finale : **109 DISTRIBUTION** 852 lignes livrées encore sans
+facture sur 1 000 (148 déjà facturées, contre 146 en fin de session F2) ;
+**COREDIME** 800/864 (64 déjà facturées, contre 0 en début de session).
+Reste 63 factures dans `a_traiter/Factures/À vérifier/` — majoritairement
+le paquet "BdC manuels" ci-dessus, quelques vraies facturations partielles
+(Qté facturée < Qté déjà livrée, légitime), la facture 6108788 (commande
+113.071 déduite, jamais écrite automatiquement par principe, 9 lignes), et
+5 vrais trous d'extraction/documents hors périmètre (`6107308.pdf`,
+`6107594.pdf`, `6108474.pdf` — Total HT affiché mais 0 ligne extraite,
+règle d'or : un seul exemple par cas, pas de correctif tenté ; `6108972.pdf`
+l'AVOIR, mis de côté comme prévu ; `BC241723.pdf`, hors périmètre).
+
+**Reste à faire (F4 suite)** :
+1. Cominter (2e plus gros fournisseur par backlog réel, selon le
+   classement donné par l'acheteur) — pièces BL déjà couvertes côté
+   rapprochement BL, reste à cadrer/construire son parser FACTURE.
+2. Proposer l'extension Hermes (lecture seule, extraction automatique des
+   PDF de factures fournisseurs depuis ral@/achats@ depuis janvier 2026
+   vers `a_traiter/Factures/`, anti-doublon par EntryID + n° de facture déjà
+   présent dans le Suivi) — prévu après le 2e fournisseur, pas encore fait.
+3. Regénérer l'état FNP d'août une fois qu'un fournisseur majeur est
+   significativement résorbé, pour montrer la baisse du total à la DAF.
+4. Décider avec l'acheteur du sort des 63 factures encore en "À
+   vérifier" (notamment la grosse 6108788).
+
 ## État FNP mensuel (moteur/fnp.py) — clôture comptable
 
 Demande directe de la DAF (31/08/2026, direction en copie) : un état

@@ -305,6 +305,22 @@ def regrouper_par_facture(rapport: RapportRapprochementFacture) -> dict:
 
 _COL_NUM_FACTURE, _COL_DATE_FACTURE, _COL_QTE_FACTUREE, _COL_PU_FACTURE, _COL_MONTANT_FACTURE = ENTETES_FACTURE
 
+# Exception ENCADRÉE, demandée et validée par l'acheteur en une phrase
+# (session F4, cadrage avant code Coredime) : ses BL n'affichent JAMAIS de
+# prix (voir moteur.fournisseurs.coredime, "GABARIT BL" — réglé à la
+# facture) donc "Tarif BL" du Suivi reste éternellement vide pour ce
+# fournisseur si on ne le renseigne QUE depuis le flux BL comme pour les
+# autres — bloquant le contrôle de prix Excel ("Statut commande",
+# ⚠️ Surfacturation, qui LIT Tarif BL directement, indépendamment de ce
+# module). Un fournisseur de cette liste blanche voit son PU facturé
+# recopié dans Tarif BL, mais UNIQUEMENT si Tarif BL est encore vide
+# (jamais un écrasement d'une valeur BL réelle déjà présente) et
+# UNIQUEMENT pour une ligne réellement écrite (sûre, ou "à confirmer"
+# cochée) — jamais pour une ligne laissée de côté. Tracé dans
+# resume["tarif_bl_ecrit_depuis_facture"] (voir appliquer_et_archiver_
+# factures), jamais un effet de bord silencieux.
+FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE = {"COREDIME"}
+
 
 def ecritures_pour_facture(correspondances) -> tuple:
     """Construit les Ecriture pour les 5 colonnes facture (voir
@@ -315,18 +331,21 @@ def ecritures_pour_facture(correspondances) -> tuple:
     visé — rien de spécial à faire ici, le garde-fou est déjà dans
     moteur.rapprochement.ecriture.
 
-    Retourne (ecritures, montants_recalcules). "Montant facturé HT" est une
-    colonne de SAISIE (pas une formule Excel, voir CLAUDE.md "colonnes
-    créées dans le Suivi vivant") : reprend le montant IMPRIMÉ sur la
-    facture pour cette ligne (LigneFacture.montant_ht, déjà extrait tel
-    quel par le parser — pour 109 Distribution, toujours imprimé, jamais
-    None). Si un futur fournisseur n'imprime PAS ce montant ligne à ligne,
-    il est recalculé (Qté facturée × PU facturé) — JAMAIS silencieusement :
-    chaque recalcul est ajouté à `montants_recalcules`, repris dans le
-    rapport écrit par appliquer_et_archiver_factures()."""
+    Retourne (ecritures, montants_recalcules, tarif_bl_ecrit). "Montant
+    facturé HT" est une colonne de SAISIE (pas une formule Excel, voir
+    CLAUDE.md "colonnes créées dans le Suivi vivant") : reprend le montant
+    IMPRIMÉ sur la facture pour cette ligne (LigneFacture.montant_ht, déjà
+    extrait tel quel par le parser — pour 109 Distribution, toujours
+    imprimé, jamais None). Si un futur fournisseur n'imprime PAS ce montant
+    ligne à ligne, il est recalculé (Qté facturée × PU facturé) — JAMAIS
+    silencieusement : chaque recalcul est ajouté à `montants_recalcules`,
+    repris dans le rapport écrit par appliquer_et_archiver_factures().
+    `tarif_bl_ecrit` (voir FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE) : liste des
+    lignes où Tarif BL a aussi été renseigné depuis cette facture."""
 
     ecritures = []
     montants_recalcules = []
+    tarif_bl_ecrit = []
 
     for facture, c in correspondances:
 
@@ -347,6 +366,19 @@ def ecritures_pour_facture(correspondances) -> tuple:
         if lf.prix_unitaire_ht:
             ecritures.append(Ecriture(ligne, _COL_PU_FACTURE, lf.prix_unitaire_ht))
 
+            if (
+                facture.fournisseur.upper() in FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE
+                and not c.ligne_suivi.tarif_bl
+            ):
+                ecritures.append(Ecriture(ligne, "Tarif BL", lf.prix_unitaire_ht))
+                tarif_bl_ecrit.append({
+                    "fichier": facture.fichier,
+                    "facture": facture.numero_facture,
+                    "reference": lf.reference_fournisseur,
+                    "ligne_excel": ligne,
+                    "tarif_bl": lf.prix_unitaire_ht,
+                })
+
         if lf.montant_ht:
             montant = lf.montant_ht
         else:
@@ -361,7 +393,7 @@ def ecritures_pour_facture(correspondances) -> tuple:
 
         ecritures.append(Ecriture(ligne, _COL_MONTANT_FACTURE, montant))
 
-    return ecritures, montants_recalcules
+    return ecritures, montants_recalcules, tarif_bl_ecrit
 
 
 def _nom_archive_facture(facture, numero_commande: str) -> str:
@@ -473,7 +505,27 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
     """Écrit `correspondances_a_ecrire` dans le Suivi, puis archive/déplace
     chaque facture — voir bandeau du module. Retourne un résumé
     {sauvegarde, lignes_ecrites, factures_archivees, factures_a_verifier,
-    archivage_echoue, chemin_rapport, resorption}."""
+    archivage_echoue, chemin_rapport, resorption (dict {fournisseur: ...},
+    voir compter_lignes_a_facturer), montants_recalcules,
+    tarif_bl_ecrit_depuis_facture (voir FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE),
+    factures_sans_parser}.
+
+    **Piège pour tout futur appel direct hors GUI, même piège que côté BL
+    (voir pipeline_bl.appliquer_et_archiver, "Piège pour tout futur appel
+    direct hors GUI") — RENCONTRÉ POUR DE VRAI ici en session F4** :
+    `dossier_a_traiter` DOIT TOUJOURS être `a_traiter/Factures/` lui-même
+    (parent direct de `DOSSIER_A_VERIFIER_FACTURES`), jamais un de ses
+    sous-dossiers. Un appel pointé par erreur directement sur
+    `a_traiter/Factures/À vérifier/` (pour retraiter seulement les factures
+    qui y étaient déjà, après un correctif de matching) a créé un
+    sous-dossier imbriqué `À vérifier/À vérifier/` au lieu d'y laisser les
+    78 factures encore non résolues à plat — repéré et corrigé à la main
+    dans la foulée (déplacement des fichiers, aucune perte : ni le Suivi ni
+    aucun PDF n'a été affecté, seul le RANGEMENT était faux).
+    `rapprocher_dossier_factures()` (lecture seule), lui, peut être pointé
+    sur n'importe quel dossier sans risque (c'est ce qui permet de tester
+    "À vérifier" isolément) — seul `appliquer_et_archiver_factures()` a
+    cette contrainte."""
 
     dossier_projet = Path(dossier_projet)
     dossier_commandes_bc = trouver_dossier_commandes(dossier_projet)
@@ -484,15 +536,17 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
         "factures_archivees": [], "factures_a_verifier": [],
         "archivage_echoue": [], "chemin_rapport": None, "resorption": None,
         "montants_recalcules": [], "factures_sans_parser": [],
+        "tarif_bl_ecrit_depuis_facture": [],
     }
 
     if correspondances_a_ecrire:
-        ecritures, montants_recalcules = ecritures_pour_facture(correspondances_a_ecrire)
+        ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture(correspondances_a_ecrire)
         resume["sauvegarde"] = appliquer(
             rapport.fichier_suivi, ecritures, dossier_projet / DOSSIER_BACKUPS,
         )
         resume["lignes_ecrites"] = len(correspondances_a_ecrire)
         resume["montants_recalcules"] = montants_recalcules
+        resume["tarif_bl_ecrit_depuis_facture"] = tarif_bl_ecrit
 
     cles_ecrites = {id(c) for _, c in correspondances_a_ecrire}
     groupes = regrouper_par_facture(rapport)
@@ -558,10 +612,16 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
             except OSError as e:
                 resume["archivage_echoue"].append((facture.fichier, str(e)))
 
-    try:
-        resume["resorption"] = compter_lignes_a_facturer(rapport.fichier_suivi, "109 DISTRIBUTION")
-    except Exception:
-        resume["resorption"] = None
+    # Résorption PAR FOURNISSEUR (demande explicite, session F4) — pour
+    # chaque fournisseur réellement présent dans CE lot, jamais figé sur
+    # "109 DISTRIBUTION" comme avant (ne disait plus rien dès qu'un 2e
+    # fournisseur était traité).
+    resume["resorption"] = {}
+    for fournisseur in sorted({g["facture"].fournisseur for g in groupes.values()}):
+        try:
+            resume["resorption"][fournisseur] = compter_lignes_a_facturer(rapport.fichier_suivi, fournisseur)
+        except Exception:
+            resume["resorption"][fournisseur] = None
 
     lignes_rapport = [
         f"Rapprochement factures — {datetime.now().strftime('%d/%m/%Y %H:%M')}",
@@ -587,12 +647,24 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
         + ", ".join(f for f, _ in resume["factures_sans_parser"]),
     ]
 
-    if resume["resorption"]:
-        r = resume["resorption"]
+    for fournisseur, r in (resume["resorption"] or {}).items():
+        if r:
+            lignes_rapport.append(
+                f"Résorption {fournisseur} : {r['a_facturer']} ligne(s) livrée(s) encore sans "
+                f"facture sur {r['livrees']} livrée(s) au total ({r['deja_facturees']} déjà facturée(s))."
+            )
+
+    if resume["tarif_bl_ecrit_depuis_facture"]:
         lignes_rapport.append(
-            f"Résorption 109 DISTRIBUTION : {r['a_facturer']} ligne(s) livrée(s) encore sans "
-            f"facture sur {r['livrees']} livrée(s) au total ({r['deja_facturees']} déjà facturée(s))."
+            f"{len(resume['tarif_bl_ecrit_depuis_facture'])} « Tarif BL » renseigné(s) depuis la facture "
+            f"(fournisseur en liste blanche {sorted(FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE)}, "
+            "Tarif BL était vide — voir bandeau ecritures_pour_facture) :"
         )
+        lignes_rapport += [
+            f"  - {t['fichier']} (facture {t['facture']}, réf. {t['reference']}, ligne Excel {t['ligne_excel']}) : "
+            f"{t['tarif_bl']:.4f}€"
+            for t in resume["tarif_bl_ecrit_depuis_facture"]
+        ]
 
     if resume["montants_recalcules"]:
         lignes_rapport.append(

@@ -37,6 +37,7 @@ from moteur.rapprochement.pipeline_facture import (
     compter_lignes_a_facturer,
     ecritures_pour_facture,
     regrouper_par_facture,
+    FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE,
 )
 
 from conftest import ROOT
@@ -141,7 +142,7 @@ def test_ecritures_pour_facture_construit_les_5_champs_montant_imprime():
     lf = _ligne_facture(quantite_facturee=200.0, prix_unitaire_ht=0.6, montant_ht=120.0)
     c = CorrespondanceFacture(lf, _ligne_suivi_facture(5), StatutFacture.SUR)
 
-    ecritures, montants_recalcules = ecritures_pour_facture([(f, c)])
+    ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
 
     par_colonne = {e.colonne: e.valeur for e in ecritures if e.ligne == 5}
     assert par_colonne["N° facture"] == "360311"
@@ -163,7 +164,7 @@ def test_ecritures_pour_facture_recalcule_montant_absent_et_le_signale():
     lf = _ligne_facture(reference_fournisseur="REFX", quantite_facturee=10.0, prix_unitaire_ht=2.5, montant_ht=None)
     c = CorrespondanceFacture(lf, _ligne_suivi_facture(5), StatutFacture.SUR)
 
-    ecritures, montants_recalcules = ecritures_pour_facture([(f, c)])
+    ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
 
     par_colonne = {e.colonne: e.valeur for e in ecritures if e.ligne == 5}
     assert par_colonne["Montant facturé HT"] == 25.0
@@ -181,11 +182,75 @@ def test_ecritures_pour_facture_ignore_deja_a_jour():
     c_sur = CorrespondanceFacture(_ligne_facture(), _ligne_suivi_facture(5), StatutFacture.SUR)
     c_deja = CorrespondanceFacture(_ligne_facture(), _ligne_suivi_facture(6), StatutFacture.DEJA_A_JOUR)
 
-    ecritures, montants_recalcules = ecritures_pour_facture([(f, c_sur), (f, c_deja)])
+    ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture([(f, c_sur), (f, c_deja)])
 
     assert all(e.ligne != 6 for e in ecritures)
     assert any(e.ligne == 5 for e in ecritures)
     assert montants_recalcules == []  # c_sur a un montant_ht imprimé (défaut du helper _ligne_facture)
+
+
+# --- exception Tarif BL depuis facture (liste blanche, session F4) -------
+
+
+def test_ecritures_pour_facture_ecrit_tarif_bl_pour_fournisseur_en_liste_blanche():
+    """COREDIME : ses BL n'affichent jamais de prix (voir
+    moteur.fournisseurs.coredime) — Tarif BL doit être renseigné depuis la
+    facture quand il est encore vide, sinon "Statut commande"/⚠️
+    Surfacturation (formule Excel qui LIT Tarif BL directement) resterait
+    aveugle pour ce fournisseur. Proposition validée par l'acheteur en une
+    phrase (voir CLAUDE.md, cadrage F4)."""
+
+    assert "COREDIME" in FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE
+
+    f = _facture("f1.pdf", numero_facture="6107293")
+    f.fournisseur = "COREDIME"
+    lf = _ligne_facture(quantite_facturee=500.0, prix_unitaire_ht=0.35, montant_ht=175.0)
+    ls = _ligne_suivi_facture(5, tarif_bl=None)
+    c = CorrespondanceFacture(lf, ls, StatutFacture.SUR)
+
+    ecritures, _, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
+
+    par_colonne = {e.colonne: e.valeur for e in ecritures if e.ligne == 5}
+    assert par_colonne["Tarif BL"] == 0.35
+
+    [t] = tarif_bl_ecrit
+    assert t["fichier"] == "f1.pdf"
+    assert t["reference"] == lf.reference_fournisseur
+    assert t["ligne_excel"] == 5
+    assert t["tarif_bl"] == 0.35
+
+
+def test_ecritures_pour_facture_necrase_jamais_un_tarif_bl_deja_present():
+    """Même fournisseur en liste blanche, mais Tarif BL a DÉJÀ une valeur
+    (renseignée par ailleurs, ex. un BL exceptionnel avec prix) : jamais
+    écrasée — l'exception ne joue que si Tarif BL est vide."""
+
+    f = _facture("f1.pdf")
+    f.fournisseur = "COREDIME"
+    lf = _ligne_facture(prix_unitaire_ht=0.35, montant_ht=175.0)
+    ls = _ligne_suivi_facture(5, tarif_bl=0.40)
+    c = CorrespondanceFacture(lf, ls, StatutFacture.SUR)
+
+    ecritures, _, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
+
+    assert not any(e.colonne == "Tarif BL" for e in ecritures)
+    assert tarif_bl_ecrit == []
+
+
+def test_ecritures_pour_facture_najoute_pas_tarif_bl_hors_liste_blanche():
+    """109 DISTRIBUTION (hors liste blanche) : jamais de Tarif BL écrit
+    depuis la facture, même si Tarif BL est vide — son BL affiche déjà un
+    vrai prix (voir moteur.fournisseurs.dist109), pas besoin de l'exception."""
+
+    f = _facture("f1.pdf")  # fournisseur par défaut = "109 DISTRIBUTION"
+    lf = _ligne_facture(prix_unitaire_ht=0.35, montant_ht=175.0)
+    ls = _ligne_suivi_facture(5, tarif_bl=None)
+    c = CorrespondanceFacture(lf, ls, StatutFacture.SUR)
+
+    ecritures, _, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
+
+    assert not any(e.colonne == "Tarif BL" for e in ecritures)
+    assert tarif_bl_ecrit == []
 
 
 # --- résolution de commande par bloc de BL ----------------------------------
@@ -382,7 +447,8 @@ def test_appliquer_et_archiver_factures_ecrit_et_archive(tmp_path):
     assert cible.parent.name == "129.034"
     assert not (dossier_a_traiter / "f1.pdf").exists()
 
-    assert resume["resorption"] is not None
+    assert resume["resorption"]["109 DISTRIBUTION"] is not None
+    assert resume["tarif_bl_ecrit_depuis_facture"] == []  # 109 DISTRIBUTION hors liste blanche (voir bandeau)
     assert resume["chemin_rapport"].exists()
 
 
@@ -524,7 +590,7 @@ def test_ecritures_pour_facture_sur_le_vrai_suivi_vivant(tmp_path):
     ls = _ligne_suivi_facture(2, reference="TESTREF", qte_livree=7.0, tarif_bl=12.5)
     c = CorrespondanceFacture(lf, ls, StatutFacture.SUR)
 
-    ecritures, montants_recalcules = ecritures_pour_facture([(f, c)])
+    ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
     assert montants_recalcules == []
 
     appliquer(copie, ecritures, tmp_path / "backups")

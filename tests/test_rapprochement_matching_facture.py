@@ -50,18 +50,38 @@ def test_apparier_sur_quand_tout_correspond():
     assert c.raisons == []
 
 
-def test_apparier_a_confirmer_ecart_de_prix_aucune_tolerance():
-    """Décision explicite de l'acheteur (voir CLAUDE.md, Volet 3) : AUCUNE
-    tolérance sur l'écart de prix, même un centime doit ressortir "à
-    confirmer"."""
+def test_apparier_sur_quel_que_soit_lecart_de_prix():
+    """Décision explicite de l'acheteur (session F4, suite) : "il faut
+    écrire tout ce qui apparaît sur les factures rapprochables à des
+    commandes, quel que soit le prix" — revient entièrement sur le "aucune
+    tolérance" du cadrage initial (une tolérance de 0,01€ avait été
+    envisagée quelques secondes plus tôt dans la même session, puis
+    dépassée par cette décision plus large). Un écart important (5,0€ vs
+    12,0€, pas juste du bruit d'arrondi) n'empêche plus l'écriture — le PU
+    facturé est simplement écrit tel quel, l'écart reste visible dans le
+    Suivi via les colonnes Tarif BL/Tarif convenu à côté."""
 
-    lf = _ligne_facture(prix_unitaire_ht=5.01)
+    lf = _ligne_facture(prix_unitaire_ht=12.0)
     ls = _ligne_suivi(tarif_bl=5.0)
 
     [c] = apparier_facture([lf], [ls], numero_facture="F1")
 
-    assert c.statut is StatutFacture.A_CONFIRMER
-    assert any("PU facturé" in r for r in c.raisons)
+    assert c.statut is StatutFacture.SUR
+    assert c.raisons == []
+
+
+def test_apparier_sur_sans_aucun_tarif_de_reference():
+    """Même principe sans aucun tarif de référence du tout (ni Tarif BL, ni
+    Tarif convenu) — rien à comparer, mais ce n'est plus un motif de
+    blocage non plus."""
+
+    lf = _ligne_facture()
+    ls = _ligne_suivi(tarif_bl=None, tarif_convenu=None)
+
+    [c] = apparier_facture([lf], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.SUR
+    assert c.raisons == []
 
 
 def test_apparier_a_confirmer_qte_facturee_differente_qte_livree():
@@ -74,14 +94,35 @@ def test_apparier_a_confirmer_qte_facturee_differente_qte_livree():
     assert any("Qté facturée" in r for r in c.raisons)
 
 
-def test_apparier_a_confirmer_rien_de_livre_facture_avant_bl():
-    lf = _ligne_facture()
+def test_apparier_sur_facture_arrivee_avant_bl_quel_que_soit_le_prix():
+    """Décision explicite de l'acheteur (session F4, Coredime) : "ce ne sont
+    pas des factures non parvenues puisqu'on les a reçues ! [...] il y a les
+    BL manquants là-dedans, ils sont signés" — une facture reçue avant que
+    son BL soit rapproché dans le Suivi (Qté livrée encore à 0) N'EST PLUS un
+    motif de blocage : le contrôle de quantité est simplement ignoré (rien à
+    comparer). Combiné à "quel que soit le prix" (voir plus haut) : même un
+    écart de prix important n'empêche pas l'écriture non plus."""
+
+    lf = _ligne_facture(prix_unitaire_ht=12.0)
     ls = _ligne_suivi(qte_livree=0.0)
 
     [c] = apparier_facture([lf], [ls], numero_facture="F1")
 
-    assert c.statut is StatutFacture.A_CONFIRMER
-    assert any("Aucune quantité livrée" in r for r in c.raisons)
+    assert c.statut is StatutFacture.SUR
+    assert c.raisons == []
+
+
+def test_apparier_sur_facture_arrivee_avant_bl_sans_tarif_de_reference():
+    """Même situation (Qté livrée à 0) et SANS aucun tarif de référence (ni
+    Tarif BL, ni Tarif convenu) — les deux relaxations se combinent, SUR."""
+
+    lf = _ligne_facture()
+    ls = _ligne_suivi(qte_livree=0.0, tarif_bl=None, tarif_convenu=None)
+
+    [c] = apparier_facture([lf], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.SUR
+    assert c.raisons == []
 
 
 def test_apparier_deja_a_jour_meme_numero_facture_deja_enregistre():
@@ -150,20 +191,16 @@ def test_apparier_exact_nest_jamais_vole_par_un_repli():
     assert c_exact.statut is StatutFacture.SUR
 
 
-def test_apparier_tarif_convenu_en_repli_si_pas_de_tarif_bl():
+def test_apparier_sur_meme_si_tarif_bl_et_tarif_convenu_absents():
+    """Le prix (et son absence de référence) n'intervient plus du tout dans
+    _comparer_facture (voir test_apparier_sur_sans_aucun_tarif_de_reference
+    plus haut) — Tarif BL/Tarif convenu restent lus sur LigneSuiviFacture
+    pour d'autres usages (ex. l'exception Tarif BL depuis facture, voir
+    pipeline_facture.py), mais plus comme condition de blocage ici."""
+
     lf = _ligne_facture(prix_unitaire_ht=7.0)
-    ls = _ligne_suivi(tarif_bl=None, tarif_convenu=7.0)
-
-    [c] = apparier_facture([lf], [ls], numero_facture="F1")
-
-    assert c.statut is StatutFacture.SUR
-
-
-def test_apparier_a_confirmer_sans_aucun_tarif_de_reference():
-    lf = _ligne_facture()
     ls = _ligne_suivi(tarif_bl=None, tarif_convenu=None)
 
     [c] = apparier_facture([lf], [ls], numero_facture="F1")
 
-    assert c.statut is StatutFacture.A_CONFIRMER
-    assert any("Aucun tarif de référence" in r for r in c.raisons)
+    assert c.statut is StatutFacture.SUR
