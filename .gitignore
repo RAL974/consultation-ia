@@ -32,6 +32,8 @@ moteur/articles.db
 
 # Rapprochements proposés / graine d'apprentissage (générés à chaque exécution)
 referentiel/A_confirmer.xlsx
+referentiel/A_confirmer_BL.xlsx
+referentiel/A_confirmer_Facture.xlsx
 referentiel/exports/
 
 # Rapprochement AI (branche dédiée, voir CLAUDE.md) : BL/factures déposés

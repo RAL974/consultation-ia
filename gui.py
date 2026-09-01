@@ -60,6 +60,7 @@ try:
         dossier_devis_de, dossier_resultats_de, fichier_besoin_de,
     )
     from gui_rapprochement import FenetreRapprochementBL
+    from gui_rapprochement_facture import FenetreRapprochementFacture
 except Exception:
     _consigner_erreur_fatale(traceback.format_exc())
     sys.exit(1)
@@ -166,6 +167,19 @@ class ConsultationGUI:
             height=2, command=self._ouvrir_rapprochement_bl,
         )
         self.bouton_rapprochement.pack(fill="x", **marge)
+
+        tk.Label(
+            self.root,
+            text="4. Rapprochement factures (109 Distribution pour l'instant) — dépose les factures dans a_traiter/Factures/ :",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", padx=10, pady=(6, 0))
+
+        self.bouton_rapprochement_facture = tk.Button(
+            self.root, text="Rapprocher les factures",
+            font=("Segoe UI", 11, "bold"), bg="#8250df", fg="white",
+            height=2, command=self._ouvrir_rapprochement_facture,
+        )
+        self.bouton_rapprochement_facture.pack(fill="x", **marge)
 
         tk.Label(self.root, text="Journal :").pack(anchor="w", padx=10)
 
@@ -496,6 +510,15 @@ class ConsultationGUI:
     def _ouvrir_rapprochement_bl(self):
         try:
             FenetreRapprochementBL(self.root, DOSSIER_PROJET)
+        except Exception as e:
+            messagebox.showerror("Impossible d'ouvrir la fenêtre de rapprochement", str(e))
+
+    # ------------------------------------------------------------------
+    # Rapprochement factures (étape 4, Rapprochement AI)
+    # ------------------------------------------------------------------
+    def _ouvrir_rapprochement_facture(self):
+        try:
+            FenetreRapprochementFacture(self.root, DOSSIER_PROJET)
         except Exception as e:
             messagebox.showerror("Impossible d'ouvrir la fenêtre de rapprochement", str(e))
 

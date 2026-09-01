@@ -2842,6 +2842,718 @@ commandée, donc pas de garde-fou sur-livraison déclenché).
   quantité commandée soit par reconstitution du Total HT — 7 BL archivés
   avec leur BC.
 
+## Rapprochement factures — cadrage F1 (préparation, aucun parser écrit)
+
+Suite de [Rapprochement AI](#rapprochement-ai-moteurrapprochement--branche-en-cours) :
+le rapprochement des BL a résorbé une bonne partie des lignes
+"🚚 Reçue (Attente Facture)" ; reste l'étape hebdomadaire des FACTURES
+fournisseurs, question restée ouverte depuis R1 ("comment le rapprochement
+factures se traduit-il sur la feuille, faute de colonne dédiée ?"). Décidée
+cette session par l'acheteur : DE NOUVELLES COLONNES SAISIES dédiées. Cette
+session prépare le terrain en 3 volets, sans écrire de parser — le Volet 1
+est une PROPOSITION à valider, le Volet 2 est un cadrage sur données
+réelles (79 vraies factures 109 Distribution déjà déposées), le Volet 3 est
+un jeu de décisions d'architecture proposées.
+
+### Volet 1 — Colonnes facture (colonnes et emplacement validés par l'acheteur)
+
+**Colonnes à ajouter dans le tableau structuré "Commandes"** (jamais par
+l'outil — ajouter des colonnes à un classeur de 16 tableaux structurés
+n'est pas dans le périmètre du patch XML chirurgical, voir
+`moteur/rapprochement/ecriture.py` — c'est l'acheteur qui les crée dans
+Excel, "Insérer > Colonne de tableau" DEPUIS l'intérieur du tableau pour
+que les 16 tableaux structurés et leurs formules s'étendent automatiquement
+aux nouvelles colonnes) :
+
+| Colonne | Type | Saisie ou calculée |
+|---|---|---|
+| N° facture | texte | **saisie** (Rapprochement AI écrira dedans) |
+| Date facture | date | **saisie** |
+| Qté facturée | nombre | **saisie** |
+| PU facturé | nombre | **saisie** |
+| Montant facturé HT | nombre | calculée = `Qté facturée × PU facturé` |
+| Écart facture | nombre | calculée = `Montant facturé HT − Facturé BL` |
+
+**Pourquoi Qté facturée ET PU facturé séparés** (plutôt qu'un seul Montant
+facturé HT saisi directement) : une facture Coredime/DEM peut être
+PARTIELLE par rapport au BL (la même situation que "Reste à livrer" côté
+BL, déjà documentée) — avoir la quantité à part permet de voir d'un coup
+d'œil si la facture couvre bien toute la quantité livrée. Et avoir le PU à
+part rend un écart de PRIX visible sans avoir à diviser à la main — le cas
+réel déjà rencontré côté BL (109/GOUJON, Cominter/Planet Wattohm...) où le
+prix facturé diffère légèrement du prix du BL doit sauter aux yeux, pas
+être caché dans un montant global.
+
+**Emplacement proposé** : juste après "Tarif BL" (colonne 17 actuelle),
+pour rester groupées avec les 4 colonnes de saisie déjà existantes
+(Date de livraison / Qté livrée / Tarif BL / Note) — "Montant facturé HT"
+et "Écart facture" peuvent suivre juste derrière, ou "Écart facture"
+peut aller à côté de "Facturé BL" (colonne 48 actuelle) puisqu'elle
+compare directement les deux. Comme les formules du classeur utilisent
+des références structurées (`Commandes[[#This Row],[Nom colonne]]`, pas
+des lettres de colonne), la position exacte n'a AUCUN impact technique —
+c'est un pur choix d'ergonomie de saisie pour l'acheteur, elle tranche.
+
+**Formule de "Facturé BL" actuelle (rappel, déjà en place)**, sur laquelle
+"Écart facture" s'appuie :
+```
+=IFERROR(IF(Commandes[[#This Row],[Tarif BL]]<>0,
+             Commandes[[#This Row],[Tarif BL]]*Commandes[[#This Row],[Qté livrée]],
+             Commandes[[#This Row],[Tarif convenu]]*Commandes[[#This Row],[Qté livrée]]),"")
+```
+confirme le bandeau de `ecriture.py` : c'est un MONTANT calculé
+(Tarif BL × Qté livrée, ou Tarif convenu × Qté livrée si pas de BL), pas un
+indicateur de facture reçue.
+
+**Formules calculées proposées :**
+```
+Montant facturé HT :
+=IFERROR(Commandes[[#This Row],[Qté facturée]]*Commandes[[#This Row],[PU facturé]],"")
+
+Écart facture :
+=IFERROR(Commandes[[#This Row],[Montant facturé HT]]-Commandes[[#This Row],[Facturé BL]],"")
+```
+
+**Adaptation de "Statut commande"** — formule ACTUELLE (relue sur une
+COPIE du classeur vivant, `openpyxl` en lecture seule, jamais le fichier
+ouvert par l'acheteur) :
+```
+=IF(Commandes[[#This Row],[Note]]="Commande annulée","⚪ Annulée",
+IF(Commandes[[#This Row],[Note]]="Rupture fournisseur","⛔ Rupture fournisseur",
+IF(N(Commandes[[#This Row],[Qté livrée]])=0,"🔵 En attente livraison",
+IF(OR(AND(IF(N(Commandes[[#This Row],[Tarif convenu]])>0,N(Commandes[[#This Row],[Tarif convenu]]),N(Commandes[[#This Row],[Tarif Affaire]]))>0,
+          N(Commandes[[#This Row],[Tarif BL]])>IF(N(Commandes[[#This Row],[Tarif convenu]])>0,N(Commandes[[#This Row],[Tarif convenu]]),N(Commandes[[#This Row],[Tarif Affaire]]))+0.01),
+       AND(IF(N(Commandes[[#This Row],[Tarif convenu]])>0,N(Commandes[[#This Row],[Tarif convenu]]),N(Commandes[[#This Row],[Tarif Affaire]]))=0,
+           N(Commandes[[#This Row],[Tarif raisonnable]])>0,
+           N(Commandes[[#This Row],[Tarif BL]])>N(Commandes[[#This Row],[Tarif raisonnable]])*1.15)),
+   "⚠️ Surfacturation",
+IF(OR(N(Commandes[[#This Row],[Qté livrée]])>=N(Commandes[[#This Row],[Qté commandée]]),Commandes[[#This Row],[Note]]="Reliquat soldé"),
+   IF(OR(IF(N(Commandes[[#This Row],[Tarif convenu]])>0,N(Commandes[[#This Row],[Tarif convenu]]),N(Commandes[[#This Row],[Tarif Affaire]]))>0,
+         AND(N(Commandes[[#This Row],[Tarif BL]])>0,N(Commandes[[#This Row],[Tarif raisonnable]])>0,
+             N(Commandes[[#This Row],[Tarif BL]])>=N(Commandes[[#This Row],[Tarif raisonnable]])*0.85,
+             N(Commandes[[#This Row],[Tarif BL]])<=N(Commandes[[#This Row],[Tarif raisonnable]])*1.15)),
+      "✅ Soldée — Tout OK",
+      IF(N(Commandes[[#This Row],[Tarif BL]])>0,"⬜ Soldée (Sans référence / à vérifier)","🚚 Reçue (Attente Facture)")),
+   "🟠 Partielle (Reliquat)")))))
+```
+Elle ne regarde AUCUNE donnée de facturation aujourd'hui (juste Qté livrée
+vs Qté commandée, et Tarif BL vs Tarif convenu/Affaire/raisonnable) — c'est
+exactement le trou que l'acheteur veut combler.
+
+**Écart avec l'énoncé initial de la consigne ("le seul cas ✅ Soldée
+existant aujourd'hui, 2 lignes") — TOUJOURS PAS élucidé, en attente de
+réponse de l'acheteur** : 1ère réponse "je ne vois pas quelles sont ces
+deux lignes, oublions ce point pour l'instant", puis "en fait il faudra y
+revenir, pose moi des questions complémentaires" (questions posées :
+source du souvenir — Suivi actuel / fichier de refonte v4 / autre ;
+formule ou texte tapé à la main ; texte exact ; repère chantier/commande),
+puis un message coupé ("il y a eu une erreur de conception :") suivi de
+"non stop". **Devenu sans objet pour "✅ Soldée (Facturée)"** : ce statut
+n'est finalement plus construit du tout (voir juste en dessous, décision
+explicite de ne pas toucher "Statut commande") — mais la question reste
+ouverte en soi si l'acheteur souhaite y revenir un jour.
+
+**DÉCISION EXPLICITE DE L'ACHETEUR (correctif après la 1ère proposition) :
+NE PAS toucher à "Statut commande"** — "cette formule vient d'être
+refondue autour du contrôle de prix et le Dashboard s'appuie sur ses
+libellés exacts (...), y empiler la dimension facture la rendrait
+illisible et casserait ces agrégats." **Vérifié sur le classeur vivant
+(nouvelle copie, comparaison caractère par caractère) : la formule
+"Statut commande" et les comptages exacts par statut (4 507 / 1 571 / 115
+/ 113 / 55 / 27 / 23 / 8, identiques à la 1ère lecture de cette session,
+voir plus haut) n'ont PAS changé entre la 1ère lecture et cette
+vérification** — donc pas de "refonte survenue après la dernière mise à
+jour de CLAUDE.md" à ce stade précis ; en revanche, la vérification a
+confirmé un point réellement utile et jusque-là non regardé : **le
+classeur contient bien 3 feuilles supplémentaires, `Dashboard`, `Analyses`
+et `Calculs`** (`wb.sheetnames` sur une copie fraîche), qui référencent la
+table structurée `Commandes` — absentes du périmètre de ma 1ère lecture
+(bornée à la feuille `Commandes` par `FEUILLE_COMMANDES` dans
+`ecriture.py`). **Conséquence actionnable, à ne pas oublier avant toute
+écriture réelle sur les futures colonnes facture** : rejouer
+`tests/test_rapprochement_ecriture.py::test_ecriture_chirurgicale_sur_le_vrai_suivi_commandes`
+en vérifiant explicitement que le contenu de CES 3 feuilles (pas
+seulement `Commandes`) reste identique octet pour octet après un patch —
+le calcChain/les dépendances inter-feuilles sont plus riches qu'avec la
+seule feuille `Commandes` déjà testée jusqu'ici.
+
+**`trouver_fichier_suivi_vivant()` (`moteur/rapprochement/pipeline_bl.py`)
+revérifié** : un seul fichier correspond au motif `*Suivi commandes*.xlsx`
+dans le dossier "Commandes courantes" aujourd'hui (`1.3.0.1. Suivi
+commandes - 2026.xlsx`) — aucun "Suivi nouveau..." ni "copie ...xlsx" trouvé
+à côté à ce jour, donc rien à corriger dans l'exclusion actuelle ; à
+revérifier si/quand un fichier de refonte réapparaît réellement dans ce
+dossier.
+
+**"Statut facture" — nouvelle colonne CALCULÉE, séparée, proposée à la
+place de la modification de "Statut commande"** : même style de formule
+(IF en cascade sur références structurées), mais totalement indépendante
+— aucun risque pour "Statut commande" ni pour le Dashboard qui en dépend.
+Reprend la tolérance déjà tranchée par l'acheteur (Volet 3 : aucune
+tolérance, Écart facture doit valoir exactement 0) :
+```
+=IF(N(Commandes[[#This Row],[Qté livrée]])=0,"",
+IF(Commandes[[#This Row],[N° facture]]="","🧾 En attente facture",
+IF(N(Commandes[[#This Row],[Écart facture]])=0,"✅ Facturée","⚠️ Écart facture")))
+```
+(vide tant que rien n'est livré ; "🧾 En attente facture" si livré mais
+sans N° facture ; "✅ Facturée" si écart nul ; "⚠️ Écart facture" sinon —
+libellés/émoji à valider par l'acheteur, choisis pour rester visuellement
+distincts des libellés déjà utilisés par "Statut commande", notamment
+"🚚 Reçue (Attente Facture)" qui ne doit pas être confondu avec "🧾 En
+attente facture"). Formule courte, ne nécessite PAS `LET()` — la question
+de la disponibilité de `LET()` sur "Excel 2026 en local" (poste de
+l'acheteur, version non confirmée) devient donc sans objet pour cette
+colonne. À coller dans le tableau structuré une fois la colonne créée,
+testée d'abord sur une ligne avant application à toute la colonne (même
+prudence que prévu, moins critique désormais puisque "Statut commande"
+n'est plus touché).
+
+**Si l'acheteur souhaite EN PLUS voir la facturation dans le Dashboard** :
+évolution séparée de la feuille `Dashboard` (nouveaux indicateurs à partir
+de "Statut facture"/"Écart facture"), jamais une modification de "Statut
+commande" — hors périmètre de cette session, à cadrer plus tard si
+demandé.
+
+**Anomalie repérée en passant, sans rapport avec ce cadrage** : la ligne 2
+du tableau (première ligne de données, commande réelle "i26.001" COMINTER,
+"Immobilisations") a des formules DIFFÉRENTES et visiblement incohérentes
+pour les colonnes Reliquat/RAL/Soldé/Reste à facturer (chacune semble
+référencer les mauvaises colonnes, comme si la formule de "Statut
+commande" avait été copiée-collée avec un décalage) — alors que TOUTES les
+autres lignes (vérifié lignes 3 et 4) ont des formules simples et
+cohérentes entre elles. Cette ligne 2 n'a pas encore de livraison (Qté
+livrée vide), donc l'impact visible est probablement nul aujourd'hui.
+Signalé à l'acheteur, qui répond "je regarderai" — hors périmètre de
+cette session, pas touché.
+
+**Une fois les colonnes créées par l'acheteur** (prochaine session) :
+vérifier cellule par cellule sur une COPIE fraîche du vivant qu'elles sont
+bien vides de formule (sauf Montant facturé HT / Écart facture),
+étendre `COLONNES_MODIFIABLES` dans `moteur/rapprochement/ecriture.py`
+à `("Date de livraison", "Qté livrée", "Tarif BL", "Note", "N° facture",
+"Date facture", "Qté facturée", "PU facturé")`, et étendre
+`tests/test_rapprochement_ecriture.py` (patch réel sur une copie,
+relecture, vérification qu'aucune autre partie du zip n'a changé — même
+schéma que le test déjà existant sur les 4 colonnes actuelles). **Noter la
+date à partir de laquelle ces colonnes existent** : toute ligne dont le
+statut est "🚚 Reçue (Attente Facture)" AVANT cette date n'a simplement
+jamais eu l'occasion d'être facturée dans l'outil — pas un signal
+d'anomalie rétroactif.
+
+### Volet 2 — Cadrage du flux factures, 109 Distribution
+
+**Pas besoin de redemander des pièces** : l'acheteur a déjà déposé
+**79 vraies factures 109 Distribution** dans `a_traiter/Factures/`
+(`Facture_360310.pdf` … `Facture_365699.pdf`, période du 15/07 au
+17/08/2026) — largement de quoi cadrer le format sans rien inventer.
+
+**Format** : PDF **texte natif** (jamais de scan, confirmé sur les 79 —
+aucun OCR nécessaire pour ce fournisseur, contrairement à ses BL). 3 pages
+la plupart du temps ; en pratique seule la page 0 porte du contenu, SAUF
+que **58 factures sur 79 (73 %)** ont EN PLUS, sur une page suivante, une
+copie de NOTRE PROPRE bon de commande (reconnaissable : "BON DE COMMANDE",
+"Electricité Services Réunion", "William AIMAR", "achats@espace-soleil.re"
+— c'est le PDF généré par notre propre flux, pas un document de 109) —
+piste à creuser plus tard (pas bloquant pour ce cadrage) : probablement un
+regroupement de pièces jointes du même e-mail plutôt qu'un ajout de 109
+Distribution elle-même.
+
+**Champs présents, tous en texte natif PyMuPDF** (l'ordre de lecture
+`get_text()` NE SUIT PAS l'ordre visuel — même défi que le gabarit DEVIS de
+ce même fournisseur, `moteur/fournisseurs/dist109.py`, un futur parser
+facture devra probablement s'appuyer sur `_gabarit.scan_ancre`/
+`scan_regex` plutôt que sur le flux brut) :
+- **N° facture** : "Facture client n° 360 310 du 15/07/2026" (numéro avec
+  espace interne à nettoyer, + date d'émission).
+- **Date d'échéance** : "Date d'échéance :29/08/2026" — toujours 45 jours
+  net après la date facture sur les 79 pièces ("Clt - 45 jours").
+- **N°Réf.Client** (notre référence transmise à 109) : présente sur les 79,
+  mais SEULEMENT **68/79 (86 %)** au format exact du Suivi ("123.096" ou
+  "M3.14.339"). Le reste (**11/79, 14 %**) n'est PAS directement
+  exploitable : 4 au format interne 109 ("BC 241659", 6 chiffres, aucun
+  rapport avec notre numérotation), 7 en texte libre/dégradé ("bc 241660"
+  minuscule, "cmd n° 240610", une adresse mail collée à un fragment de
+  commande, ou une concaténation illisible de PLUSIEURS commandes —
+  "ORANE; 132.008; 132.00" tronqué, cas réel détaillé plus bas).
+- **Bon de livraison n°XXXXXX du DATE traité par NOM** : cité au moins une
+  fois par facture, JUSTE avant le bloc de lignes qu'il couvre. **9/79
+  (11 %) factures citent PLUSIEURS BL**, chacun avec son propre bloc de
+  lignes ET son propre "Sous total" — confirmé sur 2 cas réels examinés en
+  détail :
+  - `Facture_360366.pdf` (129.034, 3 BL) : les 3 BL couvrent la MÊME
+    commande (livraisons successives du 07 et 08/07/2026) — un vrai relevé
+    mono-commande, multi-BL.
+  - `Facture_365533.pdf` (réf. client "ORANE; 132.008; 132.00…", 3 BL) :
+    un BL du 28/04/2026 et deux BL du 11/08/2026 — dates trop éloignées et
+    mentions de chantier différentes ("EUGENIA" apparaissant près de 2 des
+    3 sous-totaux, "ATTENTE DATE LIVRAISON") pour être la même commande :
+    **confirme qu'une facture peut couvrir plusieurs commandes
+    différentes**, pas seulement plusieurs BL d'une même commande.
+  **Conséquence pour un futur parser** : rapprocher facture → commande
+  PAR BLOC DE BL (en utilisant le n° de BL, déjà connu si ce BL a été
+  rapproché précédemment côté `moteur/rapprochement/`) est plus robuste
+  que de se fier au seul "N°Réf.Client" globale de la facture, qui peut ne
+  s'appliquer qu'à UNE partie des lignes sur une facture multi-commandes.
+- **Lignes d'article** : Référence / Description / Qté / P.U.Net / Eco-part
+  (souvent vide, mais RENSEIGNÉE et non-nulle sur au moins 1 facture
+  réelle, `Facture_365533.pdf`, 4,41€) / Rem% / Code TVA / Total — dans cet
+  ordre visuel de colonnes, mais le flux `get_text()` les restitue dans le
+  désordre (Total, Description, Code TVA, P.U.Net, Qté, Référence).
+  Immense majorité des lignes en code TVA "C1" (exonération TVA — chantiers
+  défiscalisés), mais du "C0" et du vrai "C4" (8,5 %) vus aussi sur les 79
+  pièces — donc TVA à gérer réellement, pas juste 0 partout.
+- **Totaux** : "Sous total" par bloc de BL, tableau de ventilation TVA
+  (Code / Taux / Base HT / Montant TVA), puis Total HT / TVA / Net à payer
+  + Total Eco-part HT / Total TVA Eco-part en pied de page.
+- **Aucun "avoir" parmi les 79 pièces déposées** (recherché "AVOIR" dans le
+  texte entier, aucune occurrence) — l'acheteur signale que sur ce
+  fournisseur, une facture d'avoir se reconnaît normalement par la mention
+  **"FACTURE D'AVOIR"** dans l'en-tête (à la place de "Facture client
+  n°...") — noté pour un futur parser, pas encore vu sur pièce réelle.
+
+**Tableau de flux (109 Distribution uniquement — les autres fournisseurs
+sont seulement inventoriés ci-dessous, pas cadrés)** :
+
+| Aspect | 109 Distribution |
+|---|---|
+| Format PDF | Texte natif, jamais de scan (79/79) |
+| Nb pages | 3 en général ; souvent (73 %) + copie de notre propre BdC |
+| N° commande exploitable directement | 86 % (68/79) ; sinon repli nécessaire par n° de BL |
+| Mono ou multi-BL par facture | 89 % mono-BL ; 11 % multi-BL (jusqu'à 4 vus), parfois multi-COMMANDES |
+| Prix par ligne | Toujours présent (contrairement au BL de ce même fournisseur qui, lui, affiche aussi les prix — cohérent) |
+| TVA | Majoritairement C1 (exonéré), mais C0/C4 réels rencontrés |
+| Avoir | Aucun exemple réel à ce jour ; repérable par "FACTURE D'AVOIR" en en-tête (indication de l'acheteur) |
+
+**Autres fournisseurs — inventaire, pas de cadrage** : `a_traiter/Factures/`
+ne contient AUCUN autre fournisseur à ce jour (79/79 = 109 Distribution).
+Les fournisseurs déjà couverts côté BL (Coredime, Cominter Ouest, Electric
+Plus/GMR, Ravate, Stand 64, DEM, YESSS, Protecthoms) restent donc à
+cadrer plus tard, dès que l'acheteur y déposera de vraies factures — même
+règle d'or que partout ailleurs dans ce projet (jamais de gabarit sans
+pièce réelle).
+
+### Volet 3 — Décisions d'architecture
+
+**Dossiers** (validé par l'acheteur) :
+- `a_traiter/Factures/` existe déjà (79 PDF à plat aujourd'hui).
+- `a_traiter/Factures/À vérifier/` à créer — même rôle que son pendant côté
+  BL (`a_traiter/BL/À vérifier/`) : toute facture lue mais avec au moins
+  une ligne "inconnue"/"à confirmer" non tranchée y est déplacée telle
+  quelle, jamais mélangée avec les factures pas encore traitées.
+- **Archivage définitif dans `a_traiter/BL/Traités/<n° commande>/`**
+  (dossiers DÉJÀ créés par le flux BL, avec copie du BdC dedans — vérifié
+  sur `108.271/` : `2026-07-15 - COMINTER - OBL107471 - BC 108.271.pdf` +
+  `BC - Lacouture - BC 108.271 - COMINTER.pdf`) — PAS un nouveau dossier
+  "Factures" séparé, pour garder le flux commande→BL→facture consultable
+  au même endroit, comme demandé par l'acheteur pour l'archivage BL.
+- **Facture multi-commandes** (cas réel confirmé, `Facture_365533.pdf`) :
+  contrairement à un BL Cominter multi-BL (qu'on peut DÉCOUPER par page
+  avec `fitz`), une facture 109 est un PDF à une seule page utile — donc
+  pas de découpage possible. Proposition : **copier le PDF entier dans
+  CHAQUE dossier de commande concerné**, avec un nom qui reflète la
+  commande de CE dossier (donc le même fichier physique porte un nom
+  différent selon l'endroit où il atterrit).
+- **Nommage proposé** (calé sur celui des BL) :
+  `<date facture> - 109 DISTRIBUTION - Facture <n° facture> - BC <n° commande>.pdf`
+  (ex. `2026-07-15 - 109 DISTRIBUTION - Facture 360310 - BC 241659.pdf`
+  pour un cas où le n° réel n'est pas exploitable).
+
+**Tolérance d'écart facture vs BL/tarif convenu — décision de l'acheteur :
+AUCUNE tolérance.** Proposition initiale (2 % + plancher 0,50 €) refusée :
+"il y a énormément d'articles à très faible valeur, pas de tolérance,
+prix BL = prix facture". Le PU facturé doit être EXACTEMENT égal au tarif
+déjà utilisé pour "Facturé BL" (Tarif BL, ou Tarif convenu en repli) —
+Écart facture doit valoir 0, sans quoi la ligne reste "à confirmer"/statut
+d'alerte, jamais "✅ Soldée (Facturée)" automatiquement. Cohérent avec le
+volume réel d'articles à faible valeur unitaire observé dans le Suivi (où
+un pourcentage ou un plancher masquerait facilement une vraie erreur de
+prix sur une petite ligne).
+
+**Facture arrivant AVANT que son BL ait été rapproché** (Qté livrée
+vide) : proposition — **"à confirmer" par défaut**, sauf pour les
+fournisseurs déjà listés comme "facture = BL" dans CLAUDE.md. Aujourd'hui,
+un SEUL fournisseur est dans ce cas : **Electric Plus/GMR** ("GMR n'envoie
+PAS de bon de livraison séparé... le rapprochement se fait directement à
+partir de ses FACTURES", déjà documenté plus haut). 109 Distribution N'EN
+FAIT PAS PARTIE — il envoie des BL séparés (confirmé cette session), donc
+une facture 109 arrivée avant son BL doit toujours attendre confirmation,
+jamais valoir livraison automatique.
+
+**Avoirs** : jamais automatiques, toujours "à confirmer", rattachés à la
+facture ou au BC d'origine cités dessus — cohérent avec le fait qu'aucun
+avoir réel n'a encore été vu (règle d'or : rien à coder tant qu'aucune
+pièce réelle n'est disponible). Repère à surveiller signalé par l'acheteur :
+mention **"FACTURE D'AVOIR"** en en-tête.
+
+## Rapprochement factures — session F2 (implémentation, 109 Distribution)
+
+Suite directe de F1 ci-dessus. Livre le rapprochement des factures 109
+Distribution de bout en bout, en réutilisant au maximum le flux BL déjà
+éprouvé (mêmes principes : lecture seule d'abord, écriture confirmée
+ensuite, référentiel articles partagé, garde-fous de conflit/idempotence).
+
+**DÉCOUVERTE BLOQUANTE, à traiter EN PREMIER avant toute écriture réelle** :
+la consigne de cette session affirmait que les colonnes facture "existent
+dans le Suivi et sont dans COLONNES_MODIFIABLES" — **FAUX, vérifié
+directement sur le vrai classeur vivant en tout début de session** :
+`moteur/rapprochement/ecriture.py::COLONNES_MODIFIABLES` ne contenait
+encore QUE les 4 colonnes BL, et les en-têtes réels du Suivi (`1.3.0.1.
+Suivi commandes - 2026.xlsx`, feuille "Commandes", lues colonne par
+colonne) ne comportent AUCUNE des 6 colonnes proposées en Volet 1 (N°
+facture / Date facture / Qté facturée / PU facturé / Montant facturé HT /
+Écart facture) — Volet 1 restait une PROPOSITION validée dans son
+principe, jamais appliquée dans Excel. **Conséquence concrète pour cette
+session** : le pipeline de LECTURE/RAPPROCHEMENT a été construit et validé
+de bout en bout sur les 79 vraies factures + le vrai Suivi (voir plus bas),
+mais AUCUNE écriture réelle n'a pu être démontrée sur le classeur vivant —
+le mécanisme d'écriture est prouvé sur un classeur SYNTHÉTIQUE qui, lui, a
+les colonnes (voir "Tests"). `COLONNES_MODIFIABLES` a quand même été étendu
+dès maintenant (les 4 colonnes de saisie facture) : `ecriture.appliquer()`
+refuse déjà proprement, avec un message clair
+("colonne introuvable dans les en-têtes"), tant que l'acheteur n'a pas créé
+ces colonnes dans Excel — rien à changer côté code une fois qu'elle
+l'aura fait. **Prochaine étape avant toute recette réelle d'écriture** :
+demander à l'acheteur de créer les 4 colonnes de saisie (+ les 2 colonnes
+formule, voir Volet 1) dans le tableau structuré "Commandes" de son
+classeur.
+
+### Architecture (réutilise BL, ne duplique pas)
+
+- `moteur/rapprochement/modele_facture.py` — `Facture`/`LigneFacture`,
+  même esprit que `modele_bl.py`. `LigneFacture.numero_commande` reste vide
+  au parsing (le parser n'a pas accès au Suivi) — renseigné par
+  `matching_facture`/`pipeline_facture`.
+- `moteur/fournisseurs/dist109.py::parse_facture_109` — section "GABARIT
+  FACTURE" ajoutée à la suite du devis/BL existants. **Facture en texte PDF
+  NATIF, jamais de scan chez ce fournisseur** (confirmé sur les 79 vraies
+  pièces, contrairement à ses BL) — pas d'OCR nécessaire, `moteur.lecture_pdf.
+  lire_pdf` suffit. Bloc ancré sur le code TVA (C0 à C9, même famille de
+  motif que le devis/BL du même fournisseur), mais dans un ORDRE DE CHAMPS
+  différent : Total(-2), Description(-1), TVA(0, ancre), P.U.Net(+1),
+  Qté(+2), Référence(+3) — l'Eco-part s'intercale entre Description et TVA
+  UNIQUEMENT quand elle est non nulle (décale tout d'un cran, détecté en
+  regardant si la cellule juste avant le TVA ressemble à un prix).
+  **Validé sur les 79 vraies factures du lot de cadrage F1 : 79/79 exactes
+  sur le Total HT affiché** (aucun écart, y compris la seule facture à
+  Eco-part non nul).
+- **BUG RÉEL ÉVITÉ avant tout code livré** (trouvé en prototypant, jamais
+  passé en production) : un premier essai scannait le texte ENTIER de la
+  facture pour les codes TVA, sans borner — le pied de page (tableau de
+  ventilation TVA, "Code/Taux/Base HT/Montant TVA") contient LUI AUSSI des
+  codes TVA isolés qui, sur la SEULE facture à 2 taux de TVA différents du
+  lot (`Facture_365533.pdf`), formaient un faux article ("référence 8,50,
+  qté 718,41") — resté invisible sur l'autocontrôle Total HT SEULEMENT
+  parce que son "Total" valait 0,00 par pure coïncidence sur cette pièce
+  précise (pas une garantie générale sur un futur PDF). Corrigé
+  DÉFINITIVEMENT par une zone bornée PAR BLOC DE BL (entre le marqueur
+  "Bon de livraison n°X du date" et le "Sous total" qui le suit) — élimine
+  le risque structurellement ET donne en prime l'association ligne -> n°
+  de BL sans heuristique de proximité. Fixtures réelles ajoutées
+  (`tests/fixtures/facture_dist109_1..4*.pdf`), testé
+  (`tests/test_parsers_facture_dist109.py`, 4 tests, dont un qui verrouille
+  explicitement l'absence de cette ligne fantôme).
+- `moteur/rapprochement/parsers_facture.py` / `lecture_facture.py` — même
+  principe que leurs équivalents BL (registre auto-découvert, tolérance
+  aux pannes). Pas de détection PAR PAGE (contrairement à `lecture_bl.py`) :
+  aucune facture réelle ne mélange plusieurs fournisseurs à ce jour — à
+  ajouter sur le même modèle si un cas réel se présente.
+- `moteur/rapprochement/matching_facture.py` — **réutilise TEL QUEL** les
+  primitives de correspondance de référence déjà éprouvées côté BL
+  (`matching._memes_references`/`_repli_reference_proche`/
+  `_repli_referentiel`, importées directement — fonctionnent par duck
+  typing, `LigneFacture` partage les champs `reference_fournisseur`/
+  `designation` de `LigneBL`) plutôt que d'en dupliquer une 2e version.
+  Seule la SÉMANTIQUE DE COMPARAISON change (`_comparer_facture`) : une
+  facture n'est jamais "cumulée" comme une livraison — elle est confrontée
+  à ce qui est DÉJÀ enregistré (Qté livrée, Tarif BL sinon Tarif convenu,
+  et le N° de facture déjà présent le cas échéant pour l'idempotence).
+  **Aucune tolérance sur l'écart de prix** (décision explicite de
+  l'acheteur, voir Volet 3 : "prix BL = prix facture"). `LigneSuiviFacture`
+  lit aussi les 4 colonnes facture SI PRÉSENTES (`colonnes_facture_
+  disponibles()`) — sinon elles restent `None` sur chaque ligne, ce qui
+  laisse le diagnostic en LECTURE SEULE utilisable même sans elles (voir
+  découverte bloquante ci-dessus).
+- `moteur/rapprochement/pipeline_facture.py` — orchestration
+  (`rapprocher_dossier_factures()` lecture seule, `appliquer_et_archiver_
+  factures()` écriture + archivage), réutilise directement de
+  `pipeline_bl.py` : `trouver_fichier_suivi_vivant`, `trouver_dossier_
+  commandes`/`trouver_bon_de_commande`, `_dossier_pour_commande`,
+  `_copier_bon_de_commande_si_absent`, `_sans_caracteres_interdits`,
+  `_parser_date_bl` (générique malgré son nom, réutilisable tel quel pour
+  parser `Facture.date_facture`), `deplacer_vers_a_verifier`. Référentiel
+  articles partagé (même `moteur/articles.db`), mais sa PROPRE file
+  d'attente `referentiel/A_confirmer_Facture.xlsx` (ajouté au `.gitignore`,
+  comme `A_confirmer_BL.xlsx` — un oubli du `.gitignore` corrigé au
+  passage, les deux n'y étaient pas alors qu'`A_confirmer.xlsx`, lui,
+  l'était déjà).
+
+### Résolution de commande par bloc de BL (`_resoudre_commandes_facture`)
+
+Une facture peut citer PLUSIEURS BL (jusqu'à 4 vus sur le lot de cadrage),
+chacun potentiellement rattaché à une commande différente (1 seul cas réel
+confirmé sur 79, `Facture_365533.pdf`). Algorithme, validé contre le vrai
+Suivi sur les 9 factures multi-BL du lot de cadrage :
+
+1. **N°Réf.Client fait autorité dès qu'il donne UN candidat au format
+   Suivi** (regex réutilisée de `dist109.MOTIF_COMMANDE_BL`) — appliqué à
+   TOUS les blocs de BL de la facture (89% des factures multi-BL réelles
+   ne couvrent qu'UNE SEULE commande, livrée en plusieurs fois — validé :
+   8 des 9 factures multi-BL du lot retombent proprement sur ce cas, 0
+   divergence trouvée en cross-validant par déduction de contenu).
+2. **En repli** (en-tête vide ou format interne 109 non exploitable, ex.
+   "BC 241659", "cmd n° 240610" — 11/79 factures du lot dans ce cas) : la
+   commande de CE bloc est déduite de son propre contenu, en réutilisant
+   TEL QUEL `matching.deduire_commande_par_contenu()` (même mécanisme que
+   pour un n° de commande illisible côté BL — au moins 2 lignes
+   concordantes, score sans ambiguïté). Jamais utilisée pour un
+   rapprochement "sûr" automatique — toute correspondance obtenue via une
+   commande déduite bascule "à confirmer", raison explicite donnée (même
+   principe que `pipeline_bl.py`).
+3. Si ni l'un ni l'autre : le bloc part dans `rapport.anomalies_facture`
+   ("n° de commande introuvable") — bac dédié, entrée naturelle d'une
+   future session F4 (aide à la création manuelle de la commande côté
+   achat) — jamais un choix au hasard.
+
+Sur le SEUL cas réel multi-commande du lot (`Facture_365533.pdf`, 2
+commandes réellement différentes derrière "ORANE; 132.008; 132.00"
+tronqué) : l'en-tête ne donne aucun candidat exploitable, et la déduction
+par contenu échoue aussi (chaque bloc de BL n'a que 1-2 lignes, sous le
+seuil de confiance de 2 lignes concordantes) — les 3 blocs partent
+honnêtement en "commande introuvable", pour décision humaine. Comportement
+jugé correct : mieux vaut ne rien écrire qu'un mauvais rapprochement sur le
+seul cas réellement ambigu du lot.
+
+### Archivage — copie, jamais découpage
+
+Contrairement à un BL Cominter Ouest/109 Distribution multi-BL (qu'on peut
+DÉCOUPER par page avec `fitz`, voir `pipeline_bl._extraire_bl_vers`), une
+facture 109 est un PDF à une seule page utile — pas de découpage possible.
+Une facture multi-commande entièrement résolue est donc **COPIÉE** (jamais
+déplacée) dans `a_traiter/BL/Traités/<n° de commande>/` **pour CHAQUE
+commande concernée** (`pipeline_facture.archiver_facture`), le fichier
+source n'étant supprimé qu'une fois toutes les copies faites avec succès —
+même arbre que les BL et leur BdC, pour le flux commande→BL→facture
+consultable au même endroit demandé par l'acheteur en session BL. Une
+facture avec au moins un bloc non résolu part ENTIÈRE (jamais partiellement
+copiée) vers `a_traiter/Factures/À vérifier/`.
+
+### Résultat de la recette en LECTURE SEULE sur les 79 vraies factures +
+le vrai Suivi commandes (aucune écriture, colonnes facture absentes)
+
+`147 sûres · 29 à confirmer · 0 déjà à jour (attendu, aucune facture
+n'a jamais pu être enregistrée faute des colonnes) · 9 inconnues · 13
+blocs non rapprochés (commande introuvable)`. Quelques observations
+réelles utiles pour la suite :
+
+- **Faux positif de précision trouvé, à garder en tête (pas corrigé — la
+  décision "aucune tolérance" est celle de l'acheteur)** : `Facture_365387.pdf`
+  ressort "à confirmer" pour un écart de 0,005€ (PU facturé 39,56€ vs
+  Tarif BL stocké 39,555€, 3 décimales — probablement une moyenne calculée
+  à l'écriture d'un BL, jamais arrondie à 2 décimales comme une facture
+  l'imprime toujours). Un cas parmi 176 lignes rapprochées, isolé — pas
+  assez pour remettre en cause "aucune tolérance" sans en reparler à
+  l'acheteur, mais le genre de cas qu'elle voudra probablement voir une
+  fois les colonnes créées.
+- Plusieurs "à confirmer" sont des **facturations partielles réelles**
+  (Qté facturée < Qté livrée déjà enregistrée, ex. `Facture_362846.pdf` —
+  cohérent avec le fait que Coredime/DEM facturent aussi parfois en
+  plusieurs fois, rien d'anormal en soi, juste à vérifier au cas par cas).
+- Le repli référence proche (réutilisé de `matching.py`) a immédiatement
+  servi sur données réelles (`Facture_363011.pdf` "BTAER4X25+2X1." vs Suivi
+  "BTAER4X25+2X1.5", `Facture_365398.pdf` "H07VK16BL" vs Suivi "H07VK16B") —
+  aucune règle nouvelle nécessaire, la réutilisation fonctionne comme prévu.
+- **Compteur de résorption** (`compter_lignes_a_facturer`, l'indicateur du
+  chantier F2) sur le vrai Suivi, 109 DISTRIBUTION : `1000 lignes livrées,
+  1000 encore "à facturer"` — 100% par construction aujourd'hui puisque
+  aucune ligne n'a jamais pu recevoir de N° facture (colonnes absentes) ;
+  redeviendra un vrai indicateur utile dès qu'une 1ère vraie écriture aura
+  eu lieu.
+
+### Tests
+
+`tests/test_parsers_facture_dist109.py` (4, sur vraies fixtures — simple/
+BC interne/multi-BL même commande/multi-BL multi-commande+eco-part),
+`tests/test_lecture_facture.py` (5, tolérance aux pannes), `tests/
+test_rapprochement_matching_facture.py` (12, logique de comparaison sur
+objets synthétiques), `tests/test_rapprochement_pipeline_facture.py` (15,
+résolution de commande/archivage multi-copie/résorption/écriture de bout
+en bout), plus 2 tests ajoutés à `tests/test_rapprochement_ecriture.py`
+(colonnes facture dans `COLONNES_MODIFIABLES`, écriture réelle sur un
+classeur synthétique). **Les tests d'écriture réelle tournent sur un
+classeur SYNTHÉTIQUE qui A les colonnes facture** (le vrai Suivi ne les a
+pas encore, voir découverte bloquante ci-dessus) — c'est la preuve que le
+mécanisme fonctionne, en attendant la vraie recette d'écriture sur le
+classeur vivant une fois les colonnes créées par l'acheteur.
+
+### Reste à faire (session F3)
+
+1. ~~Créer les colonnes de saisie dans Excel~~ **FAIT autrement** — voir
+   section suivante : plus besoin que l'acheteur crée quoi que ce soit à la
+   main dans Excel, ni ne colle de formule ; l'outil a créé les 5 colonnes
+   lui-même, directement dans le tableau structuré, par patch XML. Le
+   "patch XML chirurgical hors périmètre pour ajouter des colonnes à un
+   tableau structuré" évoqué ici s'est révélé faux — voir
+   `ajouter_entetes_saisie()` dans `moteur/rapprochement/ecriture.py`.
+2. Reparler du cas de précision ci-dessus avec l'acheteur (0,005€ d'écart
+   dû à un Tarif BL stocké à 3 décimales) avant de conclure que "aucune
+   tolérance" produit trop de faux positifs — un seul exemple à ce jour.
+3. Vraie recette d'écriture sur le classeur vivant, comme pour chaque
+   fournisseur BL avant lui (dépôt réel, clic "Écrire", vérification ligne
+   par ligne) — les colonnes existent maintenant pour de vrai dans le
+   vivant (voir section suivante), reste à y faire transiter de vraies
+   valeurs de facture.
+4. Étendre aux autres fournisseurs dès que de vraies factures seront
+   déposées pour eux (`a_traiter/Factures/` ne contient que du 109
+   Distribution à ce jour, voir Volet 2).
+5. AVOIR : toujours aucun exemple réel — `type_document == "AVOIR"` déjà
+   détecté et mis de côté sans y toucher (voir `MOTIF_AVOIR_FACTURE`),
+   rien de plus à coder tant qu'aucune pièce réelle n'existe.
+6. Décider comment "Montant facturé HT" est rempli (voir section suivante :
+   c'est une simple colonne de saisie pour l'instant, pas un calcul) — et
+   construire "Écart facture"/"Statut facture", hors périmètre de la
+   session qui a créé les colonnes.
+
+## Rapprochement factures — colonnes créées dans le Suivi vivant, refonte
+du classeur découverte, "Statut commande" jamais touché (fait)
+
+Suite directe de F2. Objectif de cette session, cadré strictement par
+l'acheteur ("un seul plan, tu ne changes pas d'approche en cours de
+route") : préparer le terrain pour F3 en créant les 5 colonnes de saisie
+facture dans le VRAI classeur vivant — **sans lui demander une seule
+manipulation dans Excel**, contrairement au plan F2/Volet 1 (jamais
+appliqué) qui prévoyait qu'elle les crée elle-même et y colle des
+formules.
+
+- **Le classeur vivant a été refondu depuis la dernière fois qu'il a été
+  inspecté en détail** (dernier état documenté : ~5 900 lignes, feuille
+  "Stats") : re-vérifié en tout début de session, `trouver_fichier_suivi_
+  vivant()` pointe bien sur `1.3.0.1. Suivi commandes - 2026.xlsx` dans
+  "1.3.0.1. Commandes courantes" (seul candidat, pas d'ambiguïté avec un
+  "Suivi nouveau..." ou une copie manuelle à ce jour) — feuilles
+  `Commandes, Dernières commandes, Tarifs Affaire - Chantiers, Listes
+  Paramètres, Base Articles, Tarifs Affaire - Maintenance, Dashboard,
+  Analyses, Calculs` (9 feuilles ; l'ancien export périmé à la racine du
+  dépôt, lui, a encore une feuille "Stats" et pas de Dashboard/Analyses/
+  Calculs — ne JAMAIS le confondre avec le vivant, voir
+  `trouver_fichier_suivi_vivant` vs `moteur.panier.trouver_fichier_suivi`).
+  50 colonnes (A..AX) au départ, table structurée "Commandes" couvrant
+  exactement `A1:AX6420` (16 Excel Tables toujours présentes). Le nombre
+  de lignes a grossi PENDANT la session (6420 -> 6430, l'acheteur a
+  continué de saisir des commandes normalement) — preuve que le classeur
+  reste en usage actif tout du long, pas figé pour l'occasion.
+- **DÉCOUVERTE, non traitée (hors périmètre strict de cette session,
+  notée pour la future session "formules"/"Statut facture")** : la
+  formule RÉELLEMENT appliquée cellule par cellule à "Statut commande"
+  (ex. U100) est orientée PRIX (compare Tarif BL à Tarif convenu/Tarif
+  Affaire + 0,01, ou à Tarif raisonnable ±15% -> "⚠️ Surfacturation" ;
+  une fois soldée, "✅ Soldée — Tout OK" si le tarif est cohérent, sinon
+  "⬜ Soldée (Sans référence / à vérifier)" si un Tarif BL existe, sinon
+  seulement "🚚 Reçue (Attente Facture)") — **différente du
+  `calculatedColumnFormula` stocké dans la définition du tableau**
+  (`xl/tables/table1.xml`, gabarit utilisé par Excel pour une nouvelle
+  ligne), qui porte encore une version plus ancienne ("⚠️ Problème Tarif",
+  "✅ Soldée (Facturée)" testé via `Facturé BL]=1` comme si c'était un
+  booléen — alors que "Facturé BL" est un MONTANT calculé, pas un
+  indicateur "facturé oui/non", incohérence probablement héritée d'avant
+  la refonte prix). Concrètement : "🚚 Reçue (Attente Facture)" ne
+  signale donc PAS "en attente de facturation" au sens large — seulement
+  "livré en totalité mais aucun Tarif BL renseigné du tout", un cas bien
+  plus étroit — confirme, s'il en fallait, pourquoi une vraie dimension
+  facture séparée (les colonnes ci-dessous, puis un "Statut facture" à
+  construire) est nécessaire. **Ni cette dérive de formule ni "Statut
+  commande" en général n'ont été touchés** — strictement hors périmètre,
+  jamais modifié par ce module (voir bandeau de `ecriture.py`).
+- **1er essai (colonnes HORS tableau) construit, testé, montré à
+  l'acheteur sur une copie, puis EXPLICITEMENT REJETÉ par elle avant toute
+  écriture réelle** : "les 5 colonnes ont été ajoutées mais ne font pas
+  partie du tableau, je comprends pas l'intérêt" — puis, après explication,
+  correction ferme et détaillée : **"CORRECTION DÉFINITIVE DU PLAN — les 5
+  colonnes vont DANS le tableau structuré Commandes, pas à côté. Raison :
+  un tri du tableau ne déplace pas les colonnes hors tableau, les données
+  facture se retrouveraient sur les mauvaises lignes."** Leçon générale :
+  même un plan validé étape par étape doit rester ouvert à une correction
+  de l'acheteur en cours de route si elle en voit la nécessité — la
+  rigueur du plan initial protège contre les dérives de LA SESSION, pas
+  contre un vrai changement de décision de sa part.
+- **`ajouter_entetes_saisie(fichier, noms, dossier_backups, feuille=...)`**
+  (nouvelle fonction, `moteur/rapprochement/ecriture.py`) : ajoute des
+  colonnes DANS le tableau structuré, à sa suite — patch chirurgical de
+  DEUX parties du zip seulement (même esprit que `appliquer()`, jamais de
+  `openpyxl.save()`, voir bandeau du fichier) :
+  1. La feuille (`xl/worksheets/sheetN.xml`) : cellule d'en-tête inlineStr
+     par nom, en ligne 1, insérée triée par colonne (réutilise
+     `_remplacer_dans_ligne`/`_ecrire_cellule`, déjà éprouvés côté
+     `appliquer()`) + `<dimension>` étendue.
+  2. La définition du tableau (`xl/tables/tableN.xml`, retrouvée par son
+     attribut `name=`, pas besoin de suivre les relations de la feuille) :
+     `ref` du `<table>` ET du `<autoFilter>` étendus (même colonne de fin,
+     jamais les lignes), `<tableColumns count="...">` incrémenté, un
+     `<tableColumn id="…" name="…"/>` par nom ajouté en toute fin (l'ORDRE
+     dans le XML = l'ordre affiché par Excel, vérifié sur le vrai
+     classeur — l'attribut `id=` n'est PAS séquentiel par position, choisi
+     comme max(id existants)+1, +2...). **Rigoureusement AUCUN
+     `calculatedColumnFormula`, AUCUNE `totalsRow`** — seulement `id` et
+     `name`, comme demandé explicitement par l'acheteur.
+  Garde-fous identiques à `appliquer()` : verrou Excel, sauvegarde
+  horodatée AVANT écriture, refus (`ValueError`) si un nom existe déjà
+  (en-tête de la feuille OU colonne du tableau — deux vérifications
+  indépendantes, l'une ne présume jamais de l'autre) ou si une cellule
+  cible n'est pas vide (même une cellule stylée sans valeur — relu depuis
+  le XML brut, pas seulement via `lire_entetes()`).
+- **Validé de bout en bout sur une VRAIE copie du classeur vivant avant
+  toute écriture réelle** (`tests/test_rapprochement_ecriture.py`,
+  19 tests dont 3 tournent sur le vivant, `skipif` absent du poste) :
+  reconstruction INDÉPENDANTE (remplacement de texte brut, pas la même
+  logique regex que l'implémentation) du contenu XML attendu du tableau
+  après patch, comparaison zip membre par membre (exactement DEUX parties
+  changent : la feuille et la table, tout le reste octet pour octet
+  identique), formules U100/AV100 relues avant/après et comparées
+  strictement égales. Le test sur le vivant lit son état "avant"
+  dynamiquement (ref/nombre de colonnes actuels, jamais figés en dur) et
+  utilise deux noms de colonne jamais utilisés en pratique — pour rester
+  valide indéfiniment, y compris après cette session, quel que soit l'état
+  futur du classeur.
+- **Écriture réelle faite le 2026-09-01, sur confirmation explicite de
+  l'acheteur que le classeur était fermé** (redemandé explicitement juste
+  avant d'écrire, même après une 1ère confirmation donnée plus tôt dans la
+  session — l'absence d'erreur `ClasseurVerrouille` ne suffit jamais seule
+  comme preuve que le fichier est fermé, toujours reconfirmer avec
+  l'acheteur au moment précis d'écrire) : les 5 colonnes
+  ("N° facture", "Date facture", "Qté facturée", "PU facturé", "Montant
+  facturé HT") existent maintenant pour de vrai dans le Suivi commandes
+  vivant, colonnes 51 à 55 (AY à BC au moment de l'écriture — décalera
+  naturellement si des colonnes sont insérées avant elles un jour). Table
+  "Commandes" étendue à `A1:BC6430` (55 colonnes). Sauvegarde horodatée
+  créée dans `backups/` avant l'écriture (rotation 30 jours, comme
+  toujours). Relecture du vivant après coup : en-têtes aux bonnes
+  colonnes, formules U100/AV100 identiques, aucun autre membre du zip
+  modifié. **Acheteur elle-même a ouvert deux copies de test dans Excel
+  avant l'écriture réelle** (1ère version hors tableau, puis 2e version
+  dans le tableau après correction) : aucun message de réparation à
+  chaque fois, style du tableau + flèches de filtre présents sur la 2e
+  version, Dashboard non cassé.
+- **`COLONNES_MODIFIABLES` étendu à 9 entrées** (4 colonnes BL + 5
+  colonnes facture, "Montant facturé HT" comprise) — nouveau
+  `ENTETES_FACTURE` (tuple des 5 noms dans l'ordre exact où ils ont été
+  créés) exporté par `ecriture.py` pour que F3 les réutilise tel quel,
+  sans redéfinir la liste ailleurs.
+- **"Montant facturé HT" est UNE SIMPLE COLONNE DE SAISIE pour
+  l'instant, pas un calcul** — contrairement à la proposition F2/Volet 1
+  (où elle devait être une formule Excel `Qté facturée × PU facturé`) :
+  aucune formule n'a été ajoutée nulle part (ni dans le tableau, ni dans
+  les cellules) pour aucune des 5 colonnes. Comment elle sera
+  effectivement remplie (valeur calculée et écrite directement par le
+  futur moteur de rapprochement factures, ou vraie formule Excel ajoutée
+  plus tard par le même mécanisme de patch XML) reste une décision NON
+  prise, à trancher dans la session dédiée aux formules — avec "Écart
+  facture" et "Statut facture" (nouvelle colonne calculée, indépendante de
+  "Statut commande", toujours juste proposée dans le cadrage F1, jamais
+  construite). **"Statut commande" n'a pas été et ne sera jamais modifié
+  par ce module** — la formule ni le `calculatedColumnFormula` du tableau
+  n'ont été touchés, y compris la dérive entre les deux découverte cette
+  session (voir plus haut).
+
 ## Tests
 
     py -3 -m pytest          # tout le socle

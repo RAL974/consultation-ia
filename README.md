@@ -139,6 +139,52 @@ oublies, rien de dangereux, il suffit de fermer puis de recliquer.
 Rien n'est jamais écrit sans que tu aies vu et confirmé le nombre de
 lignes concerné.
 
+### Rapprocher les factures
+
+**⚠ Pas encore utilisable telle quelle : il manque 4 colonnes dans le
+Suivi commandes** (voir plus bas, "Avant de pouvoir écrire"). En attendant,
+le bouton fonctionne quand même en LECTURE SEULE (diagnostic).
+
+Seul **109 Distribution** est couvert pour l'instant (voir CLAUDE.md) — les
+factures des autres fournisseurs ressortent listées en "fichiers non
+traités".
+
+**Étape 1 — déposer les factures**
+Dépose les factures PDF (texte, pas besoin de scanner — 109 Distribution
+les envoie directement en PDF) dans `a_traiter/Factures/`.
+
+**Étape 2 — lancer la lecture**
+1. Double-clique sur `lancer_gui.bat`.
+2. Clique sur **"Rapprocher les factures"** (4ᵉ bouton). Une nouvelle
+   fenêtre s'ouvre et compare chaque facture au Suivi commandes — bien plus
+   rapide que les BL (pas d'image à lire, du texte directement dans le
+   PDF). Le Suivi commandes n'a pas besoin d'être fermé pour cette étape.
+3. Mêmes listes que pour les BL (Sûres / À confirmer / Déjà à jour /
+   Inconnues / Blocs non rapprochés) — même logique de vérification avant
+   de cocher.
+
+**Avant de pouvoir ÉCRIRE : 4 colonnes à créer dans le Suivi commandes**
+Le Suivi commandes n'a pas encore les colonnes nécessaires pour enregistrer
+les factures (**N° facture**, **Date facture**, **Qté facturée**,
+**PU facturé**, plus deux colonnes calculées **Montant facturé HT** et
+**Écart facture**) — voir CLAUDE.md pour la formule exacte de ces deux
+dernières. Tant qu'elles n'existent pas, la lecture/comparaison fonctionne
+(tu peux voir ce qui serait écrit), mais le bouton "Écrire" refusera
+proprement avec un message clair. Une fois les colonnes créées dans Excel
+("Insérer > Colonne de tableau" depuis l'intérieur du tableau "Commandes",
+pour que les 16 tableaux et leurs formules s'étendent automatiquement),
+l'écriture fonctionnera sans rien changer d'autre.
+
+**Étape 3 — écrire** (une fois les colonnes créées)
+Même déroulé que pour les BL : Suivi fermé dans Excel, clic sur "Écrire les
+lignes cochées", confirmation, sauvegarde automatique dans `backups/`, puis
+chaque facture est rangée :
+- **entièrement traitée** -> copiée (jamais déplacée — une facture peut
+  concerner plusieurs commandes) dans `a_traiter/BL/Traités/<n° commande>/`,
+  à côté du BdC et des BL de la même commande ;
+- **au moins un bloc non rapproché** (avoir, commande introuvable...) ->
+  `a_traiter/Factures/À vérifier/`.
+
 ## 3. Lire le Comparatif — que veulent dire les couleurs ?
 
 | Couleur | Sur quelle colonne | Ce que ça veut dire |
