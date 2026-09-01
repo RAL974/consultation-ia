@@ -37,8 +37,10 @@ def affaire(subject: str) -> str:
     # Supprime la mention "URGENT" du nom de dossier (gardée dans le sujet d'origine)
     return s
 
-def clean_dirname(name: str, maxlen: int = 60) -> str:
-    """Nom de dossier sûr (sans caractères interdits Windows)."""
+def clean_dirname(name: str, maxlen: int = 120) -> str:
+    """Nom de dossier sûr (sans caractères interdits Windows).
+    maxlen 120 : les sujets de consultation (ex. « [Demande de devis] 3.14-145 ... »)
+    dépassaient 60 car. et étaient tronqués en plein mot (cron 01/09/2026)."""
     name = re.sub(r'[<>:"/\\|?*]', " ", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name[:maxlen]
