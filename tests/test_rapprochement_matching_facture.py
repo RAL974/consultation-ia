@@ -31,7 +31,10 @@ def _ligne_facture(**kwargs):
 
 def test_colonnes_facture_disponibles():
     assert colonnes_facture_disponibles(
-        {"N° facture": 0, "Date facture": 1, "Qté facturée": 2, "PU facturé": 3}
+        {"N° facture": 0, "Date facture": 1, "Qté facturée": 2, "PU facturé": 3, "Montant facturé HT": 4}
+    )
+    assert not colonnes_facture_disponibles(
+        {"N° facture": 0, "Date facture": 1, "Qté facturée": 2, "PU facturé": 3}  # "Montant facturé HT" manquante
     )
     assert not colonnes_facture_disponibles({"N° facture": 0})
     assert not colonnes_facture_disponibles({})

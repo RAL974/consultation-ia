@@ -14,16 +14,22 @@ adaptation. Seule la SÉMANTIQUE DE COMPARAISON change (voir
 BL (`qte_livree_cumulee`) — elle est confrontée à ce qui est DÉJÀ enregistré
 comme livré (Qté livrée) et facturé (N° facture, si déjà renseigné).
 
-Colonnes facture (N° facture / Date facture / Qté facturée / PU facturé,
-voir CLAUDE.md "Volet 1") : PAS ENCORE créées dans le vrai Suivi commandes
-à ce jour (proposition validée dans son principe, jamais appliquée dans
-Excel). `lire_lignes_commande_facture()` les lit si présentes, sinon les 4
-champs restent `None` sur chaque `LigneSuiviFacture` — le rapprochement en
-LECTURE SEULE reste alors utilisable (diagnostic de résorption sur les 3
-colonnes déjà existantes : Qté livrée / Tarif BL / Tarif convenu, voir
-`colonnes_facture_disponibles()`) ; seule l'ÉCRITURE réelle exige ces
-colonnes, et `moteur.rapprochement.ecriture.appliquer()` refuse déjà
-proprement si elles sont absentes des en-têtes du fichier réel
+Colonnes facture (voir moteur.rapprochement.ecriture.ENTETES_FACTURE,
+réutilisé tel quel ici — jamais une 2e liste de noms redéfinie en double,
+voir CLAUDE.md "colonnes créées dans le Suivi vivant") : créées pour de
+vrai dans le vrai Suivi commandes le 2026-09-01 (colonnes 51 à 55, table
+structurée "Commandes" étendue). "Montant facturé HT" est une colonne de
+SAISIE (pas une formule Excel, contrairement au 1er plan F2/Volet 1) —
+c'est donc `pipeline_facture.ecritures_pour_facture()` qui doit l'écrire
+lui-même (Qté facturée × PU facturé), jamais laissé au calcul Excel.
+`lire_lignes_commande_facture()` lit les 5 colonnes si présentes dans LE
+Suivi passé en argument, sinon leurs champs restent `None` sur chaque
+`LigneSuiviFacture` — le rapprochement en LECTURE SEULE reste alors
+utilisable même sur un classeur qui ne les aurait pas encore (diagnostic de
+résorption sur les colonnes déjà existantes : Qté livrée / Tarif BL / Tarif
+convenu, voir `colonnes_facture_disponibles()`) ; seule l'ÉCRITURE réelle
+exige ces colonnes, et `moteur.rapprochement.ecriture.appliquer()` refuse
+déjà proprement si elles sont absentes des en-têtes du fichier réel
 (`ColonneNonModifiable`, voir son bandeau) — rien à dupliquer ici non plus.
 """
 
@@ -34,6 +40,7 @@ from openpyxl import load_workbook
 
 from moteur.outils import to_float
 from moteur.panier import MAPPING_FOURNISSEURS
+from moteur.rapprochement.ecriture import ENTETES_FACTURE
 from moteur.rapprochement.matching import (
     _cle,
     _memes_references,
@@ -52,12 +59,12 @@ _COLONNES_REQUISES_FACTURE = (
     "Qté livrée", "Tarif BL", "Tarif convenu",
 )
 
-# Colonnes facture proprement dites (voir CLAUDE.md, Volet 1) — OPTIONNELLES
-# à la LECTURE (leur absence ne bloque pas le diagnostic en lecture seule,
-# voir bandeau du module), mais dans moteur.rapprochement.ecriture.
-# COLONNES_MODIFIABLES pour l'écriture réelle (qui, elle, échoue proprement
-# si elles manquent).
-COLONNES_FACTURE_OPTIONNELLES = ("N° facture", "Date facture", "Qté facturée", "PU facturé")
+# Colonnes facture proprement dites — réutilise ENTETES_FACTURE
+# (moteur.rapprochement.ecriture, source de vérité unique, voir bandeau) —
+# OPTIONNELLES à la LECTURE (leur absence ne bloque pas le diagnostic en
+# lecture seule) mais dans moteur.rapprochement.ecriture.COLONNES_MODIFIABLES
+# pour l'écriture réelle (qui, elle, échoue proprement si elles manquent).
+COLONNES_FACTURE_OPTIONNELLES = ENTETES_FACTURE
 
 
 @dataclass

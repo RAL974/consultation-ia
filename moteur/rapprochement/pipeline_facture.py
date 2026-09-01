@@ -6,8 +6,10 @@ moteur/rapprochement/pipeline_bl.py (BL), en deux temps :
    `dossier_a_traiter`, résout leur(s) commande(s) (voir
    `_resoudre_commandes_facture`), rapproche chaque bloc de BL cité contre
    le Suivi (moteur.rapprochement.matching_facture). Ne modifie jamais rien.
-2. `appliquer_et_archiver_factures()` — écrit (via
-   moteur/rapprochement/ecriture.py), puis range chaque facture lue :
+2. `appliquer_et_archiver_factures()` — écrit les 5 colonnes facture (voir
+   moteur.rapprochement.ecriture.ENTETES_FACTURE, créées pour de vrai dans
+   le Suivi vivant le 2026-09-01, réutilisées telles quelles ici — voir
+   `ecritures_pour_facture()`), puis range chaque facture lue :
    - entièrement résolue -> COPIÉE (jamais déplacée : une facture peut
      concerner PLUSIEURS commandes, voir CLAUDE.md "Volet 3" — une facture
      multi-BC ne peut pas être découpée par page comme un BL Cominter
@@ -33,7 +35,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from moteur.referentiel import Referentiel
-from moteur.rapprochement.ecriture import Ecriture, appliquer
+from moteur.rapprochement.ecriture import ENTETES_FACTURE, Ecriture, appliquer
 from moteur.rapprochement.lecture_facture import analyser_dossier
 from moteur.rapprochement.matching import deduire_commande_par_contenu
 from moteur.rapprochement.matching_facture import (
@@ -293,15 +295,30 @@ def regrouper_par_facture(rapport: RapportRapprochementFacture) -> dict:
     return groupes
 
 
-def ecritures_pour_facture(correspondances) -> list:
-    """Construit les Ecriture (N° facture / Date facture / Qté facturée /
-    PU facturé — voir CLAUDE.md, Volet 1) pour une liste de (Facture,
+_COL_NUM_FACTURE, _COL_DATE_FACTURE, _COL_QTE_FACTUREE, _COL_PU_FACTURE, _COL_MONTANT_FACTURE = ENTETES_FACTURE
+
+
+def ecritures_pour_facture(correspondances) -> tuple:
+    """Construit les Ecriture pour les 5 colonnes facture (voir
+    ENTETES_FACTURE, moteur.rapprochement.ecriture — réutilisées telles
+    quelles, jamais retypées ici) pour une liste de (Facture,
     CorrespondanceFacture) déjà décidées "à écrire". Lève ColonneNonModifiable
-    (via ecriture.appliquer) si ces colonnes n'existent pas encore dans le
-    Suivi réel — rien de spécial à faire ici, le garde-fou est déjà dans
-    moteur.rapprochement.ecriture."""
+    (via ecriture.appliquer) si ces colonnes n'existent pas dans le Suivi
+    visé — rien de spécial à faire ici, le garde-fou est déjà dans
+    moteur.rapprochement.ecriture.
+
+    Retourne (ecritures, montants_recalcules). "Montant facturé HT" est une
+    colonne de SAISIE (pas une formule Excel, voir CLAUDE.md "colonnes
+    créées dans le Suivi vivant") : reprend le montant IMPRIMÉ sur la
+    facture pour cette ligne (LigneFacture.montant_ht, déjà extrait tel
+    quel par le parser — pour 109 Distribution, toujours imprimé, jamais
+    None). Si un futur fournisseur n'imprime PAS ce montant ligne à ligne,
+    il est recalculé (Qté facturée × PU facturé) — JAMAIS silencieusement :
+    chaque recalcul est ajouté à `montants_recalcules`, repris dans le
+    rapport écrit par appliquer_et_archiver_factures()."""
 
     ecritures = []
+    montants_recalcules = []
 
     for facture, c in correspondances:
 
@@ -309,19 +326,34 @@ def ecritures_pour_facture(correspondances) -> list:
             continue
 
         ligne = c.ligne_suivi.ligne_excel
+        lf = c.ligne_facture
 
-        ecritures.append(Ecriture(ligne, "N° facture", facture.numero_facture))
+        ecritures.append(Ecriture(ligne, _COL_NUM_FACTURE, facture.numero_facture))
 
         d = _parser_date_bl(facture.date_facture)
         if d is not None:
-            ecritures.append(Ecriture(ligne, "Date facture", d))
+            ecritures.append(Ecriture(ligne, _COL_DATE_FACTURE, d))
 
-        ecritures.append(Ecriture(ligne, "Qté facturée", c.ligne_facture.quantite_facturee))
+        ecritures.append(Ecriture(ligne, _COL_QTE_FACTUREE, lf.quantite_facturee))
 
-        if c.ligne_facture.prix_unitaire_ht:
-            ecritures.append(Ecriture(ligne, "PU facturé", c.ligne_facture.prix_unitaire_ht))
+        if lf.prix_unitaire_ht:
+            ecritures.append(Ecriture(ligne, _COL_PU_FACTURE, lf.prix_unitaire_ht))
 
-    return ecritures
+        if lf.montant_ht:
+            montant = lf.montant_ht
+        else:
+            montant = round(lf.quantite_facturee * (lf.prix_unitaire_ht or 0.0), 2)
+            montants_recalcules.append({
+                "fichier": facture.fichier,
+                "facture": facture.numero_facture,
+                "reference": lf.reference_fournisseur,
+                "ligne_excel": ligne,
+                "montant": montant,
+            })
+
+        ecritures.append(Ecriture(ligne, _COL_MONTANT_FACTURE, montant))
+
+    return ecritures, montants_recalcules
 
 
 def _nom_archive_facture(facture, numero_commande: str) -> str:
@@ -430,14 +462,16 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
         "sauvegarde": None, "lignes_ecrites": 0,
         "factures_archivees": [], "factures_a_verifier": [],
         "archivage_echoue": [], "chemin_rapport": None, "resorption": None,
+        "montants_recalcules": [],
     }
 
     if correspondances_a_ecrire:
-        ecritures = ecritures_pour_facture(correspondances_a_ecrire)
+        ecritures, montants_recalcules = ecritures_pour_facture(correspondances_a_ecrire)
         resume["sauvegarde"] = appliquer(
             rapport.fichier_suivi, ecritures, dossier_projet / DOSSIER_BACKUPS,
         )
         resume["lignes_ecrites"] = len(correspondances_a_ecrire)
+        resume["montants_recalcules"] = montants_recalcules
 
     cles_ecrites = {id(c) for _, c in correspondances_a_ecrire}
     groupes = regrouper_par_facture(rapport)
@@ -525,6 +559,17 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
             f"Résorption 109 DISTRIBUTION : {r['a_facturer']} ligne(s) livrée(s) encore sans "
             f"facture sur {r['livrees']} livrée(s) au total ({r['deja_facturees']} déjà facturée(s))."
         )
+
+    if resume["montants_recalcules"]:
+        lignes_rapport.append(
+            f"{len(resume['montants_recalcules'])} « Montant facturé HT » RECALCULÉ (Qté × PU, "
+            "aucun montant imprimé pour cette ligne sur la facture) — JAMAIS silencieux, à vérifier :"
+        )
+        lignes_rapport += [
+            f"  - {m['fichier']} (facture {m['facture']}, réf. {m['reference']}, ligne Excel {m['ligne_excel']}) : "
+            f"{m['montant']:.2f}€"
+            for m in resume["montants_recalcules"]
+        ]
 
     resume["chemin_rapport"] = ecrire_rapport_facture(dossier_projet / DOSSIER_RAPPORTS, "\n".join(lignes_rapport))
 
