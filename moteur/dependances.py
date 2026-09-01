@@ -24,6 +24,22 @@ REQUIS = {
     "rapidocr_onnxruntime": "rapidocr-onnxruntime",
 }
 
+# win32com (pywin32) — utilisé par moteur/fnp_brouillon.py (brouillon
+# Outlook de l'état FNP) et le pipeline Hermes (detecter_demandes.py,
+# creer_brouillons.py) — VOLONTAIREMENT PAS dans REQUIS ci-dessus.
+# Essayé une fois (voir CLAUDE.md, session FNP) : `pip install pywin32` seul
+# ne suffit pas à rendre `win32com.client` importable (il manque l'étape de
+# post-installation qui enregistre pywintypes/pythoncom), donc
+# verifier_et_installer() retombait en échec PERMANENT ("toujours
+# introuvable après installation") — et comme gui.py/main.py/fnp.py
+# appellent tous verifier_et_installer() AU DÉMARRAGE, ça bloquait le GUI
+# ENTIER (comparatif/panier/BL inclus) pour un besoin qui ne concerne que le
+# bouton optionnel "Créer le brouillon". Les modules qui en ont besoin
+# l'importent en LOCAL, au moment précis de l'appel (jamais en tête de
+# fichier) et laissent l'exception remonter avec un message clair si
+# pywin32 est absent/mal installé sur le poste — jamais bloquant pour le
+# reste de l'outil.
+
 
 def verifier_et_installer(log=print):
     """Retourne True si toutes les dépendances sont disponibles (après

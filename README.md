@@ -141,13 +141,9 @@ lignes concerné.
 
 ### Rapprocher les factures
 
-**⚠ Pas encore utilisable telle quelle : il manque 4 colonnes dans le
-Suivi commandes** (voir plus bas, "Avant de pouvoir écrire"). En attendant,
-le bouton fonctionne quand même en LECTURE SEULE (diagnostic).
-
 Seul **109 Distribution** est couvert pour l'instant (voir CLAUDE.md) — les
 factures des autres fournisseurs ressortent listées en "fichiers non
-traités".
+traités" (rien n'est perdu, juste laissé de côté en attendant leur tour).
 
 **Étape 1 — déposer les factures**
 Dépose les factures PDF (texte, pas besoin de scanner — 109 Distribution
@@ -163,19 +159,12 @@ les envoie directement en PDF) dans `a_traiter/Factures/`.
    Inconnues / Blocs non rapprochés) — même logique de vérification avant
    de cocher.
 
-**Avant de pouvoir ÉCRIRE : 4 colonnes à créer dans le Suivi commandes**
-Le Suivi commandes n'a pas encore les colonnes nécessaires pour enregistrer
-les factures (**N° facture**, **Date facture**, **Qté facturée**,
-**PU facturé**, plus deux colonnes calculées **Montant facturé HT** et
-**Écart facture**) — voir CLAUDE.md pour la formule exacte de ces deux
-dernières. Tant qu'elles n'existent pas, la lecture/comparaison fonctionne
-(tu peux voir ce qui serait écrit), mais le bouton "Écrire" refusera
-proprement avec un message clair. Une fois les colonnes créées dans Excel
-("Insérer > Colonne de tableau" depuis l'intérieur du tableau "Commandes",
-pour que les 16 tableaux et leurs formules s'étendent automatiquement),
-l'écriture fonctionnera sans rien changer d'autre.
+Les 5 colonnes nécessaires (**N° facture**, **Date facture**, **Qté
+facturée**, **PU facturé**, **Montant facturé HT**) existent désormais pour
+de vrai dans le Suivi commandes (créées par l'outil lui-même le
+01/09/2026, sans aucune manipulation Excel de ta part).
 
-**Étape 3 — écrire** (une fois les colonnes créées)
+**Étape 3 — écrire**
 Même déroulé que pour les BL : Suivi fermé dans Excel, clic sur "Écrire les
 lignes cochées", confirmation, sauvegarde automatique dans `backups/`, puis
 chaque facture est rangée :
@@ -184,6 +173,43 @@ chaque facture est rangée :
   à côté du BdC et des BL de la même commande ;
 - **au moins un bloc non rapproché** (avoir, commande introuvable...) ->
   `a_traiter/Factures/À vérifier/`.
+
+### État FNP mensuel (clôture comptable)
+
+Génère, en un clic, l'état des Factures Non Parvenues (FNP) demandé par la
+DAF à chaque clôture de mois : ce qui a été livré mais pas encore facturé
+côté fournisseurs, et les dossiers transitaires arrivés mais pas encore
+facturés côté transport. Entièrement en LECTURE SEULE — rien n'est jamais
+écrit dans le Suivi commandes ni dans Commandes spéciales, seulement un
+nouveau fichier créé dans `rapports/`.
+
+1. Double-clique sur `lancer_gui.bat`.
+2. Clique sur **"État FNP du mois"** (5ᵉ bouton). Une nouvelle fenêtre
+   s'ouvre.
+3. Le mois est pré-rempli avec le dernier mois calendaire complet (modifie-le
+   si tu veux un autre mois — la même génération redonne toujours le même
+   résultat pour un mois passé, tu peux la relancer sans souci). Le champ
+   "Depuis le" est optionnel : laisse-le vide sauf si tu veux volontairement
+   ignorer les livraisons antérieures à une date précise.
+4. Clique sur **"Générer l'état FNP"**. Un résumé s'affiche (montants,
+   nombre de lignes), et le fichier est créé dans `rapports/FNP_<mois>.xlsx`
+   — clique sur "Ouvrir l'état généré" pour le voir. Il contient 3 onglets :
+   **Synthèse** (les totaux et le niveau de confiance à lire en premier),
+   **BL non facturés** et **Transitaires** (le détail ligne par ligne).
+5. Pour envoyer le rapport à la DAF : renseigne son/ses email(s) (et
+   éventuellement une copie pour la direction), clique sur **"Créer le
+   brouillon"**. **Un brouillon Outlook est créé avec le fichier en pièce
+   jointe — RIEN N'EST ENVOYÉ AUTOMATIQUEMENT** : relis-le dans Outlook et
+   envoie-le toi-même quand tu es prête.
+
+Un point de vigilance qui apparaîtra sur le tout premier rapport généré (et
+qui s'atténuera avec le temps) : une bonne partie du montant "BL non
+facturés" concernera des livraisons antérieures à la mise en place du suivi
+des factures dans l'outil — l'onglet Synthèse l'indique clairement, ce
+n'est pas un bug.
+
+Utilisable aussi en ligne de commande : `py -3 fnp.py 2026-08` (mois au
+format AAAA-MM, date de filtre "depuis" optionnelle en 2e argument).
 
 ## 3. Lire le Comparatif — que veulent dire les couleurs ?
 

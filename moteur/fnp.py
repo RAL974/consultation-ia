@@ -1,0 +1,801 @@
+# -*- coding: utf-8 -*-
+"""
+État mensuel des Factures Non Parvenues (FNP) — clôture comptable, demande
+directe de la DAF le 31/08/2026 (direction en copie). Deux volets, dans le
+même classeur de sortie, mais SANS AUCUN RAPPORT entre eux (confirmé par
+l'acheteur, 2026-09-01, cadrage avant code) :
+
+(a) BL non facturés : lignes du Suivi commandes livrées au plus tard le
+    dernier jour du mois M mais pas encore facturées (voir
+    lire_lignes_bl_non_facturees).
+(b) Transitaires en cours de facturation : dossiers de
+    "1.3.0. Suivi commandes spéciales.xlsm" arrivés au plus tard fin de mois M
+    mais dont la facture transitaire n'a pas encore été reçue/traitée (voir
+    lire_dossiers_transitaires_non_factures).
+
+    Le lien entre les deux volets n'existe PAS : la facture du transitaire
+    (transport/douane) est indépendante de la facture du fournisseur de la
+    marchandise elle-même. Mot de l'acheteur, cadrage : "les n° de commande
+    sont liés aux fournisseurs habituels, pas aux transitaires [...] ce
+    tableau n'a d'intérêt que pour la partie FNP des transitaires" — un
+    dossier de Commandes spéciales sans N° de commande lié (8 des 31 vus au
+    cadrage) est donc inclus au même titre que les autres, identifié par
+    Désignation/Chantier/Fournisseur/N° dossier revient plutôt que par un
+    N° de commande.
+
+LECTURE SEULE partout : ce module n'écrit JAMAIS dans le Suivi commandes ni
+dans Commandes spéciales — seulement dans rapports/FNP_<AAAA-MM>.xlsx. Toute
+lecture passe par une COPIE temporaire (jamais le fichier vivant ouvert
+directement), même prudence que moteur.rapprochement.ecriture pour la
+lecture (voir lire_entetes) même si ici aucun verrou n'est nécessaire
+puisqu'on n'écrit rien dedans.
+
+Colonnes du Suivi volontairement PAS réutilisées, vérifié au cadrage (formules
+relues sur le vrai classeur avant d'écrire une ligne de code) : "Reste à
+facturer" (raisonne sur le RELIQUAT non livré, pas sur le livré non facturé),
+"Potentiel factu" (projection sur la Qté COMMANDÉE, pas livrée), "Facturé et
+livré OK" / "Problème" / "Att réc" (contrôle prix/complétude de livraison,
+jamais la présence d'une facture) — même leçon que "Statut commande" (voir
+CLAUDE.md, refondu autour du contrôle de prix mi-2026) : aucune colonne
+existante ne répond à la question posée par la DAF, ce module reconstruit le
+périmètre depuis les colonnes brutes (Date de livraison, Qté livrée, Tarif
+BL, Tarif convenu, N° facture, Date facture, Note).
+"""
+
+import calendar
+import contextlib
+import os
+import shutil
+import tempfile
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from pathlib import Path
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+from moteur.excel import GRIS, JAUNE, ROUGE, _entete, _largeurs
+from moteur.outils import to_float
+from moteur.rapprochement.pipeline_bl import trouver_fichier_suivi_vivant
+
+FEUILLE_COMMANDES = "Commandes"
+NOTE_COMMANDE_ANNULEE = "Commande annulée"
+
+# Date de création des 5 colonnes facture dans le Suivi vivant (voir
+# CLAUDE.md, "colonnes créées dans le Suivi vivant", écriture réelle du
+# 2026-09-01) : toute ligne livrée AVANT cette date n'a simplement jamais eu
+# l'occasion d'être marquée facturée par l'outil, quel que soit son statut
+# réel en compta (peut-être déjà réglée par ailleurs) — ne pas la présenter
+# comme une anomalie au même titre qu'une ligne récente.
+DATE_CREATION_COLONNES_FACTURE = date(2026, 9, 1)
+
+NOM_FICHIER_COMMANDES_SPECIALES = "1.3.0. Suivi commandes spéciales.xlsm"
+FEUILLE_SPECIALES = "Suivi"
+
+DOSSIER_RAPPORTS = "rapports"
+
+
+class SuiviIntrouvable(Exception):
+    """Le Suivi commandes vivant est introuvable — voir
+    moteur.rapprochement.pipeline_bl.trouver_fichier_suivi_vivant."""
+
+
+def dernier_jour_mois(annee_mois: str) -> date:
+    """"2026-08" -> date(2026, 8, 31)."""
+    annee, mois = (int(x) for x in annee_mois.split("-"))
+    dernier = calendar.monthrange(annee, mois)[1]
+    return date(annee, mois, dernier)
+
+
+def mois_precedent_complet(reference: date | None = None) -> str:
+    """"2026-08" si `reference` (par défaut aujourd'hui) est en septembre
+    2026, peu importe le jour — le mois calendaire précédent est TOUJOURS
+    complet, jamais le mois en cours. Sert de valeur pré-remplie dans le GUI
+    (voir gui_fnp.py), jamais utilisé pour un calcul de périmètre lui-même."""
+
+    ref = reference or date.today()
+    if ref.month == 1:
+        return f"{ref.year - 1}-12"
+    return f"{ref.year}-{ref.month - 1:02d}"
+
+
+@contextlib.contextmanager
+def _copie_temporaire(fichier):
+    """Copie temporaire à USAGE UNIQUE de `fichier` (jamais un nom fixe basé
+    sur fichier.name — deux lectures concurrentes/rapprochées d'un même nom
+    de fichier source, ex. plusieurs tests utilisant tous "suivi.xlsx",
+    se marchaient dessus : bug réel trouvé en écrivant les tests, la 2e
+    copie écrasait la 1re pendant qu'un handle Windows la tenait encore
+    ouverte). Nettoyage tolérant : un verrou Windows résiduel sur un fichier
+    TEMPORAIRE ET JETABLE (le nettoyage périodique de l'OS s'en charge) ne
+    doit jamais faire échouer la lecture elle-même."""
+
+    fichier = Path(fichier)
+    descripteur, chemin_tmp = tempfile.mkstemp(suffix=fichier.suffix, prefix="fnp_lecture_")
+    os.close(descripteur)
+    tmp = Path(chemin_tmp)
+    shutil.copy2(fichier, tmp)
+    try:
+        yield tmp
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _vers_date(valeur):
+    """Cellule Excel (datetime natif via data_only, texte, ou vide) -> date
+    Python, ou None. Les dates de Commandes spéciales/Suivi commandes sont
+    toujours des datetime natifs en pratique (vérifié au cadrage) ; le repli
+    texte est défensif, même prudence que
+    moteur.rapprochement.pipeline_bl._parser_date_bl."""
+
+    if valeur is None or valeur == "":
+        return None
+    if isinstance(valeur, datetime):
+        return valeur.date()
+    if isinstance(valeur, date):
+        return valeur
+    texte = str(valeur).strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(texte, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+@dataclass
+class LigneFNP:
+
+    ligne_excel: int
+    fournisseur: str
+    numero_commande: str
+    chantier: str
+    reference: str
+    designation: str
+    qte_livree: float
+    montant_ht: float
+    source_prix: str  # "Tarif BL" / "Tarif convenu" / "Aucune"
+    date_livraison: date
+    anciennete_jours: int
+    numero_facture: str
+    date_facture: object
+    note: str
+
+
+@dataclass
+class DossierTransitaire:
+
+    numero_dossier: str
+    designation: str
+    numero_commande: str
+    chantier: str
+    fournisseur: str
+    transitaire: str
+    ref_transport: str
+    date_depart: object
+    date_arrivee: date
+    montant_marchandise: float
+    cout_estime: float | None  # None si non calculable (voir repli)
+    anciennete_jours: int
+
+
+@dataclass
+class RapportFNP:
+
+    mois: str
+    fin_de_mois: date
+    date_generation: datetime
+    chemin_suivi: Path
+    suivi_modifie_le: datetime
+    depuis: date | None
+
+    lignes_bl: list = field(default_factory=list)          # LigneFNP valorisées
+    lignes_sans_prix: list = field(default_factory=list)    # LigneFNP, montant_ht == 0, source_prix == "Aucune"
+
+    dossiers_transitaires: list = field(default_factory=list)   # DossierTransitaire
+    chemin_commandes_speciales: Path | None = None
+    transitaire_repli_utilise: bool = False
+    transitaire_avertissement: str = ""
+    commandes_transitaire_non_couvertes: list = field(default_factory=list)  # [(numero_dossier, numero_commande, fournisseur, chantier)]
+
+
+def _valeur_texte(v) -> str:
+    return str(v).strip() if v is not None else ""
+
+
+def lire_lignes_bl_non_facturees(chemin_suivi, fin_de_mois: date, depuis: date | None = None):
+    """(lignes valorisées, lignes sans prix connu, transitaires_vus) — voir
+    RapportFNP pour les deux premières. `transitaires_vus` (3e élément) :
+    [(numero_dossier_revient, numero_commande, fournisseur, chantier), ...]
+    pour CHAQUE ligne du Suivi (toute date/statut confondu) où "Transitaire"
+    est renseigné — collecté dans la même passe pour le contrôle de
+    couverture du volet (b) (voir _controler_couverture_transitaires),
+    plutôt que relire tout le classeur une 2e fois pour ça.
+
+    Périmètre (voir bandeau du module) : Qté livrée > 0, Date de livraison
+    <= fin_de_mois (et >= depuis si fourni), Note != "Commande annulée", et
+    (N° facture vide OU Date facture > fin_de_mois). Les autres valeurs
+    "magiques" de Note ("Rupture fournisseur", "Reliquat soldé") ne sont PAS
+    des motifs d'exclusion ici — seule "Commande annulée" l'est (périmètre
+    donné par la DAF) ; elles sont juste reportées telles quelles pour info."""
+
+    with _copie_temporaire(chemin_suivi) as tmp:
+        wb = load_workbook(tmp, read_only=True, data_only=True)
+        try:
+            ws = wb[FEUILLE_COMMANDES]
+            lignes = ws.iter_rows(values_only=True)
+            entetes = next(lignes)
+            idx = {e: i for i, e in enumerate(entetes) if e is not None}
+
+            requis = (
+                "Fournisseur", "N° de commande", "Chantier", "Référence", "Désignation",
+                "Qté livrée", "Tarif BL", "Tarif convenu", "Date de livraison", "Note",
+                "N° facture", "Date facture", "Facturé BL", "Transitaire",
+            )
+            manquantes = [c for c in requis if c not in idx]
+            if manquantes:
+                raise KeyError(
+                    f"Colonne(s) introuvable(s) dans « {FEUILLE_COMMANDES} » : {', '.join(manquantes)} "
+                    "— export du Suivi commandes différent de celui attendu ?"
+                )
+            # "N° dossier revient" n'est utile qu'au contrôle de couverture du
+            # volet (b) (voir _controler_couverture_transitaires) — optionnelle
+            # ici, jamais un motif de faire échouer tout le volet (a).
+            i_dossier = idx.get("N° dossier revient")
+
+            valorisees, sans_prix, transitaires_vus = [], [], []
+
+            for i, row in enumerate(lignes, start=2):
+
+                transitaire = _valeur_texte(row[idx["Transitaire"]])
+                if transitaire:
+                    transitaires_vus.append((
+                        _valeur_texte(row[i_dossier]) if i_dossier is not None else "",
+                        _valeur_texte(row[idx["N° de commande"]]),
+                        _valeur_texte(row[idx["Fournisseur"]]),
+                        _valeur_texte(row[idx["Chantier"]]),
+                    ))
+
+                note = _valeur_texte(row[idx["Note"]])
+                if note == NOTE_COMMANDE_ANNULEE:
+                    continue
+
+                qte_livree = to_float(row[idx["Qté livrée"]])
+                if qte_livree <= 0:
+                    continue
+
+                date_livraison = _vers_date(row[idx["Date de livraison"]])
+                if date_livraison is None or date_livraison > fin_de_mois:
+                    continue
+                if depuis is not None and date_livraison < depuis:
+                    continue
+
+                numero_facture = _valeur_texte(row[idx["N° facture"]])
+                date_facture = _vers_date(row[idx["Date facture"]])
+
+                if numero_facture and (date_facture is None or date_facture <= fin_de_mois):
+                    # Un N° facture présent vaut exclusion par défaut — y
+                    # compris si la date est illisible/absente (cas réel :
+                    # pipeline_facture.ecritures_pour_facture n'écrit la
+                    # date QUE si elle a pu être parsée, le N° facture lui
+                    # est toujours écrit) : mieux vaut la traiter en
+                    # "déjà facturée" que risquer un doublon. Seule une date
+                    # facture CONFIRMÉE après la clôture fait rester la
+                    # ligne une FNP malgré un N° facture déjà présent.
+                    continue
+
+                tarif_bl = to_float(row[idx["Tarif BL"]])
+                tarif_convenu = to_float(row[idx["Tarif convenu"]])
+
+                if tarif_bl:
+                    source = "Tarif BL"
+                elif tarif_convenu:
+                    source = "Tarif convenu"
+                else:
+                    source = "Aucune"
+
+                l = LigneFNP(
+                    ligne_excel=i,
+                    fournisseur=_valeur_texte(row[idx["Fournisseur"]]),
+                    numero_commande=_valeur_texte(row[idx["N° de commande"]]),
+                    chantier=_valeur_texte(row[idx["Chantier"]]),
+                    reference=_valeur_texte(row[idx["Référence"]]),
+                    designation=_valeur_texte(row[idx["Désignation"]]),
+                    qte_livree=qte_livree,
+                    # Réutilise la valeur DÉJÀ CALCULÉE de "Facturé BL" (Tarif BL
+                    # x Qté livrée, replié sur Tarif convenu) plutôt que de la
+                    # recalculer soi-même (demande explicite de la DAF/du
+                    # cadrage) — "source_prix" ci-dessus n'est qu'une étiquette
+                    # de provenance, jamais un recalcul du montant.
+                    montant_ht=to_float(row[idx["Facturé BL"]]),
+                    source_prix=source,
+                    date_livraison=date_livraison,
+                    anciennete_jours=(fin_de_mois - date_livraison).days,
+                    numero_facture=numero_facture,
+                    date_facture=date_facture,
+                    note=note,
+                )
+
+                (sans_prix if source == "Aucune" else valorisees).append(l)
+
+            return valorisees, sans_prix, transitaires_vus
+        finally:
+            wb.close()
+
+
+def lire_dossiers_transitaires_non_factures(chemin_commandes_speciales, fin_de_mois: date):
+    """(dossiers, avertissement, dossiers_connus) — dossiers de la feuille
+    "Suivi" de Commandes spéciales dont "ETA ou arrivée réelle" <=
+    fin_de_mois et "Expédition facturée" == 0 (confirmé par l'acheteur,
+    cadrage : 1 = facture transitaire déjà reçue/traitée, 0 = en attente ;
+    "ETA ou arrivée réelle" utilisable telle quelle pour ce cut-off, malgré
+    son nom qui mélange estimé/réel). `dossiers_connus` (3e élément) :
+    ensemble des N° dossier revient présents dans ce classeur (toute date/
+    statut confondu), pour le contrôle de couverture (voir
+    _controler_couverture_transitaires). `avertissement` non vide si le
+    classeur/la feuille/une colonne requise est introuvable — dans ce cas
+    `dossiers` est toujours vide, à l'appelant de décider d'un repli."""
+
+    chemin = Path(chemin_commandes_speciales)
+    if not chemin.exists():
+        return [], f"Classeur « {chemin.name} » introuvable ({chemin}) — volet transitaires non évalué.", set()
+
+    with _copie_temporaire(chemin) as tmp:
+        wb = load_workbook(tmp, read_only=True, data_only=True, keep_vba=False)
+        try:
+            if FEUILLE_SPECIALES not in wb.sheetnames:
+                return [], f"Feuille « {FEUILLE_SPECIALES} » introuvable dans « {chemin.name} ».", set()
+
+            ws = wb[FEUILLE_SPECIALES]
+            lignes = ws.iter_rows(values_only=True)
+            entetes = next(lignes)
+            idx = {e: i for i, e in enumerate(entetes) if e is not None}
+
+            requis = (
+                "Désignation", "Commande", "Chantier", "Fournisseur", "N° dossier revient",
+                "Montant commande", "Transitaire", "ETA ou arrivée réelle", "Expédition facturée",
+            )
+            manquantes = [c for c in requis if c not in idx]
+            if manquantes:
+                return [], f"Colonne(s) introuvable(s) dans « {chemin.name} » : {', '.join(manquantes)}.", set()
+
+            dossiers = []
+            dossiers_connus = set()
+
+            for row in lignes:
+
+                numero_dossier = _valeur_texte(row[idx["N° dossier revient"]])
+                if numero_dossier:
+                    dossiers_connus.add(numero_dossier)
+
+                date_arrivee = _vers_date(row[idx["ETA ou arrivée réelle"]])
+                if date_arrivee is None or date_arrivee > fin_de_mois:
+                    continue
+
+                facture = row[idx["Expédition facturée"]]
+                if to_float(facture) != 0:
+                    continue
+
+                dossiers.append(DossierTransitaire(
+                    numero_dossier=numero_dossier,
+                    designation=_valeur_texte(row[idx["Désignation"]]),
+                    numero_commande=_valeur_texte(row[idx["Commande"]]),
+                    chantier=_valeur_texte(row[idx["Chantier"]]),
+                    fournisseur=_valeur_texte(row[idx["Fournisseur"]]),
+                    transitaire=_valeur_texte(row[idx["Transitaire"]]),
+                    ref_transport=_valeur_texte(row[idx["Réf trsprt"]]) if "Réf trsprt" in idx else "",
+                    date_depart=_vers_date(row[idx["Date de départ"]]) if "Date de départ" in idx else None,
+                    date_arrivee=date_arrivee,
+                    montant_marchandise=to_float(row[idx["Montant commande"]]),
+                    cout_estime=(
+                        to_float(row[idx["Coût estimé"]])
+                        if "Coût estimé" in idx and row[idx["Coût estimé"]] is not None else None
+                    ),
+                    anciennete_jours=(fin_de_mois - date_arrivee).days,
+                ))
+
+            return dossiers, "", dossiers_connus
+        finally:
+            wb.close()
+
+
+def _repli_transitaires_suivi_principal(chemin_suivi, fin_de_mois: date) -> list:
+    """Repli SI Commandes spéciales est introuvable/inexploitable (voir
+    lire_dossiers_transitaires_non_factures) : lignes du Suivi principal
+    livrées <= fin_de_mois avec un Transitaire renseigné. Aucun taux
+    d'approche moyen par trajet disponible sans le classeur dédié (feuille
+    Analyse) — jamais une estimation fabriquée sans base réelle (règle d'or
+    du projet) : cout_estime reste None, signalé comme tel dans le rapport."""
+
+    with _copie_temporaire(chemin_suivi) as tmp:
+        wb = load_workbook(tmp, read_only=True, data_only=True)
+        try:
+            ws = wb[FEUILLE_COMMANDES]
+            lignes = ws.iter_rows(values_only=True)
+            entetes = next(lignes)
+            idx = {e: i for i, e in enumerate(entetes) if e is not None}
+
+            requis = ("Transitaire", "N° de commande", "Fournisseur", "Chantier", "Qté livrée", "Date de livraison", "Montant total commande")
+            if any(c not in idx for c in requis):
+                return []
+
+            dossiers = []
+            for row in lignes:
+                transitaire = _valeur_texte(row[idx["Transitaire"]])
+                if not transitaire:
+                    continue
+                if to_float(row[idx["Qté livrée"]]) <= 0:
+                    continue
+                date_livraison = _vers_date(row[idx["Date de livraison"]])
+                if date_livraison is None or date_livraison > fin_de_mois:
+                    continue
+
+                dossiers.append(DossierTransitaire(
+                    numero_dossier="",
+                    designation="",
+                    numero_commande=_valeur_texte(row[idx["N° de commande"]]),
+                    chantier=_valeur_texte(row[idx["Chantier"]]),
+                    fournisseur=_valeur_texte(row[idx["Fournisseur"]]),
+                    transitaire=transitaire,
+                    ref_transport="",
+                    date_depart=None,
+                    date_arrivee=date_livraison,
+                    montant_marchandise=to_float(row[idx["Montant total commande"]]),
+                    cout_estime=None,
+                    anciennete_jours=(fin_de_mois - date_livraison).days,
+                ))
+
+            return dossiers
+        finally:
+            wb.close()
+
+
+def _controler_couverture_transitaires(transitaires_vus_suivi, dossiers_connus_speciales) -> list:
+    """Commandes du Suivi principal qui portent un Transitaire ET un N°
+    dossier revient renseigné, mais dont ce numéro n'apparaît dans AUCUN
+    dossier de Commandes spéciales : un vrai trou de couverture (le dossier
+    existe côté Suivi principal, jamais saisi côté Commandes spéciales) —
+    jamais un rapprochement inventé sans clé fiable commune (voir cadrage :
+    le N° de commande n'est pas cette clé, "les n° de commande sont liés aux
+    fournisseurs habituels, pas aux transitaires"), donc uniquement les
+    lignes où le N° dossier revient LUI-MÊME est renseigné mais absent de
+    Commandes spéciales. Les lignes du Suivi avec Transitaire renseigné mais
+    SANS N° dossier revient ne sont ni confirmées ni infirmées ici (aucune
+    clé pour vérifier) — le message général sur Commandes spéciales "peu
+    alimenté" couvre déjà ce risque plus large, pas la peine de fabriquer un
+    faux signal ligne à ligne dessus."""
+
+    return [
+        t for t in transitaires_vus_suivi
+        if t[0] and t[0] not in dossiers_connus_speciales
+    ]
+
+
+def calculer_rapport_fnp(dossier_projet, mois: str, depuis: date | None = None) -> RapportFNP:
+    """Lecture seule, calcule le RapportFNP sans rien écrire — séparé de
+    generer_etat_fnp() pour que le GUI (voir gui_fnp.py) puisse afficher un
+    résumé à l'écran à partir des mêmes données que celles écrites dans le
+    classeur, sans avoir à rouvrir le fichier généré pour les relire."""
+
+    dossier_projet = Path(dossier_projet)
+    fin_de_mois = dernier_jour_mois(mois)
+
+    chemin_suivi = trouver_fichier_suivi_vivant(dossier_projet)
+    if chemin_suivi is None:
+        raise SuiviIntrouvable(
+            "Le Suivi commandes vivant est introuvable dans "
+            "« 1.3.0.1. Commandes courantes/ », à côté du dossier projet."
+        )
+    suivi_modifie_le = datetime.fromtimestamp(chemin_suivi.stat().st_mtime)
+
+    lignes_valorisees, lignes_sans_prix, transitaires_vus = lire_lignes_bl_non_facturees(
+        chemin_suivi, fin_de_mois, depuis,
+    )
+
+    chemin_speciales = dossier_projet.parent / NOM_FICHIER_COMMANDES_SPECIALES
+    dossiers, avertissement, dossiers_connus = lire_dossiers_transitaires_non_factures(
+        chemin_speciales, fin_de_mois,
+    )
+
+    repli_utilise = False
+    if avertissement:
+        repli_utilise = True
+        dossiers = _repli_transitaires_suivi_principal(chemin_suivi, fin_de_mois)
+
+    non_couvertes = (
+        _controler_couverture_transitaires(transitaires_vus, dossiers_connus)
+        if not repli_utilise else []
+    )
+
+    return RapportFNP(
+        mois=mois, fin_de_mois=fin_de_mois, date_generation=datetime.now(),
+        chemin_suivi=chemin_suivi, suivi_modifie_le=suivi_modifie_le, depuis=depuis,
+        lignes_bl=lignes_valorisees, lignes_sans_prix=lignes_sans_prix,
+        dossiers_transitaires=dossiers,
+        chemin_commandes_speciales=chemin_speciales if chemin_speciales.exists() else None,
+        transitaire_repli_utilise=repli_utilise, transitaire_avertissement=avertissement,
+        commandes_transitaire_non_couvertes=non_couvertes,
+    )
+
+
+def generer_etat_fnp(dossier_projet, mois: str, depuis: date | None = None) -> Path:
+    """Point d'entrée : orchestration complète, écrit
+    rapports/FNP_<mois>.xlsx et retourne son chemin. LECTURE SEULE partout —
+    ce module n'écrit jamais dans un classeur vivant (Suivi commandes ou
+    Commandes spéciales)."""
+
+    dossier_projet = Path(dossier_projet)
+    rapport = calculer_rapport_fnp(dossier_projet, mois, depuis)
+    return ecrire_classeur_fnp(dossier_projet, rapport)
+
+
+# --- Écriture du classeur de sortie -----------------------------------------
+
+_NOMS_MOIS = [
+    "", "janvier", "février", "mars", "avril", "mai", "juin",
+    "juillet", "août", "septembre", "octobre", "novembre", "décembre",
+]
+
+
+def mois_en_lettres(mois: str) -> str:
+    annee, m = mois.split("-")
+    return f"{_NOMS_MOIS[int(m)]} {annee}"
+
+
+def _euros(cellule):
+    cellule.number_format = "#,##0.00 €"
+
+
+def _date_fmt(cellule):
+    cellule.number_format = "dd/mm/yyyy"
+
+
+def _sous_total_par(lignes, champ) -> list:
+    """[(valeur_champ, nb_lignes, montant_total)], trié par montant décroissant."""
+    totaux = {}
+    for l in lignes:
+        v = getattr(l, champ) or "(vide)"
+        nb, montant = totaux.get(v, (0, 0.0))
+        totaux[v] = (nb + 1, montant + l.montant_ht)
+    return sorted(((v, nb, m) for v, (nb, m) in totaux.items()), key=lambda x: -x[2])
+
+
+def ecrire_classeur_fnp(dossier_projet: Path, rapport: RapportFNP) -> Path:
+
+    total_bl = sum(l.montant_ht for l in rapport.lignes_bl)
+    total_marchandise_transit = sum(d.montant_marchandise for d in rapport.dossiers_transitaires)
+    total_estime_transit = sum(d.cout_estime for d in rapport.dossiers_transitaires if d.cout_estime is not None)
+    n_transit_sans_estimation = sum(1 for d in rapport.dossiers_transitaires if d.cout_estime is None)
+
+    anterieures_f1 = [l for l in rapport.lignes_bl if l.date_livraison < DATE_CREATION_COLONNES_FACTURE]
+    total_anterieures_f1 = sum(l.montant_ht for l in anterieures_f1)
+
+    buckets = {"< 30 j": (0, 0.0), "30-90 j": (0, 0.0), "> 90 j": (0, 0.0)}
+    for l in rapport.lignes_bl:
+        cle = "< 30 j" if l.anciennete_jours < 30 else ("30-90 j" if l.anciennete_jours <= 90 else "> 90 j")
+        nb, montant = buckets[cle]
+        buckets[cle] = (nb + 1, montant + l.montant_ht)
+
+    wb = Workbook()
+
+    # --- Synthèse ------------------------------------------------------
+    ws = wb.active
+    ws.title = "Synthèse"
+
+    ws["A1"] = f"État des Factures Non Parvenues — {mois_en_lettres(rapport.mois)}"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = f"Généré le {rapport.date_generation.strftime('%d/%m/%Y %H:%M')}"
+    ws["A3"] = f"Périmètre : livré/arrivé au plus tard le {rapport.fin_de_mois.strftime('%d/%m/%Y')} (dernier jour du mois), facture non reçue à cette date"
+    if rapport.depuis:
+        ws["A4"] = f"Filtre appliqué : uniquement les livraisons à partir du {rapport.depuis.strftime('%d/%m/%Y')}"
+
+    jours_suivi = (rapport.date_generation - rapport.suivi_modifie_le).days
+    ligne = 6
+    ws.cell(ligne, 1, "Suivi commandes lu (copie) :").font = Font(bold=True)
+    ws.cell(ligne, 2, str(rapport.chemin_suivi))
+    ligne += 1
+    ws.cell(ligne, 1, "Dernière sauvegarde du Suivi :")
+    ws.cell(ligne, 2, rapport.suivi_modifie_le.strftime("%d/%m/%Y %H:%M"))
+    ws.cell(ligne, 3, f"(il y a {jours_suivi} jour(s))")
+    if jours_suivi > 1:
+        ws.cell(ligne, 3).fill = JAUNE
+        ws.cell(ligne, 4, "⚠ le Suivi n'a peut-être pas été (r)ouvert/enregistré récemment dans Excel — les valeurs affichées sont celles mises en cache lors de la dernière sauvegarde")
+    ligne += 2
+
+    ws.cell(ligne, 1, "VOLET (a) — BL non facturés").font = Font(bold=True, size=12)
+    ligne += 1
+    ws.cell(ligne, 1, "Total HT (lignes valorisées) :")
+    c = ws.cell(ligne, 2, round(total_bl, 2)); _euros(c)
+    ws.cell(ligne, 3, f"{len(rapport.lignes_bl)} ligne(s)")
+    ligne += 1
+    ws.cell(ligne, 1, "Dont livrées sans AUCUN prix connu (non valorisées, voir onglet détail) :")
+    ws.cell(ligne, 3, f"{len(rapport.lignes_sans_prix)} ligne(s)")
+    ligne += 1
+    ws.cell(ligne, 1, f"Dont livraisons antérieures au {DATE_CREATION_COLONNES_FACTURE.strftime('%d/%m/%Y')} (avant la création des colonnes facture — jamais eu l'occasion d'être pointées par l'outil, peut-être déjà réglées par ailleurs) :")
+    c = ws.cell(ligne, 2, round(total_anterieures_f1, 2)); _euros(c)
+    ws.cell(ligne, 3, f"{len(anterieures_f1)} ligne(s)")
+    ligne += 2
+
+    ws.cell(ligne, 1, "Répartition par ancienneté").font = Font(bold=True)
+    ligne += 1
+    for cle in ("< 30 j", "30-90 j", "> 90 j"):
+        nb, montant = buckets[cle]
+        ws.cell(ligne, 1, cle)
+        ws.cell(ligne, 2, nb)
+        c = ws.cell(ligne, 3, round(montant, 2)); _euros(c)
+        ligne += 1
+    ligne += 1
+
+    ws.cell(ligne, 1, "Répartition par fournisseur").font = Font(bold=True)
+    ligne += 1
+    debut = ligne
+    ws.cell(ligne, 1, "Fournisseur"); ws.cell(ligne, 2, "Nb lignes"); ws.cell(ligne, 3, "Montant HT")
+    ligne += 1
+    for nom, nb, montant in _sous_total_par(rapport.lignes_bl, "fournisseur"):
+        ws.cell(ligne, 1, nom)
+        ws.cell(ligne, 2, nb)
+        c = ws.cell(ligne, 3, round(montant, 2)); _euros(c)
+        ligne += 1
+    _entete(ws, debut)
+    ligne += 1
+
+    ws.cell(ligne, 1, "Répartition par chantier").font = Font(bold=True)
+    ligne += 1
+    debut = ligne
+    ws.cell(ligne, 1, "Chantier"); ws.cell(ligne, 2, "Nb lignes"); ws.cell(ligne, 3, "Montant HT")
+    ligne += 1
+    for nom, nb, montant in _sous_total_par(rapport.lignes_bl, "chantier"):
+        ws.cell(ligne, 1, nom)
+        ws.cell(ligne, 2, nb)
+        c = ws.cell(ligne, 3, round(montant, 2)); _euros(c)
+        ligne += 1
+    _entete(ws, debut)
+    ligne += 2
+
+    ws.cell(ligne, 1, "VOLET (b) — Transitaires en cours de facturation").font = Font(bold=True, size=12)
+    ligne += 1
+    if rapport.transitaire_repli_utilise:
+        ws.cell(ligne, 1, "⚠ " + rapport.transitaire_avertissement).fill = ROUGE
+        ligne += 1
+        ws.cell(ligne, 1, "Repli utilisé : lignes du Suivi principal avec Transitaire renseigné — AUCUNE estimation de coût transitaire disponible sans le classeur dédié (pas de taux d'approche moyen par trajet).")
+        ligne += 1
+    else:
+        ws.cell(ligne, 1, "Source :")
+        ws.cell(ligne, 2, str(rapport.chemin_commandes_speciales))
+        ligne += 1
+    ws.cell(ligne, 1, "Dossiers non facturés par le transitaire :")
+    ws.cell(ligne, 2, f"{len(rapport.dossiers_transitaires)} dossier(s)")
+    ligne += 1
+    ws.cell(ligne, 1, "Montant marchandise concerné (HT) :")
+    c = ws.cell(ligne, 2, round(total_marchandise_transit, 2)); _euros(c)
+    ligne += 1
+    ws.cell(ligne, 1, "Coût transitaire ESTIMÉ (taux d'approche moyen du trajet) :").font = Font(bold=True)
+    c = ws.cell(ligne, 2, round(total_estime_transit, 2)); _euros(c)
+    ws.cell(ligne, 3, "ESTIMATION — pas un montant facturé").fill = JAUNE
+    ligne += 1
+    if n_transit_sans_estimation:
+        ws.cell(ligne, 1, f"Dont {n_transit_sans_estimation} dossier(s) sans estimation disponible (voir onglet Transitaires).")
+        ligne += 1
+    ligne += 1
+
+    ws.cell(ligne, 1, "Fiabilité du volet transitaires").font = Font(bold=True)
+    ligne += 1
+    ws.cell(ligne, 1, "« Commandes spéciales » est un classeur peu alimenté et maintenu à la main (voir CLAUDE.md) — un dossier réel peut très bien ne jamais y avoir été saisi ; les montants ci-dessus ne portent donc que sur les dossiers effectivement enregistrés.")
+    ligne += 1
+    if rapport.commandes_transitaire_non_couvertes:
+        n = len(rapport.commandes_transitaire_non_couvertes)
+        ws.cell(ligne, 1, f"⚠ {n} N° de dossier revient cité(s) dans le Suivi principal (colonne Transitaire) mais introuvable(s) dans Commandes spéciales — NON comptés dans le total ci-dessus, à vérifier au cas par cas :").fill = JAUNE
+        ligne += 1
+        debut = ligne
+        ws.cell(ligne, 1, "N° dossier revient"); ws.cell(ligne, 2, "N° de commande"); ws.cell(ligne, 3, "Fournisseur"); ws.cell(ligne, 4, "Chantier")
+        ligne += 1
+        for num_dossier, num_cde, fournisseur, chantier in rapport.commandes_transitaire_non_couvertes:
+            ws.cell(ligne, 1, num_dossier)
+            ws.cell(ligne, 2, num_cde)
+            ws.cell(ligne, 3, fournisseur)
+            ws.cell(ligne, 4, chantier)
+            ligne += 1
+        _entete(ws, debut)
+
+    _largeurs(ws, maxi=60)
+    for col in ("A",):
+        ws.column_dimensions[col].width = 70
+
+    # --- BL non facturés -------------------------------------------------
+    ws2 = wb.create_sheet("BL non facturés")
+    entetes2 = [
+        "Fournisseur", "N° de commande", "Chantier", "Référence", "Désignation",
+        "Qté livrée", "Montant HT", "Source du prix", "Date de livraison",
+        "Ancienneté (jours)", "N° facture", "Date facture", "Note",
+    ]
+    ws2.append(entetes2)
+    for l in sorted(rapport.lignes_bl, key=lambda l: (l.fournisseur, -l.montant_ht)):
+        ws2.append([
+            l.fournisseur, l.numero_commande, l.chantier, l.reference, l.designation,
+            l.qte_livree, round(l.montant_ht, 2), l.source_prix, l.date_livraison,
+            l.anciennete_jours, l.numero_facture, l.date_facture, l.note,
+        ])
+    for row in ws2.iter_rows(min_row=2, min_col=7, max_col=7):
+        _euros(row[0])
+    for row in ws2.iter_rows(min_row=2, min_col=9, max_col=9):
+        _date_fmt(row[0])
+    for row in ws2.iter_rows(min_row=2, min_col=12, max_col=12):
+        _date_fmt(row[0])
+    _entete(ws2)
+
+    if rapport.lignes_sans_prix:
+        # Tout en .append() séquentiel, jamais mélangé à .cell() pour CRÉER
+        # une ligne : .append() avance son propre compteur interne
+        # (_current_row) indépendamment de max_row — un .cell() intercalé
+        # pour "sauter" des lignes désynchronise les deux et peut faire
+        # écrire la ligne suivante par-dessus une ligne déjà posée à la
+        # main (bug réel trouvé en écrivant les tests). Le style (gras,
+        # fond) s'applique APRÈS coup, sur une cellule déjà écrite — jamais
+        # pour la créer.
+        ws2.append([""])
+        ws2.append(["Lignes livrées SANS AUCUN PRIX connu — non valorisées, à traiter à part"])
+        ligne_titre = ws2.max_row
+        ws2.cell(ligne_titre, 1).font = Font(bold=True)
+        ws2.cell(ligne_titre, 1).fill = ROUGE
+
+        ws2.append(entetes2)
+        debut_bloc = ws2.max_row
+        for l in sorted(rapport.lignes_sans_prix, key=lambda l: l.fournisseur):
+            ws2.append([
+                l.fournisseur, l.numero_commande, l.chantier, l.reference, l.designation,
+                l.qte_livree, 0, l.source_prix, l.date_livraison,
+                l.anciennete_jours, l.numero_facture, l.date_facture, l.note,
+            ])
+        _entete(ws2, debut_bloc)
+
+    _largeurs(ws2, maxi=45)
+
+    # --- Transitaires ------------------------------------------------------
+    ws3 = wb.create_sheet("Transitaires")
+    if rapport.transitaire_repli_utilise:
+        entetes3 = ["N° de commande", "Chantier", "Fournisseur", "Transitaire", "Date de livraison", "Ancienneté (jours)", "Montant marchandise HT", "Coût estimé"]
+        ws3.append(entetes3)
+        for d in sorted(rapport.dossiers_transitaires, key=lambda d: -d.montant_marchandise):
+            ws3.append([
+                d.numero_commande, d.chantier, d.fournisseur, d.transitaire,
+                d.date_arrivee, d.anciennete_jours, round(d.montant_marchandise, 2),
+                "estimation indisponible (classeur Commandes spéciales absent)",
+            ])
+        for row in ws3.iter_rows(min_row=2, min_col=7, max_col=7):
+            _euros(row[0])
+        for row in ws3.iter_rows(min_row=2, min_col=5, max_col=5):
+            _date_fmt(row[0])
+    else:
+        entetes3 = [
+            "N° dossier revient", "Désignation", "N° de commande", "Chantier", "Fournisseur",
+            "Transitaire", "Réf. transport", "Date de départ", "Date d'arrivée",
+            "Ancienneté (jours)", "Montant marchandise HT", "Coût transitaire ESTIMÉ",
+        ]
+        ws3.append(entetes3)
+        for d in sorted(rapport.dossiers_transitaires, key=lambda d: -(d.cout_estime or 0)):
+            ws3.append([
+                d.numero_dossier, d.designation, d.numero_commande or "—", d.chantier, d.fournisseur,
+                d.transitaire, d.ref_transport, d.date_depart, d.date_arrivee,
+                d.anciennete_jours, round(d.montant_marchandise, 2),
+                round(d.cout_estime, 2) if d.cout_estime is not None else "non calculable",
+            ])
+        for row in ws3.iter_rows(min_row=2, min_col=11, max_col=12):
+            if isinstance(row[0].value, (int, float)):
+                _euros(row[0])
+            if isinstance(row[1].value, (int, float)):
+                _euros(row[1])
+        for col_lettre in ("H", "I"):
+            for row in ws3[f"{col_lettre}2:{col_lettre}{ws3.max_row}"]:
+                _date_fmt(row[0])
+    _entete(ws3)
+    _largeurs(ws3, maxi=45)
+
+    dossier_rapports = dossier_projet / DOSSIER_RAPPORTS
+    dossier_rapports.mkdir(parents=True, exist_ok=True)
+    chemin_sortie = dossier_rapports / f"FNP_{rapport.mois}.xlsx"
+    wb.save(chemin_sortie)
+    return chemin_sortie

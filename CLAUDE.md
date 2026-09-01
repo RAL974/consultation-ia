@@ -37,6 +37,8 @@ particulier).
 ```
 main.py                    point d'entrée CLI (dossier de consultation en argument, ou auto si un seul)
 gui.py                     interface graphique (Tkinter), appelle moteur/pipeline.py
+fnp.py                     CLI état FNP mensuel (`py -3 fnp.py <AAAA-MM>`), voir section dédiée
+gui_fnp.py                 fenêtre GUI "État FNP du mois" (bouton 5 de gui.py)
 moteur/
   pipeline.py               orchestration commune à main.py et gui.py
   consultation.py            résout le "dossier de consultation" à traiter (consultations/<nom>/), voir section dédiée
@@ -56,6 +58,8 @@ moteur/
   excel.py                   génère Comparatif.xlsx (document de décision, voir bandeau du fichier)
   panier.py                  génère resultats/Panier_<chantier>_<date>.xlsx à partir des décisions de l'acheteur, voir section dédiée
   audit.py                   génère Audit_BDD.xlsx (qualité de la base d'équivalences)
+  fnp.py                     état mensuel des Factures Non Parvenues (BL + transitaires), LECTURE SEULE, voir section dédiée
+  fnp_brouillon.py            brouillon Outlook pour l'état FNP (Save() uniquement, jamais Send()), voir section dédiée
   rapprochement/
     ecriture.py               écriture sécurisée dans le Suivi commandes (patch XML chirurgical, jamais openpyxl.save() sur le classeur vivant), voir section dédiée
 consultations/
@@ -72,7 +76,7 @@ referentiel/
   exports/                    généré à chaque exécution : graine CSV du futur référentiel Appro-Tracker
 1.3.0.1. Suivi commandes - <année>.xlsx   fichier de l'acheteur (pas du dépôt, gitignore), export de la feuille "Commandes" utilisé par panier.py pour caler colonnes/fournisseurs/chantiers — voir section dédiée
 a_traiter/                  Rapprochement AI : dépôt des BL/Factures PDF à traiter (BL/, BL/Traités/, Factures/), gitignoré, voir section dédiée
-rapports/                    Rapprochement AI : rapports de rapprochement générés, gitignoré
+rapports/                    Rapprochement AI : rapports de rapprochement générés + FNP_<AAAA-MM>.xlsx (état FNP mensuel), gitignoré
 backups/                     Rapprochement AI : sauvegardes horodatées du Suivi commandes avant écriture, gitignoré
 installer.py                bundle de distribution autonome (copie base64 du projet) — outil de déploiement, PAS le moteur ; devient obsolète à chaque évolution du code, à régénérer séparément si besoin (hors périmètre courant)
 README.md                   prise en main non-développeur (installer, utiliser, légende des couleurs, journal en cas de souci)
@@ -85,6 +89,7 @@ tests/
   test_detecteur.py, test_comparateur.py, test_autocontrole.py, test_referentiel.py
   test_besoin.py, test_normalisation.py, test_panier.py, test_consultation.py, test_lecture_pdf.py
   test_rapprochement_ecriture.py  socle d'écriture sécurisée (Rapprochement AI), voir section dédiée
+  test_fnp.py                  état FNP mensuel (volets BL + transitaires), voir section dédiée
 ```
 
 ## Dossiers de consultation (moteur/consultation.py)
@@ -3655,6 +3660,248 @@ vivant.
   doit rester strict à ce niveau. "Écart facture"/"Statut facture" restent
   à construire (session dédiée aux formules). Étendre à d'autres
   fournisseurs dès que de vraies factures seront déposées pour eux.
+
+## État FNP mensuel (moteur/fnp.py) — clôture comptable
+
+Demande directe de la DAF (31/08/2026, direction en copie) : un état
+mensuel des Factures Non Parvenues, reproductible pour un mois passé,
+« en un clic ». Deux volets SANS AUCUN RAPPORT entre eux, dans le même
+classeur de sortie `rapports/FNP_<AAAA-MM>.xlsx` :
+
+- **(a) BL non facturés** : lignes du Suivi commandes livrées au plus tard
+  le dernier jour du mois M mais pas encore facturées.
+- **(b) Transitaires en cours de facturation** : dossiers de
+  `1.3.0. Suivi commandes spéciales.xlsm` arrivés au plus tard fin de mois M
+  mais dont la facture de TRANSPORT n'est pas encore reçue — la facture du
+  transitaire (transport/douane) est indépendante de la facture du
+  fournisseur de la marchandise elle-même (volet a). Mot de l'acheteur,
+  cadrage avant code : *« les n° de commande sont liés aux fournisseurs
+  habituels, pas aux transitaires [...] ce tableau n'a d'intérêt que pour la
+  partie FNP des transitaires »* — un dossier de Commandes spéciales sans
+  N° de commande lié (8 des 31 vus au cadrage) est donc inclus au même titre
+  que les autres.
+
+Entièrement LECTURE SEULE : ce module n'écrit JAMAIS ni dans le Suivi
+commandes ni dans Commandes spéciales, seulement dans `rapports/`. Chaque
+lecture passe par une copie temporaire à usage unique (voir
+`_copie_temporaire`, `tempfile.mkstemp` — jamais un nom fixe, voir bug
+ci-dessous).
+
+**Lancement** : `py -3 fnp.py <AAAA-MM> [AAAA-MM-JJ]` (2e argument optionnel,
+filtre "à partir du") ou bouton GUI **« État FNP du mois »** (5e bouton de
+`gui.py`, ouvre `gui_fnp.py`) — mois pré-rempli avec le dernier mois
+calendaire complet (`moteur.fnp.mois_precedent_complet`).
+
+### Colonnes du Suivi volontairement PAS réutilisées (vérifié au cadrage)
+
+Avant d'écrire une ligne de code, les formules réelles de 5 colonnes
+calculées du Suivi ont été relues sur le vrai classeur (comme pour la
+découverte "Statut commande" en session précédente) — AUCUNE ne répond à la
+question posée par la DAF :
+- **« Reste à facturer »** (`IF(Soldé≠"Soldé", PU prévisionnel × RAL, 0)`) —
+  raisonne sur le RELIQUAT NON LIVRÉ, pas sur le livré non facturé.
+- **« Potentiel factu »** — projection sur la Qté COMMANDÉE, pas livrée.
+- **« Facturé et livré OK »** — `"Good"` si Qté commandée = Qté livrée ET
+  Tarif BL ≤ Tarif convenu : un contrôle prix/complétude, pas facture.
+- **« Problème »** — `"Problème"` si Qté livrée > 0 ET Facturé BL = 0 : ne
+  se déclenche que si NI Tarif BL NI Tarif convenu ne sont connus (le cas
+  "aucun prix" du volet a ci-dessous), pas un indicateur de facturation.
+- **« Att réc »** — repère l'attente de RÉCEPTION (rien livré du tout), pas
+  l'attente de facture.
+Le module reconstruit donc le périmètre depuis les colonnes BRUTES (Date de
+livraison, Qté livrée, Tarif BL, Tarif convenu, N° facture, Date facture,
+Note) — jamais une formule existante réutilisée à tort.
+
+### Volet (a) — périmètre exact (`lire_lignes_bl_non_facturees`)
+
+Une ligne du Suivi qualifie si : `Qté livrée > 0` ET `Date de livraison ≤
+fin de mois` (et `≥ depuis` si le filtre optionnel est fourni) ET
+`Note ≠ "Commande annulée"` ET (`N° facture` vide OU `Date facture > fin de
+mois`). Seule la valeur magique `"Commande annulée"` de Note exclut une
+ligne — `"Rupture fournisseur"` et `"Reliquat soldé"` sont juste reportées
+telles quelles (périmètre donné par la DAF, ne change rien à
+l'inclusion/exclusion).
+
+**Valorisation : réutilise la valeur DÉJÀ CALCULÉE de la colonne « Facturé
+BL »** (Tarif BL × Qté livrée, replié sur Tarif convenu) plutôt que de la
+recalculer — demande explicite de la DAF/du cadrage. « Source du prix »
+(Tarif BL / Tarif convenu / Aucune) reste une étiquette de provenance
+calculée à côté, jamais un recalcul du montant lui-même. Une ligne livrée
+sans AUCUN prix connu (ni Tarif BL ni Tarif convenu) est **listée à part**
+dans l'onglet « BL non facturés » (bloc distinct en bas de feuille, jamais
+masquée, jamais fondue dans le total).
+
+**Bloc « antérieures au F1 »** : toute ligne livrée avant
+`DATE_CREATION_COLONNES_FACTURE = 2026-09-01` (date de la 1ère écriture
+réelle des colonnes facture, voir section "Rapprochement factures —
+1ère écriture réelle" ci-dessus) est comptée à part — elle n'a simplement
+jamais eu l'occasion d'être marquée facturée par l'outil, peut-être déjà
+réglée par ailleurs. **Recette réelle sur août 2026** : ce bloc représente
+**100 % du total** (1 167 448,90 € sur 4 621 lignes, TOUT antérieur au F1) —
+mécaniquement inévitable pour ce tout premier rapport (le suivi factures
+vient de démarrer le jour même). Décision explicite de l'acheteur : garder
+le chiffre brut tel quel dans le rapport/l'e-mail (pas de bandeau
+d'avertissement renforcé) — le bloc F1 déjà présent dans la Synthèse suffit
+à donner le bon niveau de confiance à la DAF. Ce ratio F1/total redeviendra
+significatif dès les mois suivants, au fur et à mesure que le rapprochement
+factures tourne en routine.
+
+**Filtre "depuis" optionnel** : ne change RIEN au ratio F1 ci-dessus (F1
+est une date fixe, `depuis` ne fait que raccourcir la fenêtre analysée) —
+n'a donc pas résolu ce problème structurel pour le 1er rapport ; utile
+seulement pour ignorer un bruit vraiment ancien une fois le suivi mature.
+
+**Ancienneté** : `(fin_de_mois - Date de livraison).days`, TOUJOURS relative
+à la fin du mois M demandé (jamais à "aujourd'hui") — pour que régénérer le
+rapport d'un mois passé donne exactement le même résultat à n'importe quel
+moment futur (reproductibilité explicitement demandée par la DAF). Buckets
+< 30 j / 30-90 j / > 90 j dans la Synthèse.
+
+### Volet (b) — cadrage avec l'acheteur avant code (confirmé 2026-09-01)
+
+Trois points tranchés avant d'écrire le parser de `Commandes spéciales`,
+feuille "Suivi" (31 dossiers réels au cadrage) :
+1. **« Expédition facturée »** (colonne 0/1) = facture du transitaire déjà
+   reçue/traitée (1) ou en attente (0) — confirmé, utilisé tel quel.
+2. **« ETA ou arrivée réelle »** (le nom mélange estimé/réel selon les
+   dossiers) — confirmé utilisable telle quelle pour le cut-off "arrivé ≤
+   fin de mois", malgré l'ambiguïté du nom.
+3. **Dossiers sans N° de commande lié** (8/31 au cadrage, ex. achats
+   ponctuels via La Poste, conteneurs "Multiples chantiers/fournisseurs") —
+   **réponse de l'acheteur, plus nuancée que les 2 options proposées** :
+   *« les n° de commande sont liés aux fournisseurs habituels, pas aux
+   transitaires, ils n'ont pas de rapport avec les FNP [...] Ce tableau n'a
+   d'intérêt que pour la partie FNP des transitaires »* — le lien à une
+   commande n'est JAMAIS un critère d'inclusion/exclusion pour ce volet,
+   tous les dossiers de Commandes spéciales sont éligibles, identifiés par
+   Désignation/Chantier/Fournisseur/N° dossier revient. Conséquence
+   d'architecture : le volet (b) est entièrement AUTONOME dans
+   `Commandes spéciales` — jamais besoin de rejoindre le N° de commande au
+   Suivi principal pour retrouver Chantier/Fournisseur (déjà présents
+   directement dans Commandes spéciales).
+
+**Découverte utile en creusant le classeur avant de coder** : les colonnes
+« Taux estimé »/« Coût estimé » de la feuille "Suivi" sont déjà
+PRÉ-CALCULÉES (Montant commande × taux d'approche moyen du trajet,
+vérifié par cohérence arithmétique exacte sur plusieurs dossiers réels,
+ex. 55 625 × 0,5557... = 30 911,23) — exactement l'estimation demandée par
+la DAF (« marchandise × taux d'approche moyen du trajet, feuille Analyse »)
+déjà construite par l'acheteur elle-même dans ce classeur. `moteur/fnp.py`
+réutilise donc directement `Coût estimé` (colonne "Coût transitaire
+ESTIMÉ" du rapport, clairement étiquetée ESTIMATION) au lieu de recalculer
+un taux moyen depuis la feuille "Analyse" (un PivotTable Excel, pas
+directement exploitable en lecture par openpyxl de toute façon).
+
+**Repli** (`_repli_transitaires_suivi_principal`) : si `Commandes
+spéciales` est introuvable/illisible, lignes du Suivi principal avec
+Transitaire renseigné + livrées ≤ fin de mois — **aucune estimation
+fabriquée** (`cout_estime` reste `None`, signalé "non calculable" dans le
+rapport) : pas de taux d'approche moyen par trajet disponible sans le
+classeur dédié, jamais un chiffre inventé (règle d'or).
+
+**Contrôle de couverture** (`_controler_couverture_transitaires`) :
+commandes du Suivi principal portant un Transitaire ET un N° dossier
+revient renseignés, mais dont ce numéro n'apparaît dans AUCUN dossier de
+Commandes spéciales — signalées à part dans la Synthèse (jamais comptées
+dans le total, jamais un rapprochement inventé sans clé fiable commune).
+**Rendement réel mesuré très faible** : sur 61 lignes du Suivi principal
+avec Transitaire renseigné, UNE SEULE a aussi un N° dossier revient rempli
+— l'acheteuse remplit "Transitaire" bien plus souvent que "N° dossier
+revient" sur le Suivi principal. Le contrôle reste honnête (ne signale
+jamais un faux gap sur les lignes sans N° dossier revient, faute de clé) et
+peu coûteux à calculer (collecté dans la même passe de lecture que le
+volet a, pas de 2e lecture du classeur) mais n'attrape aujourd'hui presque
+rien en pratique — la mise en garde générale "Commandes spéciales est peu
+alimenté" (déjà dans CLAUDE.md) reste la protection principale.
+
+**Idée non construite, soulevée par l'acheteur pendant le cadrage** :
+ajouter une colonne « Montant du devis validé » à `Commandes spéciales`
+pour suivre les sommes transitaire À VENIR (engagement), pas seulement les
+FNP déjà arrivées. Distincte du besoin FNP (qui ne regarde que ce qui est
+déjà arrivé) — notée pour une session future, hors périmètre de celle-ci.
+
+### Bugs réels trouvés en écrivant les tests (`tests/test_fnp.py`)
+
+1. **Collision de fichier temporaire Windows** : `_copie_temporaire`
+   utilisait d'abord un nom FIXE (`fnp_lecture_<nom_du_fichier>.xlsx` dans
+   le dossier temp système) — deux lectures utilisant un fichier source du
+   même nom (ex. plusieurs tests avec tous une "suivi.xlsx") se
+   marchaient dessus : la 2e copie tentait d'écraser la 1re pendant qu'un
+   handle Windows la tenait encore ouverte (`PermissionError`), et le
+   `tmp.unlink()` de fin de lecture échouait pour la même raison même en
+   usage normal (`wb.close()` sur un classeur `read_only=True` ne libère
+   pas toujours IMMÉDIATEMENT le verrou Windows). Corrigé : `_copie_temporaire`
+   est maintenant un context manager (`with ... as tmp:`), nom UNIQUE via
+   `tempfile.mkstemp()` à chaque appel, et nettoyage tolérant
+   (`try/except OSError` sur l'`unlink()` final — un verrou résiduel sur un
+   fichier temporaire jetable ne doit jamais faire échouer la lecture).
+2. **Désynchronisation `.append()` / `.cell()` sur une même feuille
+   openpyxl** : le bloc "lignes sans prix" de l'onglet "BL non facturés"
+   mélangeait `ws.cell(ligne_titre, ...)` (adressage direct) et
+   `ws.append([])` (compteur interne `_current_row`, indépendant de
+   `max_row` tant qu'aucune vraie cellule n'est écrite) — un `.cell()`
+   intercalé pour "sauter" des lignes désynchronise les deux compteurs, la
+   ligne suivante écrite via `.append()` pouvait retomber sur une ligne
+   déjà posée à la main et l'écraser. Corrigé : tout le bloc en `.append()`
+   séquentiel strict (y compris une ligne `[""]` pour le séparateur, JAMAIS
+   `[]` vide — un append vide n'écrit aucune cellule donc ne fait PAS
+   avancer `max_row`), le style (gras/fond) appliqué après coup sur des
+   cellules déjà écrites, jamais pour en créer. **Leçon générale pour tout
+   futur code openpyxl de ce projet** : ne jamais mélanger `.append()` et
+   `.cell()` pour CRÉER des lignes sur la même feuille.
+3. **Un N° facture sans date lisible n'excluait pas la ligne** : la
+   condition d'exclusion exigeait `date_facture is not None ET ≤ fin de
+   mois` — si `date_facture` était `None` (date illisible, cas réel
+   possible côté `pipeline_facture.ecritures_pour_facture`, qui n'écrit la
+   date QUE si elle a pu être parsée, contrairement au N° facture toujours
+   écrit), la ligne n'était PAS exclue et ressortait comme FNP alors
+   qu'une facture existe bel et bien. Corrigé : un N° facture présent
+   exclut par défaut (`date_facture is None OU ≤ fin de mois`) — seule une
+   date facture CONFIRMÉE après la clôture fait rester la ligne une FNP
+   malgré un N° facture déjà renseigné.
+
+### Sortie et brouillon Outlook
+
+`rapports/FNP_<AAAA-MM>.xlsx` — 3 onglets : **Synthèse** (totaux,
+répartitions fournisseur/chantier/ancienneté, fiabilité des deux volets),
+**BL non facturés** (détail trié Fournisseur puis Montant décroissant, bloc
+"sans prix" à part), **Transitaires** (détail, colonnes différentes selon
+repli ou non). Mise en forme réutilise `moteur.excel._entete`/`_largeurs`
+(mêmes helpers que Comparatif.xlsx, jamais une 2e version dupliquée).
+
+**Brouillon Outlook** (`moteur/fnp_brouillon.py`, `creer_brouillon_fnp`) —
+même garde-fou que `creer_brouillons.py` (pipeline Hermes) : `mail.Save()`
+UNIQUEMENT, jamais `Send()`. Destinataire(s)/copie saisis à la main dans le
+GUI (jamais une adresse devinée ou codée en dur) ; pièce jointe = le
+classeur généré.
+
+**BUG RÉEL CORRIGÉ (trouvé en générant le rapport réel d'août, avant tout
+envoi) — `win32com.client` NE DOIT PAS être ajouté à
+`moteur/dependances.py::REQUIS`** : premier réflexe, ajouté pour que
+l'auto-installation couvre aussi ce besoin — `pip install pywin32` a bien
+téléchargé le paquet, mais `import win32com.client` a continué à échouer
+juste après ("toujours introuvable après installation") : pywin32 a besoin
+d'une étape de POST-installation (enregistrement de pywintypes/pythoncom)
+qu'un simple `pip install` ne fait pas. Comme `gui.py`/`main.py`/`fnp.py`
+appellent tous `verifier_et_installer()` AU DÉMARRAGE, ça bloquait le GUI
+ENTIER (comparatif/panier/BL compris) à cause d'un besoin qui ne concerne
+que le bouton optionnel "Créer le brouillon". Retiré de `REQUIS` — l'import
+de `win32com.client` reste LOCAL, à l'intérieur de `creer_brouillon_fnp()`
+(et déjà ainsi côté Hermes), jamais en tête de module : si pywin32 est
+absent/mal installé, seule l'action "Créer le brouillon" échoue avec un
+message clair, jamais le reste de l'outil.
+
+**Volontairement PAS envoyé pour de vrai cette session, sur demande
+explicite de l'acheteur** (après avoir donné l'adresse de la DAF pour
+plus tard) : *« on envoie rien du tout pour le moment, il faudra parser
+tous les fournisseurs d'abord »* — seul 109 Distribution est couvert côté
+rapprochement factures à ce jour (voir plus haut), présenter un état FNP
+à la DAF maintenant serait prématuré. **Adresse de la DAF pour quand ce
+sera le moment : `daf@espace-soleil.re`** (direction en copie, à demander
+le moment venu). Ne PAS créer/proposer de brouillon FNP réel avant que
+davantage de fournisseurs soient couverts côté factures — redemander
+explicitement à l'acheteur si ce seuil est atteint, ne jamais décider seul
+que "c'est bon".
 
 ## Tests
 

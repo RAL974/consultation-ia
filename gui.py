@@ -61,6 +61,7 @@ try:
     )
     from gui_rapprochement import FenetreRapprochementBL
     from gui_rapprochement_facture import FenetreRapprochementFacture
+    from gui_fnp import FenetreFNP
 except Exception:
     _consigner_erreur_fatale(traceback.format_exc())
     sys.exit(1)
@@ -86,8 +87,8 @@ class ConsultationGUI:
     def __init__(self, root):
         self.root = root
         root.title("Consultation AI — Générer un comparatif")
-        root.geometry("780x700")
-        root.minsize(640, 560)
+        root.geometry("780x800")
+        root.minsize(640, 620)
 
         self.dossier_consultation = tk.StringVar()
         self.fichier_comparatif = tk.StringVar()
@@ -180,6 +181,19 @@ class ConsultationGUI:
             height=2, command=self._ouvrir_rapprochement_facture,
         )
         self.bouton_rapprochement_facture.pack(fill="x", **marge)
+
+        tk.Label(
+            self.root,
+            text="5. Clôture mensuelle — état des Factures Non Parvenues (BL + transitaires non facturés) :",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", padx=10, pady=(6, 0))
+
+        self.bouton_fnp = tk.Button(
+            self.root, text="État FNP du mois",
+            font=("Segoe UI", 11, "bold"), bg="#9a6700", fg="white",
+            height=2, command=self._ouvrir_fnp,
+        )
+        self.bouton_fnp.pack(fill="x", **marge)
 
         tk.Label(self.root, text="Journal :").pack(anchor="w", padx=10)
 
@@ -521,6 +535,15 @@ class ConsultationGUI:
             FenetreRapprochementFacture(self.root, DOSSIER_PROJET)
         except Exception as e:
             messagebox.showerror("Impossible d'ouvrir la fenêtre de rapprochement", str(e))
+
+    # ------------------------------------------------------------------
+    # État FNP du mois (clôture comptable)
+    # ------------------------------------------------------------------
+    def _ouvrir_fnp(self):
+        try:
+            FenetreFNP(self.root, DOSSIER_PROJET)
+        except Exception as e:
+            messagebox.showerror("Impossible d'ouvrir la fenêtre FNP", str(e))
 
 
 def main():
