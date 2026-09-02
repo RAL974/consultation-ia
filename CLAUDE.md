@@ -3839,6 +3839,144 @@ l'AVOIR, mis de côté comme prévu ; `BC241723.pdf`, hors périmètre).
 4. Décider avec l'acheteur du sort des 63 factures encore en "À
    vérifier" (notamment la grosse 6108788).
 
+## Rapprochement factures — F4 : Cominter, 3e fournisseur (fait, 2026-09-02)
+
+Suite directe de F4/Coredime : *"on passe à Cominter, je t'ai mis les
+factures sous le même format que Coredime tout à l'heure dans le dossier."*
+5 .msg de Prisca LEBLÉ (comptable) — 4 pour Cominter Réunion, 1 déposé en
+cours de session pour Cominter Mayotte (*"normalement elle n'avait transmis
+que Cominter [Réunion]"*) — extraits avec la même mécanique win32com que
+Coredime (139 PDF au total). **Structure nettement plus hétérogène que
+Coredime** : au moins 2 entités légalement distinctes détectées sous
+"COMINTER" (Comptoir Ouest/Saint-Paul, Sainte-Clotilde, Saint-Pierre — SIRET
+et adresses différents mais même gabarit de document) et une 3e vraiment à
+part, "COMINTER MAYOTTE" (déjà séparée côté devis/BL, `cominter_mayotte.py`)
+— **2 parsers facture distincts écrits**, un par entité.
+
+**~40 des 139 fichiers sont des ANNEXES scannées** (`xxxxxx_BL_OBLxxxxxx.pdf`,
+`xxxxxx_MAN.pdf`, `Annexe_1/2_MFACxxxxx.pdf`, `PJ_1/2_MFACxxxxx.pdf`) — 0
+caractère de texte natif, hors périmètre du parser facture (le rapprochement
+BL de ce fournisseur existe déjà séparément). **Piège réel identifié avant
+tout code** : certains `_MAN.pdf`/`OFC194324.pdf` ont en fait du texte natif
+mais ne contiennent QUE notre propre "DETAIL DE LA COMMANDE"/"BON DE
+COMMANDE" (aucun champ Cominter) — détectés "COMINTER" (le mot apparaît
+dans "DESTINATAIRE COMINTER") mais 0 ligne honnêtement extraite, aucun
+traitement spécial nécessaire (même famille que les BC 109 Distribution
+déjà documentés).
+
+### Parser Cominter Réunion (`moteur/fournisseurs/cominter.py`, section
+GABARIT FACTURE, 4 fixtures réelles)
+
+Structure de ligne d'article structurellement identique au BL scanné du
+même fournisseur (déjà éprouvé, voir GABARIT BL) mais en texte NATIF
+(jamais de scan pour la facture, contrairement au BL) et un ordre de champs
+scramblé différent : Qté, Px unitaire, Remise% optionnelle, Montant net,
+Code TVA, Désignation, Cdt/Unité optionnel, Référence. Ancrage sur le
+MONTANT (seule cellule fiable sur CHAQUE ligne, avec ou sans remise/Cdt) —
+la désignation+référence de chaque article est bornée par les deux montants
+consécutifs, jamais par un Cdt (absent sur les lignes d'éco-participation).
+Zone bornée entre "Signature" et "Article 7. PROCEDURE..."/"NET A PAYER".
+
+**4 bugs réels trouvés en confrontant 5 factures riches** (dont
+`OFC193413.pdf`/commande M2.22.082 — la MÊME commande déjà documentée dans
+l'incident "quantités non entières" d'une session précédente, "L406773"/
+"4.5 KA" inclus, confirmant la parenté structurelle avec le BL) :
+1. **Note de pied de tableau après la référence, sur la DERNIÈRE ligne
+   d'articles du document** (`OFC194316.pdf`, "Livraison chantier
+   Anzemberg... CAMBAIE CG CG" après la référence CAETM4288) : la référence
+   n'est PAS toujours `zone[-1]` — recherchée en partant de la FIN de la
+   zone jusqu'à trouver un token qui ressemble vraiment à une référence
+   (`MOTIF_REF_ARTICLE_BL_COMINTER`, déjà éprouvé côté BL), tout ce qui suit
+   étant simplement ignoré.
+2. **Code TVA collé au montant sur la MÊME ligne** (`NFA018127.pdf`,
+   "17,33 € 1" au lieu de deux lignes séparées) — sans ce repli, aucune
+   ligne du document ne matchait le motif montant (ancré `$`) et toute la
+   facture ressortait à 0 ligne.
+3. **AUCUN repère "Signature"** avant le bloc [date, n° de BL, n° de
+   commande] sur certaines pièces (`NF155008.pdf`, agence Saint-Pierre) —
+   repli sur la 1ère ligne qui ressemble à un n° de BL
+   (`MOTIF_BL_FACTURE_COMINTER`, sans risque de faux positif : 2-5 lettres
+   + 5-7 chiffres, rien d'autre sur la ligne, ne matche aucune ligne du
+   bandeau légal/adresse).
+4. **Référence AVANT la désignation** (même `NF155008.pdf`, "L69731L /
+   Prise 2P+T saillie Plexo gris / unite" — Cdt en minuscule aussi,
+   comparaison désormais casse-insensible) au lieu d'après comme les 3
+   autres fixtures : quand la référence trouvée est en PREMIÈRE position de
+   la zone, la désignation est cherchée APRÈS elle (bornée par le prochain
+   Cdt trouvé, ou à défaut à UNE seule ligne — pour ne jamais avaler une
+   note de pied de document type "BC N°24 1581 DU 07/07/26" qui peut
+   traîner juste après sur la dernière ligne d'articles).
+
+N° de commande : le "BC N°..." de l'en-tête (avant "Signature") peut être
+TRONQUÉ par rapport à sa réimpression dans le bloc Signature (cas réel
+`NFA018127.pdf` : en-tête "BC:3240" vs Signature "BC N°24 3240", complet) —
+le bloc Signature fait autorité quand il en fournit un, repli sur l'en-tête
+sinon. Séparateur ESPACE toléré en plus de point/tiret
+(`MOTIF_COMMANDE_FACTURE_COMINTER`, même famille que Cominter Mayotte).
+
+### Parser Cominter Mayotte (`moteur/fournisseurs/cominter_mayotte.py`,
+section GABARIT FACTURE, 3 fixtures réelles initiales + 7 supplémentaires
+confirmées lors d'un 2e dépôt)
+
+Structure proche mais DEUX différences réelles avec Cominter Réunion,
+justifiant un module séparé (déjà la convention pour ce fournisseur côté
+devis/BL) plutôt qu'une branche conditionnelle dans le fichier commun :
+- **Aucun code TVA après le montant** — la référence suit DIRECTEMENT
+  (jamais vu l'inverse sur les 10 pièces confrontées).
+- **Aucun repère "Signature"** du tout — le repli "1ère ligne qui ressemble
+  à un n° de BL" déjà écrit pour Cominter Réunion sert ici de repère
+  PRINCIPAL, pas seulement de secours.
+- **N° de commande** : étiquette EXPLICITE "- N° de Commande : ..." plus
+  loin dans le document, préférée à l'en-tête (toujours vue, jamais
+  tronquée contrairement à Réunion) — séparateur ESPACE normalisé par
+  `re.sub(r"\s+", ".", ...)` (pas un simple `replace(" ", ".")`, sinon un
+  double espace donne un double point, cas réel "24  3109").
+- **Note parasite possible entre le Cdt d'un article et la Qté du
+  suivant** (cas réel "VARIANTE DISPO GTL", `MFAC15576.pdf`, 13 lignes) —
+  sans risque, la désignation reste bornée au Cdt trouvé, la note ne
+  rentre jamais dans la zone utile.
+Validé sur `MFAC15576.pdf` (13 lignes, total recalculé 6 516,33€ = Total
+HT affiché exactement) et confirmé sur 7 factures fraîches supplémentaires
+(2e .msg) sans nouveau bug trouvé.
+
+### Recette réelle et écriture (2026-09-02)
+
+Lecture seule sur les 139 fichiers (103 factures réellement lues, 50
+"fournisseur non reconnu" = annexes scannées, 7 "aucune ligne extraite" =
+BC ré-attachés) : **228 lignes sûres, 38 035,84 €**, 28 à confirmer
+(majoritairement de vraies facturations partielles, Qté facturée < Qté
+déjà livrée — légitime), 37 inconnues (surtout des éco-taxes ambiguës,
+plusieurs lignes Suivi partageant la même référence générique), 31 blocs
+"commande introuvable" — **la grande majorité au format "24.XXXX" côté
+Mayotte** (même famille de BdC manuels déjà actée pour Coredime, pas un
+bug), quelques-uns côté Réunion avec des formats courts inhabituels
+("1.030", "1.329", "2.091") à confirmer avec l'acheteur si l'occasion se
+présente.
+
+Suite complète (361 tests) vérifiée verte avant écriture. **Écriture
+réelle confirmée** : 228 lignes écrites, sauvegarde horodatée avant coup,
+39 factures archivées avec leur BC dans `Traités/<commande>/` (37
+Cominter + 2 Cominter Mayotte), 114 déplacées vers `À vérifier/` (0 échec
+d'archivage, 0 fichier sans parser). Contrôle anti-imbrication explicite
+dans le script d'écriture (leçon retenue de Coredime) : confirmé absent.
+Résorption : **COMINTER** 1202 lignes livrées encore sans facture sur 1389
+(187 déjà facturées, contre 0 en début de session) ; **COMINTER MAYOTTE**
+0/0 (aucune ligne Mayotte n'a encore de Qté livrée non nulle dans le
+Suivi — cohérent avec le motif "24.XXXX/commande introuvable" constaté :
+le BL n'est pas non plus encore rapproché pour ces commandes).
+
+**Reste à faire (F4 suite)** :
+1. Les 114 factures en `À vérifier/` — surtout le paquet "24.XXXX"
+   Mayotte à trancher avec l'acheteur, quelques formats courts Réunion à
+   éclaircir.
+2. Extension Hermes (proposée, pas encore construite) et regénération de
+   l'état FNP d'août, toujours en attente d'un fournisseur "significativement
+   résorbé" — Coredime ET Cominter le sont maintenant, bon moment pour
+   reprendre ces deux points.
+3. Fournisseurs BL déjà couverts mais sans facture testée : Electric
+   Plus/GMR (facture=BL, déjà documenté), Ravate, Stand 64, DEM, YESSS,
+   Protecthoms — dès que de vraies factures seront déposées pour eux.
+
 ## État FNP mensuel (moteur/fnp.py) — clôture comptable
 
 Demande directe de la DAF (31/08/2026, direction en copie) : un état

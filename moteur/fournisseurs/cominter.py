@@ -25,6 +25,7 @@ from moteur.modele import Article
 from moteur.ocr import pages_par_identifiant, regrouper_lignes
 from moteur.outils import to_float
 from moteur.rapprochement.modele_bl import BonLivraison, LigneBL
+from moteur.rapprochement.modele_facture import Facture, LigneFacture
 
 # --- GABARIT (Cominter / Cominter Mayotte) ---------------------------------
 # Deux formats de PDF coexistent chez Cominter (v1, v2 ci-dessous) : une
@@ -639,9 +640,321 @@ def parse_bl_cominter(mots_par_page: list[list[dict]]) -> list[BonLivraison]:
     return resultat
 
 
+# --- GABARIT FACTURE (Cominter Ouest / Sainte-Clotille / Saint-Pierre) -----
+# Session F4 suite (2026-09-01), 132 pièces réelles reçues par mail de
+# Prisca LEBLÉ (comptable), même montage que Coredime : plusieurs .msg
+# contenant chacun des e-mails imbriqués, un par facture. Sur ce lot : ~80
+# vraies factures natif-texte (JAMAIS de scan chez ce fournisseur pour la
+# facture, contrairement à son BL), 12 "COMINTER MAYOTTE" (format
+# différent, PAS couvert ici — voir cominter_mayotte.py, à étendre
+# séparément), et ~40 pièces jointes ANNEXES (scans purs, 0 caractère :
+# "xxxxxx_BL_OBLxxxxxx.pdf"/"xxxxxx_MAN.pdf" — BL/manifeste papier
+# scannés) — HORS PÉRIMÈTRE de ce parser. Piège réel repéré AVANT tout
+# code : certains "xxxxxx_MAN.pdf" ont en fait du texte natif MAIS ne
+# contiennent QUE notre propre "DETAIL DE LA COMMANDE"/"BON DE COMMANDE"
+# (aucun champ Cominter : pas de "Facture : XXX", pas de "Signature", pas
+# de bloc prix) — détectés "COMINTER" (le mot apparaît dans "DESTINATAIRE
+# COMINTER") mais parse_facture_cominter() n'y trouve honnêtement aucune
+# ligne (pas de traitement spécial nécessaire, l'architecture tolérante
+# aux pannes gère déjà ce cas comme n'importe quel autre 0-ligne).
+#
+# Structure réelle (texte natif PyMuPDF, ordre de lecture scramblé comme
+# les devis du même fournisseur — PAS le même ordre que le BL scanné/OCR,
+# mais un contenu de ligne d'article structurellement identique : Qté, Px
+# unitaire, Remise% optionnelle, Montant net, Code TVA, Désignation,
+# Cdt/Unité optionnel, Référence). Zone bornée entre "Signature" (juste
+# avant le bloc [date livraison, n° de BL, n° de commande] puis le tableau
+# d'articles) et "Article 7. PROCEDURE DE REMBOURSEMENT" (texte légal fixe,
+# présent sur toutes les pièces vues) — jamais au-delà : ~55% des factures
+# ont EN PLUS notre propre "DETAIL DE LA COMMANDE"/"BON DE COMMANDE"
+# ajouté à la suite dans le même PDF (même piège déjà documenté chez 109
+# Distribution) et il ne faut jamais le lire comme des lignes Cominter.
+#
+# Ancrage sur le MONTANT (seule cellule à la fois "argent" ET présente sur
+# CHAQUE ligne, avec ou sans remise) plutôt que sur un Cdt/Unité — celui-ci
+# est ABSENT sur les lignes d'éco-participation (ex. "Eco - contribution
+# 0.12€" suivi directement de "ECO-TAXE3", sans "Unité" entre les deux,
+# alors qu'un article normal a "Désignation / Unité / Référence") : ancrer
+# sur Cdt (comme les devis v2/v3 du même fournisseur) aurait perdu ces
+# lignes silencieusement. La désignation+référence de chaque article est
+# donc bornée par les DEUX montants consécutifs (tout ce qui suit le code
+# TVA de l'article N jusqu'au début du bloc prix de l'article N+1) ; la
+# DERNIÈRE ligne de cette zone est toujours la référence, l'avant-dernière
+# est le Cdt SI elle correspond à un mot-clé connu (Unité/Boîte/Barre/...).
+#
+# N° de BL : préfixe variable selon la pièce/agence — "OBL" (déjà connu
+# côté BL, Comptoir Ouest) MAIS AUSSI "NBL" (Sainte-Clotinde/Saint-Pierre,
+# jamais vu côté BL jusqu'ici) — motif élargi à toute forme
+# LETTRES(2-5)+CHIFFRES(5-7), pas de préfixe figé en dur.
+#
+# PAS d'autocontrôle Total HT (même choix que le BL du même fournisseur,
+# voir bandeau GABARIT BL ci-dessus) : le tableau de ventilation TVA en
+# pied de page a une structure trop irrégulière pour une extraction fiable
+# avec les exemples actuels — mieux vaut l'omettre que calculer un total
+# faux.
+#
+# INCERTITUDE ASSUMÉE sur date_facture : DEUX dates apparaissent dans
+# l'en-tête scramblé — une tôt dans le texte (juste après le mot "Numéro",
+# avant le n° de commande client) et une plus tard, accompagnée d'une
+# heure précise (HH:MM:SS) juste avant "Facture : XXX", qui ressemble
+# plutôt à un horodatage d'IMPRESSION du PDF qu'à la date commerciale de
+# la facture. La PREMIÈRE (sans heure associée) est retenue comme
+# date_facture — à valider sur davantage de recettes réelles avant de la
+# considérer acquise à 100%.
+MOTIF_NUMERO_FACTURE_COMINTER = re.compile(r"Facture\s*:\s*([A-Z]+\d+)")
+MOTIF_DATE_FACTURE_COMINTER = re.compile(r"\b(\d{1,2})/(\d{2})/(\d{2})\b")
+MOTIF_SIGNATURE_COMINTER = re.compile(r"^Signature$")
+MOTIF_FIN_TABLEAU_FACTURE_COMINTER = re.compile(r"Article\s*7\.\s*PROCEDURE|NET A PAYER")
+MOTIF_BL_FACTURE_COMINTER = re.compile(r"^[A-Z]{2,5}\d{5,7}$")
+# Élargi par rapport à MOTIF_COMMANDE_BL_COMINTER (séparateur espace en
+# plus de point/tiret) : cas réel NFA018127.pdf, "BC N°24 3240" (le
+# séparateur entre les deux groupes est un espace, pas un point comme
+# "M2.22.082" — même famille que le format Cominter Mayotte "24  3155").
+MOTIF_COMMANDE_FACTURE_COMINTER = re.compile(
+    r"((?:(?<![A-Za-z])[A-Z]\d{1,4}|(?<!\d)\d{1,4})(?:[.\-\s]\d{1,4}){1,2})"
+)
+MOTIF_LABEL_DATE_COMINTER = re.compile(r"^Date$")
+MOTIF_MONTANT_LIGNE_FACTURE_COMINTER = re.compile(r"^(\d[\d\s]*,\d{2})\s*€(?:\s+(\d))?$")
+MOTIF_REM_FACTURE_COMINTER = re.compile(r"^(\d+)\s*%$")
+MOTIF_QTE_PX_FACTURE_COMINTER = re.compile(r"^(\d[\d\s]*,\d{2})$")
+MOTIF_CODE_TVA_FACTURE_COMINTER = re.compile(r"^\d$")
+_CDT_FACTURE_COMINTER = {
+    "unité", "unite", "boîte", "boite", "barre", "cour", "rouleau", "mètre", "metre", "sachet",
+}  # comparé en minuscule (voir NF155008.pdf, agence Saint-Pierre : "unite" tout en minuscule)
+# --- fin GABARIT FACTURE ----------------------------------------------------
+
+
+def _zone_articles_facture_cominter(lignes: list[str]):
+    """(indice_debut, indice_fin) de la zone à scanner pour les lignes
+    d'articles — entre "Signature" et "Article 7. PROCEDURE...", jamais
+    au-delà (voir bandeau : "DETAIL DE LA COMMANDE" = notre propre BC,
+    pas des lignes Cominter).
+
+    Repli si "Signature" est ABSENT (cas réel NF155008.pdf, agence
+    Saint-Pierre — le bloc [date, n° de BL, n° de commande] démarre
+    directement, sans "Signature" devant) : ancrage direct sur la 1ère
+    ligne qui ressemble à un n° de BL (MOTIF_BL_FACTURE_COMINTER) — sans
+    risque de faux positif, ce motif (2-5 lettres + 5-7 chiffres, rien
+    d'autre sur la ligne) ne matche aucune ligne du bandeau légal/adresse
+    qui précède."""
+
+    i_signature = next((i for i, l in enumerate(lignes) if MOTIF_SIGNATURE_COMINTER.match(l.strip())), None)
+
+    if i_signature is not None:
+        debut = i_signature + 1
+    else:
+        i_bl = next((i for i, l in enumerate(lignes) if MOTIF_BL_FACTURE_COMINTER.match(l.strip())), None)
+        if i_bl is None:
+            return None
+        debut = max(i_bl - 1, 0)
+
+    i_fin = next(
+        (i for i in range(debut, len(lignes)) if MOTIF_FIN_TABLEAU_FACTURE_COMINTER.search(lignes[i])),
+        len(lignes),
+    )
+
+    return debut, i_fin
+
+
+def _entete_bl_facture_cominter(lignes: list[str], debut: int, fin: int):
+    """(numero_bl, numero_commande) lus juste après "Signature" — même
+    esprit que _parse_un_bl_cominter côté BL : recherche libre (pas
+    ancrage strict) pour tolérer un mot de chantier ou un préfixe "BC"/"BC
+    N°" devant le n° de commande.
+
+    Repli sur l'EN-TÊTE (ligne juste avant le label "Date", tout au début
+    du document, AVANT "Signature") si rien trouvé ici — cas réel
+    OFC194316.pdf : aucun n° de commande réimprimé dans le bloc Signature
+    (juste [date, n° BL], contrairement à OFC193413.pdf qui réimprime la
+    commande à cet endroit) ; le n° de commande n'existe alors QUE dans
+    l'en-tête. Le bloc Signature reste préféré quand il en fournit un : cas
+    réel NFA018127.pdf où l'en-tête tronque la commande ("BC: 3240", un
+    seul groupe, "24" perdu) alors que le bloc Signature la réimprime en
+    entier ("BC N°24 3240")."""
+
+    numero_bl = ""
+    numero_commande = ""
+
+    for l in lignes[debut:min(debut + 6, fin)]:
+        l = l.strip()
+        if not numero_bl and MOTIF_BL_FACTURE_COMINTER.match(l):
+            numero_bl = l
+            continue
+        if not numero_commande and numero_bl:
+            m = MOTIF_COMMANDE_FACTURE_COMINTER.search(l)
+            if m:
+                numero_commande = m.group(1).upper().replace(" ", ".")
+
+    if not numero_commande:
+        i_date = next(
+            (i for i in range(debut) if MOTIF_LABEL_DATE_COMINTER.match(lignes[i].strip())),
+            None,
+        )
+        if i_date is not None and i_date > 0:
+            m = MOTIF_COMMANDE_FACTURE_COMINTER.search(lignes[i_date - 1].strip())
+            if m:
+                numero_commande = m.group(1).upper().replace(" ", ".")
+
+    return numero_bl, numero_commande
+
+
+def _bloc_prix_facture_cominter(lignes: list[str], i_montant: int):
+    """Depuis la ligne montant à l'indice i_montant, remonte pour lire
+    [Qté, Px unitaire, Remise% optionnelle] — retourne
+    (indice_debut_bloc, qte, montant, code_tva_inline) ou None si le motif
+    ne correspond pas (voir bandeau : ancrage sur le montant, seule
+    cellule fiable sur TOUTE ligne, avec ou sans remise, avec ou sans
+    Cdt). `code_tva_inline` est le code TVA capturé sur la MÊME ligne que
+    le montant (ex. "17,33 € 1") quand présent — cas réel NFA018127.pdf,
+    distinct du cas plus courant où le code TVA est sur sa PROPRE ligne
+    suivante (ex. OFC194316.pdf/OFC193413.pdf) : sans cette variante, le
+    motif montant (ancré `$`) ne matchait jamais du tout et TOUTE la
+    facture ressortait à 0 ligne."""
+
+    m = MOTIF_MONTANT_LIGNE_FACTURE_COMINTER.match(lignes[i_montant].strip())
+    if not m:
+        return None
+    montant = to_float(m.group(1))
+    code_tva_inline = m.group(2)
+
+    k = i_montant - 1
+    if k >= 0 and MOTIF_REM_FACTURE_COMINTER.match(lignes[k].strip()):
+        k -= 1
+
+    if k < 1:
+        return None
+    if not MOTIF_QTE_PX_FACTURE_COMINTER.match(lignes[k].strip()):
+        return None
+    if not MOTIF_QTE_PX_FACTURE_COMINTER.match(lignes[k - 1].strip()):
+        return None
+
+    qte = to_float(lignes[k - 1].strip())
+
+    return k - 1, qte, montant, code_tva_inline
+
+
+def _lignes_facture_cominter(lignes: list[str], debut: int, fin: int, numero_bl: str) -> list[LigneFacture]:
+
+    blocs = []
+    for i in range(debut, fin):
+        b = _bloc_prix_facture_cominter(lignes, i)
+        if b is not None:
+            blocs.append((i, *b))  # (i_montant, debut_bloc, qte, montant, code_tva_inline)
+
+    articles = []
+    for idx, (i_montant, debut_bloc, qte, montant, code_tva_inline) in enumerate(blocs):
+
+        if code_tva_inline is not None:
+            j = i_montant + 1
+        else:
+            j = i_montant + 1
+            if j >= fin or not MOTIF_CODE_TVA_FACTURE_COMINTER.match(lignes[j].strip()):
+                continue
+            j += 1
+
+        fin_zone = blocs[idx + 1][1] if idx + 1 < len(blocs) else fin
+
+        zone = [lignes[k].strip() for k in range(j, fin_zone) if lignes[k].strip()]
+        if not zone:
+            continue
+
+        # Référence = DERNIÈRE ligne de la zone qui ressemble vraiment à
+        # une référence (lettres+chiffres, voir MOTIF_REF_ARTICLE_BL_COMINTER
+        # déjà éprouvé côté BL du même fournisseur) — PAS systématiquement
+        # zone[-1] : un mot de note/adresse peut traîner APRÈS la vraie
+        # référence sur la DERNIÈRE ligne d'articles du document (cas réel
+        # OFC194316.pdf, "Livraison chantier Anzemberg... CAMBAIE CG CG"
+        # après la référence CAETM4288 — sans ce garde-fou, "CG" ou
+        # "CAMBAIE" auraient été pris à tort pour la référence). Tout ce
+        # qui suit la référence trouvée est simplement ignoré (note, pas
+        # un champ de cette ligne).
+        i_ref = next(
+            (k for k in range(len(zone) - 1, -1, -1) if MOTIF_REF_ARTICLE_BL_COMINTER.match(zone[k])),
+            None,
+        )
+        if i_ref is None:
+            continue
+        reference = zone[i_ref]
+
+        if i_ref == 0:
+            # Variante réelle (NF155008.pdf, agence Saint-Pierre) : la
+            # référence vient AVANT la désignation ("L69731L / Prise 2P+T
+            # saillie Plexo gris / unite"), pas après comme les 3 autres
+            # fixtures. Bornée par le PROCHAIN Cdt (comme la variante
+            # habituelle), ou à défaut (lignes d'éco-participation, jamais
+            # de Cdt) à UNE seule ligne — pour ne jamais avaler une note de
+            # pied de document du genre "BC N°24 1581 DU 07/07/26" qui
+            # peut traîner juste après sur la DERNIÈRE ligne d'articles.
+            reste = zone[1:]
+            i_cdt = next((k for k, c in enumerate(reste) if c.lower() in _CDT_FACTURE_COMINTER), None)
+            designation = " ".join(reste[:i_cdt] if i_cdt is not None else reste[:1])
+        else:
+            reste = zone[:i_ref]
+            if reste and reste[-1].lower() in _CDT_FACTURE_COMINTER:
+                designation = " ".join(reste[:-1])
+            else:
+                designation = " ".join(reste)
+
+        if not qte:
+            continue
+
+        articles.append(LigneFacture(
+            reference_fournisseur=reference,
+            designation=designation,
+            quantite_facturee=qte,
+            prix_unitaire_ht=round(montant / qte, 4),
+            montant_ht=montant,
+            numero_bl=numero_bl,
+        ))
+
+    return articles
+
+
+def parse_facture_cominter(texte: str) -> Facture:
+
+    lignes = [l.rstrip() for l in texte.splitlines()]
+
+    m_num = MOTIF_NUMERO_FACTURE_COMINTER.search(texte)
+    numero_facture = m_num.group(1) if m_num else ""
+
+    zone = _zone_articles_facture_cominter(lignes)
+    if zone is None:
+        return Facture(fournisseur="COMINTER", fichier="", numero_facture=numero_facture, date_facture="")
+
+    debut, fin = zone
+
+    date_facture = ""
+    m_date = MOTIF_DATE_FACTURE_COMINTER.search(texte[:texte.find("Signature") if "Signature" in texte else len(texte)])
+    if m_date:
+        jour, mois, annee = m_date.groups()
+        date_facture = f"{int(jour):02d}/{mois}/20{annee}"
+
+    numero_bl, numero_commande = _entete_bl_facture_cominter(lignes, debut, fin)
+
+    lignes_facture = _lignes_facture_cominter(lignes, debut, fin, numero_bl)
+    for l in lignes_facture:
+        l.numero_bl = numero_bl
+
+    return Facture(
+        fournisseur="COMINTER",
+        fichier="",
+        numero_facture=numero_facture,
+        date_facture=date_facture,
+        numeros_commande=[numero_commande] if numero_commande else [],
+        numeros_bl=[numero_bl] if numero_bl else [],
+        lignes=lignes_facture,
+        total_ht_affiche=None,
+    )
+
+
 # "COMINTER MAYOTTE" est géré par moteur/fournisseurs/cominter_mayotte.py :
 # entité distincte (SIRET, adresse, structure de devis différents), voir
-# le bandeau GABARIT de ce module.
+# le bandeau GABARIT de ce module. Sa FACTURE (format MFACxxxxx, "N° de
+# Commande :"/"Nom du Chantier :" en labels explicites, structure de
+# remise différente) n'est PAS couverte ici — reste à construire
+# séparément (12 pièces réelles déjà disponibles pour ça, voir a_traiter/
+# Factures/ au moment de cette session).
 FOURNISSEURS = ['COMINTER']
 parse = parse_cominter
 parse_bl = parse_bl_cominter
+parse_facture = parse_facture_cominter
