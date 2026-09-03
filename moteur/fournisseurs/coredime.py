@@ -165,6 +165,19 @@ def _numero_commande_coredime(texte: str) -> str:
     return ""
 
 
+# Valeur BRUTE de "Réf.:" (voir GABARIT FACTURE) — capturée QUE
+# _numero_commande_coredime() ait réussi ou non à la convertir en n° de
+# commande exploitable ; sert uniquement à reconnaître un bon manuel
+# "BCN 241461" en aval (moteur.rapprochement.matching_facture.
+# est_bdc_manuel_24x), jamais à deviner une commande.
+MOTIF_REF_BRUTE_COREDIME = re.compile(r"R[ée]f\.?\s*:\s*(.+)$", re.MULTILINE)
+
+
+def _ref_brute_coredime(texte_bloc: str) -> str:
+    m = MOTIF_REF_BRUTE_COREDIME.search(texte_bloc)
+    return m.group(1).strip() if m else ""
+
+
 def _normaliser_date_coredime(brut: str) -> str:
     """"06.08.26" -> "06/08/2026" (même format que les autres fournisseurs
     BL, voir moteur/rapprochement/pipeline_bl._parser_date_bl)."""
@@ -526,6 +539,35 @@ MOTIF_LIGNE_REMISE_SEULE_COREDIME = re.compile(
     r"([\d\s,]+?)\s+"                                 # montant
     r"(\d)\s*$"                                        # code TVA
 )
+# BUG RÉEL CORRIGÉ (session S0, 2 pièces réelles, 6107800.pdf et
+# 6100226.pdf) : la ligne d'éco-taxe a DEUX prix consécutifs (brut et net,
+# toujours identiques — aucune remise vue sur une éco-taxe à ce jour) là où
+# une ligne d'article normale n'en affiche qu'UN SEUL, ex. réel :
+#   " ECO-23               ECOTAXE                       *** 10   UN      0,08      0,08       0,80 1"
+# MOTIF_LIGNE_FACTURE_COREDIME matchait quand même (design non-greedy de la
+# désignation qui absorbe le "***"), mais son groupe MONTANT
+# (`[\d\s,]+?`, qui tolère des espaces internes) fusionnait alors les DEUX
+# derniers nombres ("0,08       0,80") en une seule chaîne que `_f()` ne
+# sait pas convertir correctement -> montant=0,0 au lieu de 0,80 (10 x
+# 0,08). Silencieux : le garde-fou qté x prix vs montant
+# (`abs(0 - 0.8) > max(0.05*0, 1.0)` = `0.8 > 1.0` = Faux) ne se déclenche
+# pas sur un si petit écart absolu. Repère fiable, jamais vu sur une ligne
+# d'article normale : le "***" imprimé à la place d'une vraie quantité de
+# vente précède TOUJOURS cette structure à 2 prix. Traité en amont du
+# passage normal (lignes isolées avant que MOTIF_LIGNE_FACTURE_COREDIME ne
+# les voie, voir parse_facture_coredime) plutôt qu'en repli après coup —
+# jamais une double extraction de la même ligne.
+MOTIF_LIGNE_ECOTAXE_COREDIME = re.compile(
+    r"^\s*([A-Z0-9][A-Z0-9\-]+)\s+"                  # référence (ex. "ECO-23")
+    r"(.+?)\s+"                                       # désignation (ex. "ECOTAXE")
+    r"\*\*\*\s+"                                       # placeholder de quantité de vente
+    r"(\d+(?:,\d+)?)\s+"                              # quantité réelle
+    r"(?:([UMB]\*|UN|BTE)\s+)?"                        # unité
+    r"[\d,]+\s+"                                       # prix brut (identique au net, ignoré)
+    r"([\d,]+)\s+"                                    # prix net
+    r"([\d,]+)\s+"                                    # montant
+    r"(\d)\s*$"                                        # code TVA
+)
 # --- fin GABARIT FACTURE -----------------------------------------------------
 
 
@@ -632,6 +674,7 @@ def parse_facture_coredime(texte: str) -> Facture:
 
     lignes_facture = []
     commandes_vues = []
+    commandes_brutes_vues = []
 
     for i, m_bloc in enumerate(marqueurs):
 
@@ -643,10 +686,46 @@ def parse_facture_coredime(texte: str) -> Facture:
         numero_commande_bloc = _numero_commande_coredime(texte_bloc)
         if numero_commande_bloc and numero_commande_bloc not in commandes_vues:
             commandes_vues.append(numero_commande_bloc)
+        elif not numero_commande_bloc:
+            ref_brute = _ref_brute_coredime(texte_bloc)
+            if ref_brute and ref_brute not in commandes_brutes_vues:
+                commandes_brutes_vues.append(ref_brute)
 
         refs_extraites_bloc = set()
 
-        for _i2, m in scan_regex(texte_bloc.splitlines(), MOTIF_LIGNE_FACTURE_COREDIME):
+        lignes_bloc_brutes = texte_bloc.splitlines()
+
+        # Isole les lignes d'éco-taxe AVANT le passage normal (voir
+        # MOTIF_LIGNE_ECOTAXE_COREDIME) : la ligne est retirée du texte
+        # soumis à MOTIF_LIGNE_FACTURE_COREDIME (qui la matcherait aussi,
+        # avec un montant faux) pour ne jamais la compter deux fois.
+        indices_ecotaxe = set()
+        for i2, ligne_brute in enumerate(lignes_bloc_brutes):
+            m_eco = MOTIF_LIGNE_ECOTAXE_COREDIME.match(ligne_brute)
+            if not m_eco:
+                continue
+            ref = m_eco.group(1)
+            quantite = _f(m_eco.group(3))
+            prix_net = _f(m_eco.group(5))
+            montant = _f(m_eco.group(6))
+            if quantite and prix_net and abs(montant - quantite * prix_net) > max(0.05 * montant, 1.0):
+                continue
+            indices_ecotaxe.add(i2)
+            refs_extraites_bloc.add(ref)
+            lignes_facture.append(LigneFacture(
+                reference_fournisseur=ref,
+                designation=m_eco.group(2).strip(),
+                quantite_facturee=quantite,
+                prix_unitaire_ht=prix_net,
+                montant_ht=montant,
+                numero_bl=numero_bl_bloc,
+            ))
+
+        lignes_bloc_sans_ecotaxe = [
+            "" if i2 in indices_ecotaxe else l for i2, l in enumerate(lignes_bloc_brutes)
+        ]
+
+        for _i2, m in scan_regex(lignes_bloc_sans_ecotaxe, MOTIF_LIGNE_FACTURE_COREDIME):
 
             ref = m.group(1)
             designation = m.group(2).strip()
@@ -691,6 +770,7 @@ def parse_facture_coredime(texte: str) -> Facture:
 
     return facture_vide(
         numeros_commande=commandes_vues,
+        numeros_commande_bruts=commandes_brutes_vues,
         numeros_bl=[m.group(1).upper() for m in marqueurs],
         lignes=lignes_facture,
         total_ht_affiche=total_ht_affiche,

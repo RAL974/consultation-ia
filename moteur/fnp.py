@@ -44,6 +44,7 @@ BL, Tarif convenu, N° facture, Date facture, Note).
 
 import calendar
 import contextlib
+import csv
 import os
 import shutil
 import tempfile
@@ -57,10 +58,14 @@ from openpyxl.utils import get_column_letter
 
 from moteur.excel import GRIS, JAUNE, ROUGE, _entete, _largeurs
 from moteur.outils import to_float
-from moteur.rapprochement.pipeline_bl import trouver_fichier_suivi_vivant
+from moteur.rapprochement.pipeline_bl import _parser_date_bl, trouver_fichier_suivi_vivant
 
 FEUILLE_COMMANDES = "Commandes"
 NOTE_COMMANDE_ANNULEE = "Commande annulée"
+
+DOSSIER_A_TRAITER_FACTURES = "a_traiter/Factures"
+DOSSIER_A_VERIFIER_FACTURES = "À vérifier"  # sous-dossier, voir moteur.rapprochement.pipeline_facture
+DOSSIER_REFERENTIEL = "referentiel"
 
 # Date de création des 5 colonnes facture dans le Suivi vivant (voir
 # CLAUDE.md, "colonnes créées dans le Suivi vivant", écriture réelle du
@@ -184,6 +189,56 @@ class DossierTransitaire:
 
 
 @dataclass
+class FactureRecueNonRapprochee:
+    """Une ligne du Suivi livrée (donc candidate au volet a) mais pour
+    laquelle une VRAIE facture PDF a été trouvée dans a_traiter/Factures/
+    (racine ou À vérifier/) — datée <= fin de mois — sans avoir encore été
+    écrite dans le Suivi (voir _identifier_lignes_excel_facturees). Sortie
+    du volet (a), listée séparément : ce n'est PLUS une facture non
+    parvenue, seulement pas encore rapprochée dans l'outil (session S0,
+    étape 4a)."""
+
+    ligne_excel: int
+    fournisseur: str
+    numero_commande: str
+    reference: str
+    numero_facture: str
+    date_facture: date | None
+    montant_facture_bl: float  # "Facturé BL" déjà calculé (même valeur que LigneFNP.montant_ht)
+
+
+@dataclass
+class AjustementFNP:
+    """Une ligne déclarée À LA MAIN par l'acheteur dans
+    referentiel/fnp_ajustements_<mois>.csv (jamais par l'outil lui-même,
+    voir lire_ajustements_fnp) — un cas connu que le calcul automatique ne
+    peut structurellement pas couvrir (bon manuel, dossier transitaire hors
+    Commandes spéciales...). Listée à part, JAMAIS fusionnée avec les
+    totaux calculés des volets (a)/(b) — décision explicite de cadrage
+    (session S0, étape 4b)."""
+
+    type: str  # "BDC_MANUEL" / "TRANSIT" / "AUTRE"
+    libelle: str
+    fournisseur_ou_transitaire: str
+    chantier: str
+    piece: str
+    date_livraison: date | None
+    montant_ht: float
+    source: str
+    commentaire: str
+
+
+@dataclass
+class ReservesFNP:
+    """Réserves de périmètre AUTOMATIQUES (session S0, étape 4c) — ce que
+    le calcul ne couvre structurellement pas, jamais un chiffre deviné."""
+
+    n_bdc_manuel_24x: int  # factures dont au moins un bloc est un bon manuel "BC/BCN 24XXXX" (voir CauseFacture.BDC_MANUEL_24X) — matériel livré, commande absente du Suivi, hors périmètre du volet (a)
+    n_transitaires_sans_estimation: int  # dossiers de Commandes spéciales non facturés avec ETA <= fin de mois mais Coût estimé absent (déjà compté côté volet b, répété ici pour la section Réserves)
+    n_dossiers_speciales_total: int  # nombre TOTAL de dossiers dans Commandes spéciales (tout statut confondu) — rappel que le volet (b) ne couvre que ce qui y est saisi à la main
+
+
+@dataclass
 class RapportFNP:
 
     mois: str
@@ -201,6 +256,13 @@ class RapportFNP:
     transitaire_repli_utilise: bool = False
     transitaire_avertissement: str = ""
     commandes_transitaire_non_couvertes: list = field(default_factory=list)  # [(numero_dossier, numero_commande, fournisseur, chantier)]
+
+    # --- v1.1 (session S0) ---
+    exclusion_appliquee: bool = True  # False si --sans-exclusion (repli 16h, voir CLAUDE.md)
+    factures_recues_non_rapprochees: list = field(default_factory=list)  # FactureRecueNonRapprochee
+    ajustements: list = field(default_factory=list)  # AjustementFNP
+    chemin_ajustements: Path | None = None
+    reserves: ReservesFNP | None = None
 
 
 def _valeur_texte(v) -> str:
@@ -475,11 +537,191 @@ def _controler_couverture_transitaires(transitaires_vus_suivi, dossiers_connus_s
     ]
 
 
-def calculer_rapport_fnp(dossier_projet, mois: str, depuis: date | None = None) -> RapportFNP:
+# --- v1.1 (session S0) : exclusion "facture reçue non rapprochée" (4a) -----
+
+
+def _identifier_lignes_excel_facturees(dossier_projet, fin_de_mois: date) -> tuple:
+    """Scanne a_traiter/Factures/ (racine ET À vérifier/, LECTURE SEULE via
+    moteur.rapprochement.pipeline_facture.rapprocher_dossier_factures —
+    jamais de modification, même mécanisme déjà éprouvé en F2/F4) et
+    retourne ({ligne_excel: info}, n_bdc_manuel_24x) :
+
+    - `info` (dict) pour CHAQUE correspondance sûre/à confirmer/déjà à jour
+      dont la facture est datée <= fin_de_mois (une facture non datée reste
+      incluse — mieux vaut la signaler que la perdre, même logique que
+      _comparer_facture côté matching) : numero_facture, date_facture,
+      reference, fournisseur, numero_commande. Une même ligne_excel visée
+      par PLUSIEURS factures garde la PREMIÈRE trouvée (cas rare, pas de
+      règle d'arbitrage inventée au-delà de "la première").
+    - `n_bdc_manuel_24x` : nombre de blocs anomalies classés
+      CauseFacture.BDC_MANUEL_24X sur les DEUX dossiers scannés (voir
+      ReservesFNP, étape 4c) — compté dans la même passe pour ne jamais
+      rescanner un dossier potentiellement lourd (OCR) deux fois.
+
+    Ne lève JAMAIS d'exception si a_traiter/Factures/ n'existe pas encore
+    (aucune facture jamais déposée) — retourne ({}, 0), le volet (a) reste
+    alors inchangé (comportement identique à --sans-exclusion)."""
+
+    from moteur.rapprochement.matching_facture import CauseFacture
+    from moteur.rapprochement.pipeline_facture import (
+        StatutFacture,
+        classifier_cause_anomalie,
+        rapprocher_dossier_factures,
+    )
+
+    dossier_a_traiter = Path(dossier_projet) / DOSSIER_A_TRAITER_FACTURES
+    if not dossier_a_traiter.is_dir():
+        return {}, 0
+
+    dossiers_a_scanner = [dossier_a_traiter]
+    dossier_a_verifier = dossier_a_traiter / DOSSIER_A_VERIFIER_FACTURES
+    if dossier_a_verifier.is_dir():
+        dossiers_a_scanner.append(dossier_a_verifier)
+
+    lignes_excel_facturees = {}
+    n_bdc_manuel_24x = 0
+
+    for dossier in dossiers_a_scanner:
+
+        rapport_facture = rapprocher_dossier_factures(dossier, dossier_projet)
+
+        for facture, c in rapport_facture.surs + rapport_facture.a_confirmer + rapport_facture.deja_a_jour:
+            if c.ligne_suivi is None:
+                continue
+            date_f = _parser_date_bl(facture.date_facture)
+            if date_f is not None and date_f > fin_de_mois:
+                continue
+            lignes_excel_facturees.setdefault(c.ligne_suivi.ligne_excel, {
+                "numero_facture": facture.numero_facture,
+                "date_facture": date_f,
+                "reference": c.ligne_facture.reference_fournisseur,
+                "fournisseur": facture.fournisseur,
+                "numero_commande": c.ligne_facture.numero_commande,
+            })
+
+        for _, raison in rapport_facture.anomalies_facture:
+            if classifier_cause_anomalie(raison) is CauseFacture.BDC_MANUEL_24X:
+                n_bdc_manuel_24x += 1
+
+    return lignes_excel_facturees, n_bdc_manuel_24x
+
+
+def _appliquer_exclusion_factures_recues(lignes_bl: list, lignes_sans_prix: list,
+                                          lignes_excel_facturees: dict) -> tuple:
+    """Fonction PURE (aucune I/O — voir _identifier_lignes_excel_facturees
+    pour le scan lui-même) : retire de `lignes_bl`/`lignes_sans_prix` toute
+    ligne dont `ligne_excel` figure dans `lignes_excel_facturees`, retourne
+    (lignes_bl_restantes, lignes_sans_prix_restantes, factures_recues)."""
+
+    factures_recues = []
+    lignes_bl_restantes = []
+    lignes_sans_prix_restantes = []
+
+    for l in lignes_bl:
+        info = lignes_excel_facturees.get(l.ligne_excel)
+        if info is None:
+            lignes_bl_restantes.append(l)
+            continue
+        factures_recues.append(FactureRecueNonRapprochee(
+            ligne_excel=l.ligne_excel, fournisseur=l.fournisseur,
+            numero_commande=l.numero_commande, reference=l.reference,
+            numero_facture=info["numero_facture"], date_facture=info["date_facture"],
+            montant_facture_bl=l.montant_ht,
+        ))
+
+    for l in lignes_sans_prix:
+        info = lignes_excel_facturees.get(l.ligne_excel)
+        if info is None:
+            lignes_sans_prix_restantes.append(l)
+            continue
+        factures_recues.append(FactureRecueNonRapprochee(
+            ligne_excel=l.ligne_excel, fournisseur=l.fournisseur,
+            numero_commande=l.numero_commande, reference=l.reference,
+            numero_facture=info["numero_facture"], date_facture=info["date_facture"],
+            montant_facture_bl=l.montant_ht,
+        ))
+
+    return lignes_bl_restantes, lignes_sans_prix_restantes, factures_recues
+
+
+# --- v1.1 (session S0) : ajustements déclarés par l'acheteur (4b) ----------
+
+
+def nom_fichier_ajustements(mois: str) -> str:
+    return f"fnp_ajustements_{mois}.csv"
+
+
+def lire_ajustements_fnp(chemin_csv) -> list:
+    """Lit referentiel/fnp_ajustements_<mois>.csv — REMPLI PAR L'ACHETEUR,
+    jamais par l'outil (voir AjustementFNP). Fichier absent -> liste vide
+    (personne n'a encore rien déclaré ce mois-ci, pas une erreur). Colonnes
+    (séparateur ; comme les autres fichiers du projet) : type
+    (BDC_MANUEL/TRANSIT/AUTRE) ; libelle ; fournisseur_ou_transitaire ;
+    chantier ; piece ; date_livraison (JJ/MM/AAAA) ; montant_ht ; source ;
+    commentaire. Une ligne sans "type" est ignorée (ligne d'exemple/vide)."""
+
+    chemin_csv = Path(chemin_csv)
+    if not chemin_csv.is_file():
+        return []
+
+    resultat = []
+    with open(chemin_csv, encoding="utf-8-sig") as f:
+        lignes_utiles = (l for l in f if not l.lstrip().startswith("#"))
+        for ligne in csv.DictReader(lignes_utiles, delimiter=";"):
+            type_ = (ligne.get("type") or "").strip().upper()
+            if not type_:
+                continue
+            resultat.append(AjustementFNP(
+                type=type_,
+                libelle=(ligne.get("libelle") or "").strip(),
+                fournisseur_ou_transitaire=(ligne.get("fournisseur_ou_transitaire") or "").strip(),
+                chantier=(ligne.get("chantier") or "").strip(),
+                piece=(ligne.get("piece") or "").strip(),
+                date_livraison=_vers_date((ligne.get("date_livraison") or "").strip() or None),
+                montant_ht=to_float(ligne.get("montant_ht")),
+                source=(ligne.get("source") or "").strip(),
+                commentaire=(ligne.get("commentaire") or "").strip(),
+            ))
+    return resultat
+
+
+# --- v1.1 (session S0) : réserves de périmètre (4c) -------------------------
+
+
+def compter_dossiers_speciales(chemin_commandes_speciales) -> int:
+    """Nombre TOTAL de dossiers dans Commandes spéciales (tout statut
+    confondu, pas seulement les non-facturés du volet b) — rappel de
+    l'ampleur réelle de ce classeur peu alimenté (voir ReservesFNP).
+    0 si le classeur/la feuille est introuvable (jamais bloquant)."""
+
+    chemin = Path(chemin_commandes_speciales)
+    if not chemin.exists():
+        return 0
+
+    with _copie_temporaire(chemin) as tmp:
+        wb = load_workbook(tmp, read_only=True, data_only=True, keep_vba=False)
+        try:
+            if FEUILLE_SPECIALES not in wb.sheetnames:
+                return 0
+            ws = wb[FEUILLE_SPECIALES]
+            lignes = ws.iter_rows(values_only=True)
+            next(lignes, None)  # en-têtes
+            return sum(1 for row in lignes if any(v not in (None, "") for v in row))
+        finally:
+            wb.close()
+
+
+def calculer_rapport_fnp(dossier_projet, mois: str, depuis: date | None = None,
+                          appliquer_exclusion: bool = True) -> RapportFNP:
     """Lecture seule, calcule le RapportFNP sans rien écrire — séparé de
     generer_etat_fnp() pour que le GUI (voir gui_fnp.py) puisse afficher un
     résumé à l'écran à partir des mêmes données que celles écrites dans le
-    classeur, sans avoir à rouvrir le fichier généré pour les relire."""
+    classeur, sans avoir à rouvrir le fichier généré pour les relire.
+
+    `appliquer_exclusion=False` (option --sans-exclusion, voir fnp.py CLI) :
+    désactive l'étape 4a (exclusion "facture reçue non rapprochée") — repli
+    prévu si a_traiter/Factures/ est trop volumineux/lent à scanner (OCR) ;
+    les étapes 4b/4c restent actives dans les deux cas."""
 
     dossier_projet = Path(dossier_projet)
     fin_de_mois = dernier_jour_mois(mois)
@@ -511,6 +753,30 @@ def calculer_rapport_fnp(dossier_projet, mois: str, depuis: date | None = None) 
         if not repli_utilise else []
     )
 
+    # --- 4a : exclusion "facture reçue non rapprochée" ---------------------
+    factures_recues = []
+    n_bdc_manuel_24x = 0
+    if appliquer_exclusion:
+        lignes_excel_facturees, n_bdc_manuel_24x = _identifier_lignes_excel_facturees(
+            dossier_projet, fin_de_mois,
+        )
+        lignes_valorisees, lignes_sans_prix, factures_recues = _appliquer_exclusion_factures_recues(
+            lignes_valorisees, lignes_sans_prix, lignes_excel_facturees,
+        )
+
+    # --- 4b : ajustements déclarés par l'acheteur ---------------------------
+    dossier_referentiel = dossier_projet / DOSSIER_REFERENTIEL
+    chemin_ajustements = dossier_referentiel / nom_fichier_ajustements(mois)
+    ajustements = lire_ajustements_fnp(chemin_ajustements)
+
+    # --- 4c : réserves de périmètre -----------------------------------------
+    n_transit_sans_estimation = sum(1 for d in dossiers if d.cout_estime is None) if not repli_utilise else len(dossiers)
+    reserves = ReservesFNP(
+        n_bdc_manuel_24x=n_bdc_manuel_24x,
+        n_transitaires_sans_estimation=n_transit_sans_estimation,
+        n_dossiers_speciales_total=compter_dossiers_speciales(chemin_speciales),
+    )
+
     return RapportFNP(
         mois=mois, fin_de_mois=fin_de_mois, date_generation=datetime.now(),
         chemin_suivi=chemin_suivi, suivi_modifie_le=suivi_modifie_le, depuis=depuis,
@@ -519,17 +785,22 @@ def calculer_rapport_fnp(dossier_projet, mois: str, depuis: date | None = None) 
         chemin_commandes_speciales=chemin_speciales if chemin_speciales.exists() else None,
         transitaire_repli_utilise=repli_utilise, transitaire_avertissement=avertissement,
         commandes_transitaire_non_couvertes=non_couvertes,
+        exclusion_appliquee=appliquer_exclusion,
+        factures_recues_non_rapprochees=factures_recues,
+        ajustements=ajustements, chemin_ajustements=chemin_ajustements if chemin_ajustements.exists() else None,
+        reserves=reserves,
     )
 
 
-def generer_etat_fnp(dossier_projet, mois: str, depuis: date | None = None) -> Path:
+def generer_etat_fnp(dossier_projet, mois: str, depuis: date | None = None,
+                      appliquer_exclusion: bool = True) -> Path:
     """Point d'entrée : orchestration complète, écrit
     rapports/FNP_<mois>.xlsx et retourne son chemin. LECTURE SEULE partout —
     ce module n'écrit jamais dans un classeur vivant (Suivi commandes ou
     Commandes spéciales)."""
 
     dossier_projet = Path(dossier_projet)
-    rapport = calculer_rapport_fnp(dossier_projet, mois, depuis)
+    rapport = calculer_rapport_fnp(dossier_projet, mois, depuis, appliquer_exclusion)
     return ecrire_classeur_fnp(dossier_projet, rapport)
 
 
@@ -700,6 +971,60 @@ def ecrire_classeur_fnp(dossier_projet: Path, rapport: RapportFNP) -> Path:
             ws.cell(ligne, 4, chantier)
             ligne += 1
         _entete(ws, debut)
+    ligne += 2
+
+    # --- v1.1 (session S0) : factures reçues non rapprochées (4a) ----------
+    ws.cell(ligne, 1, "FACTURES REÇUES EN COURS DE RAPPROCHEMENT (hors volet a)").font = Font(bold=True, size=12)
+    ligne += 1
+    if not rapport.exclusion_appliquee:
+        ws.cell(ligne, 1, "⚠ Exclusion désactivée (--sans-exclusion) — ces lignes restent comptées dans le volet (a) ci-dessus.").fill = JAUNE
+        ligne += 1
+    else:
+        total_recues = sum(f.montant_facture_bl for f in rapport.factures_recues_non_rapprochees)
+        ws.cell(ligne, 1, "Une vraie facture PDF a été trouvée dans a_traiter/Factures/ pour ces lignes (datée au plus tard fin de mois) mais n'a pas encore été écrite dans le Suivi — ce ne sont PLUS des factures non parvenues, juste pas encore rapprochées dans l'outil. Sorties du total du volet (a) ci-dessus.")
+        ligne += 1
+        ws.cell(ligne, 1, "Nombre de lignes :")
+        ws.cell(ligne, 2, len(rapport.factures_recues_non_rapprochees))
+        ligne += 1
+        ws.cell(ligne, 1, "Montant HT (Facturé BL) :").font = Font(bold=True)
+        c = ws.cell(ligne, 2, round(total_recues, 2)); _euros(c)
+        ws.cell(ligne, 3, "voir onglet « Factures reçues »")
+        ligne += 1
+    ligne += 1
+
+    # --- v1.1 (session S0) : ajustements déclarés par l'acheteur (4b) ------
+    ws.cell(ligne, 1, "DÉCLARÉ PAR L'ACHETEUR (hors outil)").font = Font(bold=True, size=12)
+    ligne += 1
+    if rapport.chemin_ajustements is None:
+        ws.cell(ligne, 1, f"Aucun fichier « {nom_fichier_ajustements(rapport.mois)} » trouvé dans referentiel/ — rien de déclaré ce mois-ci.")
+        ligne += 1
+    else:
+        total_ajustements = sum(a.montant_ht for a in rapport.ajustements)
+        ws.cell(ligne, 1, f"Source : referentiel/{nom_fichier_ajustements(rapport.mois)} — jamais fusionné avec les calculs des volets (a)/(b) ci-dessus.")
+        ligne += 1
+        ws.cell(ligne, 1, "Nombre de lignes déclarées :")
+        ws.cell(ligne, 2, len(rapport.ajustements))
+        ligne += 1
+        ws.cell(ligne, 1, "Montant HT déclaré :").font = Font(bold=True)
+        c = ws.cell(ligne, 2, round(total_ajustements, 2)); _euros(c)
+        ws.cell(ligne, 3, "voir onglet « Déclaré (hors outil) »")
+        ligne += 1
+    ligne += 1
+
+    # --- v1.1 (session S0) : réserves de périmètre (4c) ---------------------
+    ws.cell(ligne, 1, "RÉSERVES DE PÉRIMÈTRE").font = Font(bold=True, size=12)
+    ligne += 1
+    r = rapport.reserves
+    if r is not None:
+        ws.cell(ligne, 1, f"{r.n_bdc_manuel_24x} facture(s) avec au moins une ligne sur bon manuel (\"BC/BCN 24XXXX\", carnet papier) — matériel livré, commande absente du Suivi, hors périmètre de ce calcul.")
+        ligne += 1
+        ws.cell(ligne, 1, f"{r.n_transitaires_sans_estimation} dossier(s) transitaire non facturé(s) sans estimation de coût disponible (déjà compté dans le volet (b) ci-dessus).")
+        ligne += 1
+        ws.cell(ligne, 1, "0 ligne(s) migrée(s) sans pièce jointe (fonctionnalité « Pièces » pas encore implémentée dans ce projet).")
+        ligne += 1
+        ws.cell(ligne, 1, f"Le volet (b) ne couvre QUE les {r.n_dossiers_speciales_total} dossier(s) réellement saisi(s) à la main dans Commandes spéciales — un dossier réel non saisi n'apparaît nulle part dans cet état.")
+        ligne += 1
+    ligne += 1
 
     _largeurs(ws, maxi=60)
     for col in ("A",):
@@ -793,6 +1118,43 @@ def ecrire_classeur_fnp(dossier_projet: Path, rapport: RapportFNP) -> Path:
                 _date_fmt(row[0])
     _entete(ws3)
     _largeurs(ws3, maxi=45)
+
+    # --- v1.1 (session S0) : Factures reçues en cours de rapprochement (4a) -
+    if rapport.exclusion_appliquee:
+        ws4 = wb.create_sheet("Factures reçues")
+        ws4.append([
+            "Fournisseur", "N° de commande", "Référence", "N° facture",
+            "Date facture", "Montant HT (Facturé BL)",
+        ])
+        for f in sorted(rapport.factures_recues_non_rapprochees, key=lambda f: (f.fournisseur, -f.montant_facture_bl)):
+            ws4.append([
+                f.fournisseur, f.numero_commande, f.reference, f.numero_facture,
+                f.date_facture, round(f.montant_facture_bl, 2),
+            ])
+        for row in ws4.iter_rows(min_row=2, min_col=6, max_col=6):
+            _euros(row[0])
+        for row in ws4.iter_rows(min_row=2, min_col=5, max_col=5):
+            _date_fmt(row[0])
+        _entete(ws4)
+        _largeurs(ws4, maxi=45)
+
+    # --- v1.1 (session S0) : Déclaré par l'acheteur (hors outil) (4b) -------
+    ws5 = wb.create_sheet("Déclaré (hors outil)")
+    ws5.append([
+        "Type", "Libellé", "Fournisseur/Transitaire", "Chantier", "Pièce",
+        "Date de livraison", "Montant HT", "Source", "Commentaire",
+    ])
+    for a in rapport.ajustements:
+        ws5.append([
+            a.type, a.libelle, a.fournisseur_ou_transitaire, a.chantier, a.piece,
+            a.date_livraison, round(a.montant_ht, 2), a.source, a.commentaire,
+        ])
+    for row in ws5.iter_rows(min_row=2, min_col=7, max_col=7):
+        _euros(row[0])
+    for row in ws5.iter_rows(min_row=2, min_col=6, max_col=6):
+        _date_fmt(row[0])
+    _entete(ws5)
+    _largeurs(ws5, maxi=45)
 
     dossier_rapports = dossier_projet / DOSSIER_RAPPORTS
     dossier_rapports.mkdir(parents=True, exist_ok=True)

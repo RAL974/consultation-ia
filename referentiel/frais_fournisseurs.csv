@@ -1,0 +1,32 @@
+# Références connues qui NE SONT PAS de vrais articles (frais de port,
+# éco-taxe...) sur les FACTURES fournisseurs (Rapprochement AI, moteur/
+# rapprochement/matching_facture.py) — session S0, correction 1c : "il faut
+# une base des frais, ce genre de ligne va se présenter souvent, jamais un
+# vrai article à rattacher au Suivi."
+#
+# Une référence listée ici est retirée du rapprochement AVANT toute
+# comparaison au Suivi : jamais "inconnue", jamais bloquante, simplement
+# reportée avec son montant dans le rapport (bac "frais" dédié).
+#
+# Une référence ABSENTE de ce fichier suit le comportement NORMAL, quel
+# que soit son montant — jamais de seuil "petit montant = ignoré" inventé
+# (décision explicite de cadrage).
+#
+# PAS d'entrée "109 DISTRIBUTION" ici (volontaire, règle d'or du projet) :
+# chez ce fournisseur, l'éco-part est une COLONNE supplémentaire au sein
+# d'une ligne d'article normale (voir moteur.fournisseurs.dist109,
+# _bloc_ligne_facture, "avec_ecopart") — jamais une ligne séparée avec sa
+# propre référence, contrairement à Coredime ("ECO-23"). Rien à ajouter
+# ici tant qu'aucune facture réelle 109 ne montre un frais sous forme de
+# ligne à part.
+#
+# Format (séparateur ; comme les autres fichiers du projet) :
+#   Fournisseur;Reference;Libelle
+#     Fournisseur   nom EXACT tel qu'utilisé par LigneFacture.fournisseur
+#                   (avant tout MAPPING_FOURNISSEURS, ex. "COREDIME")
+#     Reference     référence exacte imprimée sur la facture (comparaison
+#                   insensible à la casse)
+#     Libelle       libre, repris tel quel dans le rapport
+Fournisseur;Reference;Libelle
+COREDIME;ECO-23;Éco-participation (voir moteur.fournisseurs.coredime, MOTIF_LIGNE_ECOTAXE_COREDIME)
+COREDIME;9993;Livraison avion (frais de transport, voir tests/test_parsers_facture_coredime.py test 7)

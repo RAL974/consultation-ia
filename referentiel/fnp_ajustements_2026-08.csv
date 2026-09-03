@@ -1,0 +1,26 @@
+# Ajustements DÉCLARÉS À LA MAIN par l'acheteur pour l'état FNP d'août 2026
+# (Rapprochement AI, moteur/fnp.py) — session S0, étape 4b : un cas connu que
+# le calcul automatique ne peut PAS couvrir structurellement (bon manuel,
+# dossier transitaire hors Commandes spéciales, autre régularisation).
+#
+# JAMAIS fusionné avec les totaux calculés des volets (a)/(b) — reporté à
+# part dans l'onglet "Déclaré (hors outil)" du classeur FNP, avec son propre
+# total dans la Synthèse. Aucune ligne ici = rien à déclarer ce mois-ci
+# (comportement normal, pas une erreur).
+#
+# Format (séparateur ; comme les autres fichiers du projet) :
+#   type;libelle;fournisseur_ou_transitaire;chantier;piece;date_livraison;montant_ht;source;commentaire
+#     type                     BDC_MANUEL (matériel livré sur bon manuel,
+#                              hors Suivi) / TRANSIT (dossier transitaire
+#                              connu mais absent de Commandes spéciales) /
+#                              AUTRE
+#     libelle                 description courte de l'article/du dossier
+#     fournisseur_ou_transitaire   nom du fournisseur ou du transitaire concerné
+#     chantier                 chantier concerné, si connu
+#     piece                    n° de BdC papier / n° de dossier transitaire
+#     date_livraison           JJ/MM/AAAA
+#     montant_ht                montant HT concerné
+#     source                   d'où vient l'info (ex. "carnet papier",
+#                              "mail du 12/08")
+#     commentaire              libre
+type;libelle;fournisseur_ou_transitaire;chantier;piece;date_livraison;montant_ht;source;commentaire

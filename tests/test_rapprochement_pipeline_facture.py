@@ -24,7 +24,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from moteur.rapprochement.ecriture import ENTETES_FACTURE, ColonneNonModifiable, appliquer, lire_entetes
-from moteur.rapprochement.matching_facture import CorrespondanceFacture, LigneSuiviFacture, StatutFacture
+from moteur.rapprochement.matching_facture import CauseFacture, CorrespondanceFacture, LigneSuiviFacture, StatutFacture
 from moteur.rapprochement.modele_facture import Facture, LigneFacture
 from moteur.rapprochement import pipeline_facture
 from moteur.rapprochement.pipeline_bl import trouver_fichier_suivi_vivant
@@ -32,8 +32,10 @@ from moteur.rapprochement.pipeline_facture import (
     RapportRapprochementFacture,
     _est_resolu_facture,
     _resoudre_commandes_facture,
+    _verifier_total_ht_facture,
     appliquer_et_archiver_factures,
     archiver_facture,
+    classifier_cause_anomalie,
     compter_lignes_a_facturer,
     ecritures_pour_facture,
     regrouper_par_facture,
@@ -116,6 +118,34 @@ def test_regrouper_par_facture_separe_les_statuts():
     assert set(groupes) == {id(f1), id(f2)}
     assert groupes[id(f1)]["sur"] == [c_sur]
     assert groupes[id(f2)]["inconnu"] == [c_inconnu]
+
+
+def test_regrouper_par_facture_range_le_bucket_frais_a_part():
+    f = _facture("f1.pdf")
+    c_frais = CorrespondanceFacture(
+        _ligne_facture(reference_fournisseur="ECO-23"), None, StatutFacture.FRAIS,
+        ["Frais connu"], CauseFacture.FRAIS,
+    )
+    rapport = RapportRapprochementFacture(frais=[(f, c_frais)])
+
+    groupes = regrouper_par_facture(rapport)
+
+    assert groupes[id(f)]["frais"] == [c_frais]
+
+
+def test_est_resolu_facture_le_bucket_frais_nest_jamais_bloquant():
+    """Une ligne "frais" (jamais rapprochée, voir charger_frais_fournisseurs)
+    ne doit ni bloquer ni être requise pour considérer la facture résolue —
+    ni au numérateur ni au dénominateur de _est_resolu_facture."""
+
+    c_sur = CorrespondanceFacture(_ligne_facture(), _ligne_suivi_facture(5), StatutFacture.SUR)
+    c_frais = CorrespondanceFacture(
+        _ligne_facture(reference_fournisseur="ECO-23"), None, StatutFacture.FRAIS,
+        ["Frais connu"], CauseFacture.FRAIS,
+    )
+    g = {"sur": [c_sur], "a_confirmer": [], "deja_a_jour": [], "inconnu": [], "frais": [c_frais], "anomalies": []}
+
+    assert _est_resolu_facture(g, {id(c_sur)}) is True
 
 
 def test_est_resolu_facture_toutes_resolues():
@@ -251,6 +281,70 @@ def test_ecritures_pour_facture_najoute_pas_tarif_bl_hors_liste_blanche():
 
     assert not any(e.colonne == "Tarif BL" for e in ecritures)
     assert tarif_bl_ecrit == []
+
+
+# --- réconciliation Total HT (session S0, correction 1e/TOTAL_ECART) ------
+
+
+def test_verifier_total_ht_facture_aucun_ecart_rien_a_signaler():
+    lf = _ligne_facture(quantite_facturee=10.0, prix_unitaire_ht=5.0, montant_ht=50.0)
+    f = _facture("f1.pdf", lignes=[lf])
+    f.total_ht_affiche = 50.0
+
+    assert _verifier_total_ht_facture(f) is None
+
+
+def test_verifier_total_ht_facture_total_absent_rien_a_signaler():
+    f = _facture("f1.pdf", lignes=[_ligne_facture()])
+    f.total_ht_affiche = None
+
+    assert _verifier_total_ht_facture(f) is None
+
+
+def test_verifier_total_ht_facture_zero_ligne_signale_le_montant_manquant():
+    """Cas réel qui a motivé ce contrôle (session S0,
+    facture_coredime_6108846_remise_double_x3.pdf) : 0 ligne extraite pour
+    un Total HT affiché non nul — sans ce contrôle, rien ne signalait les
+    196,92€ manquants, la facture pouvait être archivée en silence."""
+
+    f = _facture("f1.pdf", lignes=[])
+    f.total_ht_affiche = 196.92
+
+    raison = _verifier_total_ht_facture(f)
+
+    assert raison is not None
+    assert "196.92" in raison
+    assert "0.00" in raison
+
+
+def test_verifier_total_ht_facture_petit_ecart_sous_le_seuil_tolere():
+    lf = _ligne_facture(quantite_facturee=1.0, prix_unitaire_ht=10.0, montant_ht=10.0)
+    f = _facture("f1.pdf", lignes=[lf])
+    f.total_ht_affiche = 10.01  # 1 centime, sous SEUIL_TOTAL_ECART_FACTURE
+
+    assert _verifier_total_ht_facture(f) is None
+
+
+# --- classification des causes (session S0, correction 1e) -----------------
+
+
+def test_classifier_cause_anomalie_reconnait_les_motifs_deja_en_clair():
+    assert classifier_cause_anomalie("Facture d'AVOIR — jamais rapprochée automatiquement") is CauseFacture.AVOIR
+    assert classifier_cause_anomalie(
+        "BL 123 : commande passée sur un bon manuel (« BC 241766 »)"
+    ) is CauseFacture.BDC_MANUEL_24X
+    assert classifier_cause_anomalie("Écart de Total HT : +5.00€ (...)") is CauseFacture.TOTAL_ECART
+    assert classifier_cause_anomalie("Commande 123.089 introuvable dans le Suivi pour « X »") is CauseFacture.COMMANDE_ABSENTE
+    assert classifier_cause_anomalie("BL 1 : n° de commande introuvable (...)") is CauseFacture.COMMANDE_ABSENTE
+    assert classifier_cause_anomalie("Fournisseur non reconnu") is CauseFacture.FOURNISSEUR_INCONNU
+    assert classifier_cause_anomalie("Fournisseur RAVATE reconnu mais pas encore de parser facture") is CauseFacture.PARSER_ABSENT
+    assert classifier_cause_anomalie("Aucune ligne extraite (facture 123)") is CauseFacture.ZERO_LIGNE
+    assert classifier_cause_anomalie("PDF illisible (corrompu)") is CauseFacture.ANNEXE_SANS_TEXTE
+    assert classifier_cause_anomalie("Erreur de lecture (X)") is CauseFacture.ANNEXE_SANS_TEXTE
+
+
+def test_classifier_cause_anomalie_aucun_motif_reconnu_retourne_none():
+    assert classifier_cause_anomalie("Suivi commandes introuvable") is None
 
 
 # --- résolution de commande par bloc de BL ----------------------------------
@@ -450,6 +544,46 @@ def test_appliquer_et_archiver_factures_ecrit_et_archive(tmp_path):
     assert resume["resorption"]["109 DISTRIBUTION"] is not None
     assert resume["tarif_bl_ecrit_depuis_facture"] == []  # 109 DISTRIBUTION hors liste blanche (voir bandeau)
     assert resume["chemin_rapport"].exists()
+
+
+def test_appliquer_et_archiver_factures_rapporte_frais_et_causes(tmp_path):
+    """Le rapport écrit (resume["causes"] + le fichier texte) reflète les
+    lignes "frais" (jamais écrites, jamais bloquantes) et un compte rendu
+    chiffré par cause (session S0, corrections 1c/1e) — "Pas de résiduel
+    unique" : une ligne à confirmer non résolue doit apparaître dans
+    resume["causes"], jamais silencieusement absente."""
+
+    chemin_suivi = tmp_path / "suivi.xlsx"
+    _classeur_avec_colonnes_facture(chemin_suivi)
+
+    dossier_a_traiter = tmp_path / "a_traiter" / "Factures"
+    dossier_a_traiter.mkdir(parents=True)
+    (dossier_a_traiter / "f1.pdf").write_bytes(b"1")
+
+    f = _facture("f1.pdf")
+    c_frais = CorrespondanceFacture(
+        _ligne_facture(reference_fournisseur="ECO-23", montant_ht=0.8), None, StatutFacture.FRAIS,
+        ["Frais connu (Éco-participation)"], CauseFacture.FRAIS,
+    )
+    c_confirmer = CorrespondanceFacture(
+        _ligne_facture(reference_fournisseur="REFX"), _ligne_suivi_facture(5), StatutFacture.A_CONFIRMER,
+        ["Qté facturée différente"], CauseFacture.QTE_PARTIELLE,
+    )
+
+    rapport = RapportRapprochementFacture(
+        frais=[(f, c_frais)], a_confirmer=[(f, c_confirmer)], fichier_suivi=chemin_suivi,
+    )
+
+    resume = appliquer_et_archiver_factures(tmp_path, dossier_a_traiter, rapport, [])
+
+    assert resume["causes"] == {"frais": 1, "qte_partielle": 1}
+
+    texte_rapport = resume["chemin_rapport"].read_text(encoding="utf-8")
+    assert "1 ligne(s) de frais connus" in texte_rapport
+    assert "0.80" in texte_rapport
+    assert "Répartition par cause" in texte_rapport
+    assert "frais : 1" in texte_rapport
+    assert "qte_partielle : 1" in texte_rapport
 
 
 def test_appliquer_et_archiver_factures_bloc_non_resolu_va_en_a_verifier(tmp_path):

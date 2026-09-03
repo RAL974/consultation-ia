@@ -553,6 +553,7 @@ def parse_facture_109(texte: str) -> Facture:
     ref_client = _ref_client_facture(lignes)
     m_commande = MOTIF_COMMANDE_FACTURE.match(ref_client)
     numeros_commande = [m_commande.group(1).upper().replace("-", ".")] if m_commande else []
+    numeros_commande_bruts = [ref_client] if ref_client else []
 
     total_ht_affiche = None
     m_total = MOTIF_TOTAL_HT_FACTURE.search(texte)
@@ -590,6 +591,7 @@ def parse_facture_109(texte: str) -> Facture:
         date_facture=date_facture,
         date_echeance=date_echeance,
         numeros_commande=numeros_commande,
+        numeros_commande_bruts=numeros_commande_bruts,
         numeros_bl=numeros_bl,
         lignes=toutes_lignes,
         total_ht_affiche=total_ht_affiche,

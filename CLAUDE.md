@@ -4507,6 +4507,217 @@ grand-chose d'actionnable dessus tant que le Suivi ne couvre pas les
 années antérieures) ; EDOI toujours sans parser ; extension Hermes et
 FNP d'août toujours en attente.
 
+## Rapprochement factures — session S0 (2026-09-03) : matching v1.1
+(agrégation multi-BL, frais connus, causes codées) + INCIDENT Suivi majeur
+
+Session pilotée par un plan écrit à l'avance par l'acheteur (règles 0.4,
+"un seul plan, exécuté dans l'ordre"). Étapes 0-3 : 5 corrections dans
+`moteur/rapprochement/matching_facture.py`/`pipeline_facture.py`, un lot
+ciblé de factures réécrites, puis un INCIDENT sérieux sur le Suivi vivant
+en plein milieu — traité en détail plus bas, à lire avant toute session
+future qui toucherait à l'écriture facture.
+
+**Étape 0 — 8 fixtures créées, 1 correction de trajectoire mineure** : le
+plan indiquait `a_traiter/Factures/S0/` comme emplacement des 8 PDF réels à
+transformer en fixtures — ce dossier n'existait pas, les 8 factures
+étaient en réalité déjà dans `a_traiter/Factures/À vérifier/` sous leurs
+noms d'origine (retrouvées avec certitude par les numéros de facture déjà
+donnés dans les noms de fixtures cibles, aucune ambiguïté) — copiées
+(jamais déplacées) vers `tests/fixtures/` :
+`facture_109_362840_multi_bl_meme_ref.pdf`, `facture_109_362763_partielle.pdf`,
+`facture_109_362777_bdc_manuel.pdf`, `facture_coredime_6108234_suffixe.pdf`,
+`facture_coredime_6107800_ecotaxe.pdf`, `facture_coredime_6100226_bdc_manuel.pdf`,
+`facture_coredime_6108846_remise_double_x3.pdf`, `facture_stand64_33330_scan.pdf`
+(cette dernière hors périmètre de cette session — voir "Pas de Stand 64" du
+plan — c'est le 4e fichier "FA \<numéro\>.pdf" scanné déjà identifié comme
+Stand 64 sans `parse_facture_ocr`, simplement mis en réserve).
+
+**Étape 1 — 5 corrections, toutes vérifiées sur PDF réels** :
+
+- **(a) Agrégation multi-BL même référence** (`moteur.rapprochement.
+  matching_facture.agreger_lignes_meme_reference`, nouvelle fonction) : cas
+  réel Facture_362840.pdf (109, commande 123.089) — P03200 et F2U15RVVOO
+  sont chacun répartis sur 2 "Bon de livraison" DIFFÉRENTS de la MÊME
+  facture (livraison fractionnée). Avant ce correctif, `pipeline_facture.
+  rapprocher_dossier_factures` groupait les lignes PAR BL BRUT (pas par
+  commande résolue) avant d'appeler `apparier_facture` — chaque bloc,
+  comparé isolément à la Qté livrée TOTALE du Suivi, ressortait "à
+  confirmer" à tort (100 facturés sur ce bloc vs 200 déjà livrés en tout).
+  Deux correctifs liés : `agreger_lignes_meme_reference()` (interne à
+  `apparier_facture`, somme les quantités/montants des lignes qui
+  partagent la même référence normalisée, PU identique exigé — sinon
+  aucune agrégation, chaque ligne reste séparée et ressort "à confirmer",
+  cause=PRIX_DIFF_MEME_REF, jamais un prix deviné) ET le regroupement dans
+  `rapprocher_dossier_factures` changé de "par BL brut" à "par commande
+  RÉSOLUE" (plusieurs BL d'une même facture qui pointent vers la même
+  commande sont désormais fusionnés avant l'appel à `apparier_facture`).
+  Validé de bout en bout sur la vraie pièce : 11 lignes brutes → 9
+  correspondances (agrégation réussie = MOINS de lignes, jamais autant),
+  toutes sûres.
+- **(b) Repli "premier token" — référence Suivi à suffixe libre**
+  (`_repli_premier_token`, nouveau, entre le repli référence-proche et le
+  repli référentiel dans `apparier_facture`) : cas réel
+  Facture_6108234.pdf (Coredime, commande M3.14.342) — Suivi
+  `"SIXGPCP35 PVC"` (texte descriptif ajouté à la saisie) vs facture
+  `"SIXGPCP35"` — comparaison sur le premier terme (avant le 1er espace)
+  du Suivi, UN SEUL candidat exigé, toujours "à confirmer".
+- **(c) Frais connus, jamais bloquants** (`referentiel/frais_fournisseurs.csv`,
+  nouveau fichier + `charger_frais_fournisseurs()`/nouveau `StatutFacture.
+  FRAIS` dans `apparier_facture`) : 2 entrées réelles évidencées —
+  `COREDIME;ECO-23` (voir correctif d), `COREDIME;9993` (LIVRAISON AVION,
+  déjà documenté session F4). **PAS d'entrée 109 DISTRIBUTION** :
+  volontaire, son éco-part est une colonne supplémentaire au sein d'une
+  ligne normale (`moteur.fournisseurs.dist109._bloc_ligne_facture`), jamais
+  une ligne séparée — rien à ajouter tant qu'aucune facture réelle ne
+  montre un frais 109 sous forme de ligne à part. Une référence ABSENTE du
+  fichier suit le comportement normal quel que soit son montant (jamais de
+  seuil "petit montant = ignoré" inventé, décision explicite de cadrage).
+  Validé sur données réelles au moment de l'écriture (voir plus bas) : 5
+  vraies lignes ECO-23 correctement isolées, jamais bloquantes.
+- **(d) BUG RÉEL CORRIGÉ — Coredime, montant éco-taxe faux (0€ au lieu du
+  vrai montant)** (`MOTIF_LIGNE_ECOTAXE_COREDIME`, nouveau, dans
+  `moteur/fournisseurs/coredime.py`) : ligne réelle
+  `" ECO-23    ECOTAXE    *** 10   UN   0,08   0,08   0,80 1"` — DEUX prix
+  consécutifs (brut et net, toujours identiques sur les 2 pièces vues,
+  jamais de remise observée sur une éco-taxe) là où une ligne normale n'en
+  affiche qu'UN SEUL. `MOTIF_LIGNE_FACTURE_COREDIME` matchait quand même
+  (la désignation non-greedy absorbe le `"***"`) mais son groupe montant
+  (`[\d\s,]+?`, tolère des espaces internes) fusionnait les deux derniers
+  nombres ("0,08       0,80") en une chaîne que `_f()` ne convertit pas
+  correctement → montant=0,0 au lieu de 0,80. **Silencieux** : le
+  garde-fou qté×prix vs montant (`abs(0 - 0.8) > max(0.05*0, 1.0)` =
+  `0.8 > 1.0` = Faux) ne se déclenche pas sur un si petit écart absolu.
+  Repère fiable, jamais vu sur un article normal : le `"***"` imprimé à la
+  place d'une vraie quantité de vente précède TOUJOURS cette structure à 2
+  prix. Traité en amont du passage normal (les lignes éco-taxe sont
+  isolées et retirées du texte soumis à `MOTIF_LIGNE_FACTURE_COREDIME`
+  AVANT qu'il ne s'exécute — jamais une double extraction). Validé sur les
+  2 pièces réelles : 6107800.pdf (0,80€, total 55,80€ exact) et
+  6100226.pdf (0,40€, total 37,81€ exact) — les DEUX reconciliaient
+  exactement leur Total HT après ce correctif, alors qu'AVANT ils
+  montraient un écart (55,00€/37,41€ extraits).
+- **(e) Cause codée par ligne/anomalie** (`CauseFacture`, nouvel enum à 15
+  valeurs dans `matching_facture.py` ; `classifier_cause_anomalie()` dans
+  `pipeline_facture.py`) : assignée DIRECTEMENT pour tout ce qui transite
+  par une `CorrespondanceFacture` (FRAIS, QTE_PARTIELLE/QTE_SUPERIEURE,
+  DOUBLON_FACTURE, CLE_PARTIELLE, REF_INCONNUE, PRIX_DIFF_MEME_REF) ;
+  dérivée en BEST-EFFORT du texte des anomalies "fichier entier"
+  (anomalies_lecture/anomalies_facture, restées des 2-tuples EXPRÈS —
+  les changer de forme aurait cassé `gui_rapprochement_facture.py`, qui
+  fait `for facture, raison in rapport.anomalies_facture`). Compteur par
+  cause ajouté en fin de rapport texte (`appliquer_et_archiver_factures`).
+  **`MOTIF_BDC_MANUEL_24X`** (`est_bdc_manuel_24x()`) : détecte un bon
+  manuel "BC/BCN 24XXXX" (carnet papier) à partir d'un nouveau champ
+  `Facture.numeros_commande_bruts` (candidat N°Réf.Client/Réf.: BRUT,
+  renseigné même quand le parser ne peut PAS le convertir en commande
+  exploitable — nouveau côté 109 ET Coredime, ce dernier via
+  `_ref_brute_coredime()`) — confirmé sur 3 cas réels : "BC 241766"
+  (362777.pdf), "BC 241659" (fixture déjà existante), "BCN 241461"
+  (6100226.pdf, label "Réf.:" chez Coredime).
+  **BUG RÉEL ÉVITÉ (trouvé en construisant ce correctif, potentiellement
+  grave) — `_verifier_total_ht_facture()`** (nouveau, `pipeline_facture.py`) :
+  une facture dont AUCUNE ligne n'est extraite (donc rien "d'inconnu" non
+  plus) pouvait être considérée "entièrement résolue" par `_est_resolu_facture`
+  (0 sur 0 lignes à traiter) et ARCHIVÉE EN SILENCE, perdant toute trace du
+  montant manquant — cas réel qui l'a révélé :
+  `facture_coredime_6108846_remise_double_x3.pdf`, 0 ligne extraite pour un
+  Total HT affiché de 196,92€ (limite déjà connue et acceptée du garde-fou
+  remise-double, voir "Points fragiles"). Réconciliation Total HT (même
+  seuil 0,02€ que le contrôle console déjà existant côté parser) désormais
+  SURFACÉE dans `anomalies_facture` (cause TOTAL_ECART) — ce qui empêche
+  l'archivage automatique tant que l'écart n'a pas été vérifié à la main.
+
+**Suite verrouillée par pytest** : 405 passés (372 avant cette session, +33
+nouveaux tests couvrant les 5 corrections, dont plusieurs sur les VRAIES
+pièces ci-dessus).
+
+**Étape 2 — périmètre du lot RÉDUIT à la demande de l'acheteur, après un
+écart chiffré important avec le plan** : le plan attendait 63 factures
+Coredime et 114 Cominter (+109 Mayotte) "à vérifier" à remonter à la
+racine ; le décompte réel (lecture seule, `rapprocher_dossier_factures`
+pointé directement sur `À vérifier/`) donnait 289 Coredime et 40+17
+Cominter/Mayotte. Écart expliqué par 234 blocs `commande_absente`
+(commandes pré-2026, hors périmètre du Suivi, déjà documenté comme non
+résoluble — voir session Coredime H1 2026 ci-dessus) — le plan comptait
+vraisemblablement un sous-ensemble "réellement actionnable" déjà filtré
+par l'acheteur, pas le total brut du dossier. Face à cet écart, l'acheteur
+a choisi (question posée explicitement) de ne remonter QUE les **11
+fichiers ayant gagné au moins une ligne sûre** grâce aux corrections du
+jour (2 × 109, 6 × Coredime, 3 × Cominter) plutôt que les 379 fichiers des
+3 fournisseurs au total — évite de rescanner ~370 fichiers structurellement
+non résolubles aujourd'hui.
+
+**Étape 3 — écriture réelle, PUIS incident majeur, PUIS ré-écriture
+complète vérifiée** :
+
+- 1re écriture (13h35) : 14 lignes sûres écrites (109×5, COREDIME×6,
+  COMINTER×3 sur les 11 fichiers), 4 factures archivées avec leur BC
+  (`6100806.pdf`→M3.18.171, `6109361.pdf`→M3.23.043, `Facture_362840.pdf`
+  →123.089, `Facture_362846.pdf`→133.022), 7 vers `À vérifier/` (cause
+  précisée : 2 QTE_PARTIELLE, 1 QTE_SUPERIEURE, 1 CLE_PARTIELLE, 3
+  REF_INCONNUE). Résorption : 109 -5, COREDIME -6, COMINTER -3.
+  Vérifiée par relecture directe de 4 cellules — correcte.
+
+**INCIDENT MAJEUR — le Suivi vivant "retourné à hier" (~13h49), toutes les
+écritures du jour perdues (les miennes ET une partie de celles de
+l'acheteur), cause non identifiée avec certitude.** Chronologie
+reconstituée : mon écriture de 13h35 vérifiée correcte immédiatement après
+(cellule par cellule) ; le fichier n'a plus bougé jusqu'à 13h49:41, où sa
+taille ET sa date de modification changent sans qu'aucune action de ma
+part ne l'explique (je n'avais plus rien écrit depuis 13h35) — une
+RELECTURE à ce moment-là montre les 14 lignes de N° facture redevenues
+vides. L'acheteur, en ouvrant le fichier peu après, le trouve "retourné à
+hier" (toutes les commandes du jour disparues, pas seulement mes 14
+lignes) — signature typique d'un fichier daté de la veille sauvegardé
+PAR-DESSUS le fichier du jour (même famille que l'incident de verrou déjà
+documenté en session précédente, mais ici SANS que le verrou Excel n'ait
+techniquement bloqué quoi que ce soit — cause exacte non identifiée : pas
+d'explication certaine trouvée cette fois, contrairement à l'incident
+précédent). **Heureusement, l'acheteur avait fait SA PROPRE sauvegarde
+manuelle à 12h20** (avant de me donner accès au fichier ce jour-là),
+confirmée par l'acheteur comme ne contenant AUCUNE perte de son propre
+travail. Le fichier vivant a été remplacé par cette sauvegarde ; le
+fichier "cassé" (retourné à hier) a été archivé dans
+`1.3.0.1. Commandes courantes\Archives\1.3.0.1. Suivi commandes - 2026 -
+020926.xlsx` (nom reflétant le contenu constaté, daté du 02/09).
+
+**Récupération faite en 2 temps, aucune donnée reperdue** :
+1. Les 4 factures déjà "archivées" (copiées dans `a_traiter/BL/Traités/
+   <commande>/`, l'écriture Suivi correspondante ayant disparu) ont été
+   relocalisées et remises à la racine de `a_traiter/Factures/` sous leur
+   nom d'origine — l'archivage de fichiers PDF est un système de fichiers
+   INDÉPENDANT du Suivi.xlsx, jamais affecté par cet incident, mais
+   laissé dans un état incohérent (PDF rangé comme "traité" alors que le
+   Suivi ne le reflétait plus) tant que non corrigé. Les 7 fichiers déjà
+   dans `À vérifier/` ont eux aussi été remontés à la racine (règle 8 du
+   plan, respectée strictement même en contexte de récupération d'urgence).
+2. Une fois l'acheteur ayant confirmé le Suivi refermé (reconfirmé
+   EXPLICITEMENT, jamais présumé sur la seule absence d'erreur de verrou
+   — voir [[feedback_suivi_verrou_ne_pas_se_fier_seul]]) et le verrou `~$`
+   effectivement absent, une lecture 100% FRAÎCHE (jamais les anciens
+   numéros de ligne réutilisés) a retrouvé EXACTEMENT le même résultat
+   qu'avant l'incident (14 sûres, mêmes lignes Excel, même détail) — la
+   sauvegarde 12h20 de l'acheteur contient donc les mêmes données de
+   commande sous-jacentes que la version sur laquelle j'avais travaillé
+   (logique : ces lignes n'avaient pas changé depuis avant midi). Réécrit
+   à 16h39, RE-vérifié cellule par cellule sur les 14 lignes (100%
+   correct), fichiers ré-archivés correctement. Nouvelle sauvegarde
+   automatique : `backups/1.3.0.1. Suivi commandes - 2026_20260903_163945.xlsx`.
+
+**Leçon retenue pour toute session future, à ajouter aux réflexes déjà
+en place** : même un fichier signalé "fermé" et sans verrou Excel actif
+peut être écrasé par un événement externe (ici, entre deux écritures,
+sans qu'aucune action de la session elle-même ne l'explique) — après
+TOUTE interruption significative (autre étape longue, changement de
+sujet, incident quelconque) avant de continuer à écrire dans le Suivi,
+TOUJOURS relire fraîchement ET reconfirmer explicitement avec l'acheteur
+que rien n'a changé entre-temps, jamais supposer qu'un état vérifié
+correct il y a une heure l'est toujours. Envisager, pour une session
+future, d'ajouter une vérification légère "le fichier a-t-il été modifié
+depuis ma dernière lecture ?" (comparaison de taille/date de modif) avant
+toute écriture — pas fait cette session (temps), mais aurait raccourci le
+délai de détection ici.
+
 ## État FNP mensuel (moteur/fnp.py) — clôture comptable
 
 Demande directe de la DAF (31/08/2026, direction en copie) : un état
@@ -4748,6 +4959,102 @@ le moment venu). Ne PAS créer/proposer de brouillon FNP réel avant que
 davantage de fournisseurs soient couverts côté factures — redemander
 explicitement à l'acheteur si ce seuil est atteint, ne jamais décider seul
 que "c'est bon".
+
+## État FNP — v1.1 (session S0, 2026-09-03) : exclusion, ajustements,
+réserves, 1er envoi réel du brouillon DAF
+
+Suite directe de la 1ère version (ci-dessus) — le seuil "davantage de
+fournisseurs couverts" est désormais atteint (109, Coredime, Cominter,
+Cominter Mayotte, Electric Plus tous couverts côté factures), l'acheteur a
+explicitement demandé cette session de construire 3 extensions SANS
+changer le périmètre déjà en place, puis de créer le brouillon réel.
+
+**4a — Exclusion "facture reçue non rapprochée"**
+(`_identifier_lignes_excel_facturees()`/`_appliquer_exclusion_factures_recues()`,
+nouveau `RapportFNP.factures_recues_non_rapprochees`) : scanne
+`a_traiter/Factures/` (racine ET `À vérifier/`, LECTURE SEULE via
+`rapprocher_dossier_factures` — même mécanisme déjà éprouvé, aucune
+modification) et retire du volet (a) toute ligne Suivi pour laquelle une
+VRAIE facture PDF existe déjà (datée ≤ fin de mois) mais n'a pas encore
+été rapprochée dans l'outil — ce ne sont PLUS des factures "non
+parvenues", juste pas encore traitées. Nouvel onglet "Factures reçues"
+dédié. Option `--sans-exclusion` (CLI `fnp.py`) / `appliquer_exclusion=
+False` (API) en repli si le scan est trop long — jamais utilisée cette
+session, 4a est restée "verte" toute la session.
+**Piège de perf évité avant même d'écrire le 1er test** : le test déjà
+existant `test_calculer_rapport_fnp_sur_le_vrai_suivi` appelait
+`calculer_rapport_fnp(ROOT, "2026-08")` sans préciser `appliquer_exclusion`
+— avec la 4a active par défaut, CE seul test aurait scanné le VRAI
+`a_traiter/Factures/` (des centaines de PDF réels, OCR compris) à CHAQUE
+lancement de la suite. Corrigé en passant `appliquer_exclusion=False`
+explicitement à ce test précis (son objet reste la vérification des
+en-têtes, pas la 4a) — sans ce correctif, `py -3 -m pytest` serait passé
+de ~20 min à ~40+ min à chaque lancement.
+
+**4b — Ajustements déclarés par l'acheteur**
+(`referentiel/fnp_ajustements_<mois>.csv`, nouveau, un fichier PAR MOIS ;
+`lire_ajustements_fnp()`, `AjustementFNP`) : colonnes type
+(BDC_MANUEL/TRANSIT/AUTRE) ; libelle ; fournisseur_ou_transitaire ;
+chantier ; piece ; date_livraison ; montant_ht ; source ; commentaire.
+JAMAIS fusionné avec les totaux calculés (a)/(b) — onglet "Déclaré (hors
+outil)" à part, son propre total dans la Synthèse. Template
+`referentiel/fnp_ajustements_2026-08.csv` créé (en-têtes seules) ;
+l'acheteur, sollicité explicitement, n'avait rien à déclarer pour l'instant
+— 0 ligne ce mois-ci (état normal, pas une erreur).
+
+**4c — Réserves de périmètre** (`ReservesFNP`, nouveau) : nombre de
+factures `BDC_MANUEL_24X` (matériel livré sur bon manuel, hors Suivi) —
+compté dans la MÊME passe que la 4a, jamais un 2e scan ; nombre de
+dossiers transitaires sans estimation de coût (déjà connu du volet b,
+répété ici) ; rappel textuel fixe "0 ligne migrée sans pièce" (fonctionnalité
+"Pièces" pas encore construite) ; nombre TOTAL de dossiers Commandes
+spéciales (`compter_dossiers_speciales()`, nouveau — tout statut confondu,
+pas seulement les non-facturés du volet b) pour rappeler l'ampleur réelle
+de ce classeur peu alimenté.
+
+**Suite verrouillée par pytest** : 422 passés (405 avant cette sous-session,
++17 nouveaux tests 4a/4b/4c + fnp_brouillon).
+
+**Corps du brouillon Outlook enrichi** (`moteur/fnp_brouillon.py`,
+`_corps_mail_fnp()`/`_euro_fr()` nouveaux) : la DAF doit pouvoir lire les
+totaux SANS ouvrir la pièce jointe — total volet (a), total ESTIMÉ volet
+(b), total déclaré hors outil (si non nul), nombre de factures reçues non
+rapprochées exclues (si non nul), réserves de périmètre en clair. Séparateur
+de milliers en espace INSÉCABLE (convention typographique française
+correcte). `creer_brouillon_fnp()` prend désormais le `RapportFNP` complet
+en paramètre (plus seulement `mois_en_lettres`) — signature changée,
+`gui_fnp.py` mis à jour en conséquence (seul appelant).
+
+**1re exécution réelle de bout en bout (2026-09-03, APRÈS l'incident Suivi
+et sa récupération complète — voir section précédente)** :
+
+| | Montant | Lignes |
+|---|---|---|
+| Volet (a) — BL non facturés | 943 753,55 € | 3507 (dont 28 sans prix) |
+| Factures reçues non rapprochées (exclues du a) | 42 274,71 € | 221 |
+| Volet (b) — Transitaires, coût estimé | 31 512,60 € | 2 dossiers |
+| Déclaré (hors outil) | 0,00 € | 0 |
+
+Réserves : 9 factures BDC_MANUEL_24X, 0 dossier transitaire sans
+estimation, 31 dossiers Commandes spéciales au total (cohérent avec le
+chiffre "31 dossiers" déjà cité au cadrage F1).
+
+**Baseline (avant cette session) → nouveau total volet (a) : 1 141 876,24 €
+→ 943 753,55 € = -198 122,69 € (-17,4 %).** Condition du plan remplie (le
+total devait baisser). Attribution partielle honnête, PAS de réconciliation
+forcée (règle du plan, "ne pas corriger") : ~46 000 € directement
+attribuables à cette session (≈3 900 € des 14 lignes écrites à l'étape 3 +
+42 275 € de la 4a) ; le reste (~152 000 €) n'a pas été reconstitué avec
+certitude — plausiblement de la résorption des sessions précédentes (le
+gros lot Coredime du 02/09) pas encore reflétée dans le chiffre de
+référence du plan, mais non confirmé.
+
+**Brouillon Outlook créé** (Save uniquement, jamais Send — voir bandeau du
+module) : destinataire `daf@espace-soleil.re`, copie `direction@
+espace-soleil.re` (adresses confirmées explicitement par l'acheteur dans
+le chat, jamais devinées), pièce jointe `rapports/FNP_2026-08.xlsx`.
+**C'est l'acheteur qui relit et envoie depuis Outlook** — jamais envoyé par
+la session, conformément à la règle absolue de ce module.
 
 ## Tests
 

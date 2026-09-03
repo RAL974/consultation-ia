@@ -53,6 +53,14 @@ class Facture:
     # moteur.rapprochement.matching_facture.
     numeros_commande: list = field(default_factory=list)
 
+    # Candidat(s) BRUTS trouvés sur l'en-tête (N°Réf.Client/Réf.:), QUE le
+    # parser ait réussi ou non à les convertir en numeros_commande — sert
+    # UNIQUEMENT à distinguer, en aval (moteur.rapprochement.matching_facture.
+    # est_bdc_manuel_24x), une commande "introuvable" d'un bon manuel type
+    # "BC 241766"/"BCN 241461" (jamais rattachable, pas une vraie anomalie
+    # de rapprochement). Vide si le champ n'est pas renseigné sur la pièce.
+    numeros_commande_bruts: list = field(default_factory=list)
+
     numeros_bl: list = field(default_factory=list)
 
     lignes: list = field(default_factory=list)  # list[LigneFacture]

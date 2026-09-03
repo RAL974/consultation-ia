@@ -47,9 +47,12 @@ from moteur.rapprochement.ecriture import ENTETES_FACTURE, Ecriture, appliquer
 from moteur.rapprochement.lecture_facture import analyser_dossier
 from moteur.rapprochement.matching import deduire_commande_par_contenu
 from moteur.rapprochement.matching_facture import (
+    CauseFacture,
     CorrespondanceFacture,
     StatutFacture,
     apparier_facture,
+    charger_frais_fournisseurs,
+    est_bdc_manuel_24x,
     lire_lignes_commande_facture,
     lire_lignes_fournisseur_facture,
 )
@@ -78,6 +81,22 @@ NOM_A_CONFIRMER_FACTURE = "A_confirmer_Facture.xlsx"  # fichier À PART de
 # A_confirmer_BL.xlsx et A_confirmer.xlsx (devis) — même moteur/articles.db
 # partagé (un alias confirmé vaut pour tous les flux), mais chacun régénère
 # SA PROPRE file d'attente à chaque exécution (voir moteur/referentiel.py).
+NOM_FRAIS_FOURNISSEURS = "frais_fournisseurs.csv"  # referentiel/ — voir
+# moteur.rapprochement.matching_facture.charger_frais_fournisseurs, session
+# S0 : références connues qui ne sont PAS de vrais articles (frais de port,
+# éco-taxe...), jamais rapprochées à une ligne du Suivi, jamais bloquantes.
+
+# Seuil de réconciliation Total HT facture vs somme des lignes extraites —
+# même tolérance que le contrôle interne (console) de chaque parser (voir
+# moteur.fournisseurs.dist109/coredime) : 0,02€, ici SURFACÉ dans le
+# rapport (CauseFacture.TOTAL_ECART) plutôt que seulement imprimé au
+# terminal. Sans ce contrôle, une facture dont AUCUNE ligne n'est extraite
+# (donc rien à comparer, rien "d'inconnu" non plus) pouvait être
+# considérée "entièrement résolue" et archivée SANS AUCUNE trace de son
+# montant manquant (cas réel trouvé en session S0,
+# facture_coredime_6108846_remise_double_x3.pdf : 196,92€ silencieusement
+# perdus avant ce correctif).
+SEUIL_TOTAL_ECART_FACTURE = 0.02
 
 
 @dataclass
@@ -87,9 +106,37 @@ class RapportRapprochementFacture:
     a_confirmer: list = field(default_factory=list)
     deja_a_jour: list = field(default_factory=list)
     inconnus: list = field(default_factory=list)
+    frais: list = field(default_factory=list)          # [(Facture, CorrespondanceFacture)] statut FRAIS — voir charger_frais_fournisseurs
     anomalies_lecture: list = field(default_factory=list)  # [(nom_fichier, raison)]
     anomalies_facture: list = field(default_factory=list)  # [(Facture, raison)] — avoir, commande introuvable...
     fichier_suivi: Path | None = None
+
+
+def classifier_cause_anomalie(raison: str) -> CauseFacture | None:
+    """Dérive une CauseFacture à partir du texte d'une anomalie EN CLAIR
+    (anomalies_lecture/anomalies_facture, restées des 2-tuples — voir
+    RapportRapprochementFacture, jamais changées de forme pour ne pas
+    casser gui_rapprochement_facture.py) : best-effort, sert uniquement au
+    compte rendu chiffré par cause en fin de rapport, jamais à une
+    décision de rapprochement elle-même. None si aucun motif reconnu."""
+
+    if "AVOIR" in raison:
+        return CauseFacture.AVOIR
+    if "bon manuel" in raison:
+        return CauseFacture.BDC_MANUEL_24X
+    if "Écart de Total HT" in raison:
+        return CauseFacture.TOTAL_ECART
+    if "introuvable dans le Suivi" in raison or "n° de commande introuvable" in raison:
+        return CauseFacture.COMMANDE_ABSENTE
+    if "Fournisseur" in raison and "reconnu" in raison and "non" in raison:
+        return CauseFacture.FOURNISSEUR_INCONNU
+    if "pas encore de parser facture" in raison:
+        return CauseFacture.PARSER_ABSENT
+    if "Aucune ligne extraite" in raison:
+        return CauseFacture.ZERO_LIGNE
+    if "PDF illisible" in raison or "Erreur de lecture" in raison:
+        return CauseFacture.ANNEXE_SANS_TEXTE
+    return None
 
 
 def _resoudre_commandes_facture(facture, fichier_suivi) -> dict:
@@ -148,6 +195,31 @@ def _resoudre_commandes_facture(facture, fichier_suivi) -> dict:
     return resolutions
 
 
+def _verifier_total_ht_facture(facture) -> str | None:
+    """Réconciliation Total HT (voir SEUIL_TOTAL_ECART_FACTURE) sur les
+    lignes BRUTES du parser (frais compris, avant tout filtrage/
+    agrégation) — retourne la raison en clair si l'écart dépasse le seuil,
+    None sinon. Cas réel qui motive ce contrôle (session S0) :
+    facture_coredime_6108846_remise_double_x3.pdf, 0 ligne extraite pour un
+    Total HT affiché de 196,92€ — sans ce contrôle, une facture SANS AUCUNE
+    ligne (donc rien "d'inconnu" non plus) pouvait être considérée
+    "entièrement résolue" et archivée en silence, perdant toute trace du
+    montant manquant (voir _est_resolu_facture, rapprocher_dossier_factures)."""
+
+    if facture.total_ht_affiche is None:
+        return None
+
+    total_extrait = round(sum(l.montant_ht or 0.0 for l in facture.lignes), 2)
+    if abs(facture.total_ht_affiche - total_extrait) <= SEUIL_TOTAL_ECART_FACTURE:
+        return None
+
+    return (
+        f"Écart de Total HT : {facture.total_ht_affiche - total_extrait:+.2f}€ "
+        f"(affiché {facture.total_ht_affiche:.2f}€, extrait {total_extrait:.2f}€) "
+        "— une ligne a peut-être été oubliée ou mal lue"
+    )
+
+
 def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRapprochementFacture:
     """Lecture seule : lit toutes les factures du dossier, les rapproche du
     Suivi. Ne modifie ni le Suivi ni les fichiers de `dossier_a_traiter`."""
@@ -169,6 +241,7 @@ def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRap
     referentiel.importer_bdd(dossier_projet / "base" / "BDD_articles.csv")
     referentiel.importer_equivalences_bl(dossier_referentiel / "equivalences_bl.csv")
     referentiel.appliquer_confirmations(dossier_referentiel / NOM_A_CONFIRMER_FACTURE)
+    frais_connus = charger_frais_fournisseurs(dossier_referentiel / NOM_FRAIS_FOURNISSEURS)
 
     for facture in factures:
 
@@ -181,24 +254,63 @@ def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRap
             ))
             continue
 
+        # Non bloquant pour le reste (les lignes lisibles sont quand même
+        # rapprochées ci-dessous), mais empêche la facture d'être
+        # considérée "résolue" tant que l'écart n'a pas été vérifié à la
+        # main (anomalies_facture alimente g["anomalies"], voir
+        # _est_resolu_facture).
+        raison_ecart = _verifier_total_ht_facture(facture)
+        if raison_ecart:
+            rapport.anomalies_facture.append((facture, raison_ecart))
+
         resolutions = _resoudre_commandes_facture(facture, fichier_suivi)
 
         par_bl = {}
         for l in facture.lignes:
             par_bl.setdefault(l.numero_bl, []).append(l)
 
+        # Regroupe par commande RÉSOLUE (pas par BL brut) : un même article
+        # peut être réparti sur PLUSIEURS BL d'une même facture pour la
+        # MÊME commande (cas réel Facture_362840.pdf, voir CLAUDE.md
+        # session S0, correction 1a) — les comparer à la Qté livrée
+        # nécessite de les additionner d'abord (voir
+        # matching_facture.agreger_lignes_meme_reference), jamais bloc par
+        # bloc indépendamment (chaque bloc, confronté isolément à la Qté
+        # livrée TOTALE, ressortirait "à confirmer" à tort sur une
+        # livraison fractionnée qui, additionnée, correspond exactement).
+        par_commande = {}
         for numero_bl, lignes_bloc in par_bl.items():
 
             numero_commande, deduit, raison_deduction = resolutions.get(numero_bl, (None, False, None))
 
             if not numero_commande:
                 entete_affichee = "; ".join(facture.numeros_commande) or "(vide)"
-                rapport.anomalies_facture.append((
-                    facture,
-                    f"BL {numero_bl} : n° de commande introuvable (N°Réf.Client « {entete_affichee} » "
-                    "non exploitable, et déduction par contenu non concluante)",
-                ))
+                if est_bdc_manuel_24x(facture.numeros_commande_bruts):
+                    rapport.anomalies_facture.append((
+                        facture,
+                        f"BL {numero_bl} : commande passée sur un bon manuel "
+                        f"(« {'; '.join(facture.numeros_commande_bruts)} ») — hors format "
+                        "Suivi, à rattacher à la main",
+                    ))
+                else:
+                    rapport.anomalies_facture.append((
+                        facture,
+                        f"BL {numero_bl} : n° de commande introuvable (N°Réf.Client « {entete_affichee} » "
+                        "non exploitable, et déduction par contenu non concluante)",
+                    ))
                 continue
+
+            groupe = par_commande.setdefault(
+                numero_commande, {"lignes": [], "deduit": False, "raisons_deduction": []},
+            )
+            for l in lignes_bloc:
+                l.numero_commande = numero_commande
+            groupe["lignes"].extend(lignes_bloc)
+            if deduit:
+                groupe["deduit"] = True
+                groupe["raisons_deduction"].append(raison_deduction)
+
+        for numero_commande, groupe in par_commande.items():
 
             try:
                 lignes_suivi = lire_lignes_commande_facture(fichier_suivi, facture.fournisseur, numero_commande)
@@ -209,23 +321,22 @@ def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRap
             if not lignes_suivi:
                 rapport.anomalies_facture.append((
                     facture,
-                    f"BL {numero_bl} : commande {numero_commande} introuvable dans le Suivi pour « {facture.fournisseur} »",
+                    f"Commande {numero_commande} introuvable dans le Suivi pour « {facture.fournisseur} »",
                 ))
                 continue
 
-            for l in lignes_bloc:
-                l.numero_commande = numero_commande
-
             for c in apparier_facture(
-                lignes_bloc, lignes_suivi, facture.numero_facture,
+                groupe["lignes"], lignes_suivi, facture.numero_facture,
                 referentiel=referentiel, fournisseur=facture.fournisseur, devis=facture.numero_facture,
+                frais_connus=frais_connus,
             ):
-                if deduit and c.statut is StatutFacture.SUR:
+                if groupe["deduit"] and c.statut is StatutFacture.SUR:
                     # Un n° de commande DÉDUIT (pas lu directement) n'est
                     # jamais assez sûr pour une écriture automatique — même
                     # principe que pipeline_bl.py.
                     c = CorrespondanceFacture(
-                        c.ligne_facture, c.ligne_suivi, StatutFacture.A_CONFIRMER, [raison_deduction] + c.raisons,
+                        c.ligne_facture, c.ligne_suivi, StatutFacture.A_CONFIRMER,
+                        list(groupe["raisons_deduction"]) + c.raisons, c.cause,
                     )
 
                 if c.statut is StatutFacture.SUR:
@@ -234,6 +345,8 @@ def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRap
                     rapport.a_confirmer.append((facture, c))
                 elif c.statut is StatutFacture.DEJA_A_JOUR:
                     rapport.deja_a_jour.append((facture, c))
+                elif c.statut is StatutFacture.FRAIS:
+                    rapport.frais.append((facture, c))
                 else:
                     rapport.inconnus.append((facture, c))
 
@@ -279,14 +392,19 @@ def _desamorcer_conflits_meme_ligne_suivi_facture(rapport: RapportRapprochementF
 
 def regrouper_par_facture(rapport: RapportRapprochementFacture) -> dict:
     """{id(facture): {"facture":..., "sur": [...], "a_confirmer": [...],
-    "deja_a_jour": [...], "inconnu": [...], "anomalies": [raison, ...]}} —
-    même principe que pipeline_bl.regrouper_par_bl."""
+    "deja_a_jour": [...], "inconnu": [...], "frais": [...],
+    "anomalies": [raison, ...]}} — même principe que
+    pipeline_bl.regrouper_par_bl. "frais" ne participe PAS au calcul de
+    _est_resolu_facture (ni au numérateur ni au dénominateur) : un frais
+    connu (voir charger_frais_fournisseurs) n'est jamais bloquant, jamais
+    besoin d'être "confirmé" pour que la facture soit considérée résolue."""
 
     groupes = {}
 
     def _groupe(facture):
         return groupes.setdefault(id(facture), {
-            "facture": facture, "sur": [], "a_confirmer": [], "deja_a_jour": [], "inconnu": [], "anomalies": [],
+            "facture": facture, "sur": [], "a_confirmer": [], "deja_a_jour": [], "inconnu": [],
+            "frais": [], "anomalies": [],
         })
 
     for facture, c in rapport.surs:
@@ -297,6 +415,8 @@ def regrouper_par_facture(rapport: RapportRapprochementFacture) -> dict:
         _groupe(facture)["deja_a_jour"].append(c)
     for facture, c in rapport.inconnus:
         _groupe(facture)["inconnu"].append(c)
+    for facture, c in rapport.frais:
+        _groupe(facture)["frais"].append(c)
     for facture, raison in rapport.anomalies_facture:
         _groupe(facture)["anomalies"].append(raison)
 
@@ -536,7 +656,7 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
         "factures_archivees": [], "factures_a_verifier": [],
         "archivage_echoue": [], "chemin_rapport": None, "resorption": None,
         "montants_recalcules": [], "factures_sans_parser": [],
-        "tarif_bl_ecrit_depuis_facture": [],
+        "tarif_bl_ecrit_depuis_facture": [], "causes": {},
     }
 
     if correspondances_a_ecrire:
@@ -675,6 +795,46 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
             f"  - {m['fichier']} (facture {m['facture']}, réf. {m['reference']}, ligne Excel {m['ligne_excel']}) : "
             f"{m['montant']:.2f}€"
             for m in resume["montants_recalcules"]
+        ]
+
+    if rapport.frais:
+        lignes_rapport.append(
+            f"{len(rapport.frais)} ligne(s) de frais connus (jamais rapprochées à une ligne du Suivi, "
+            "jamais bloquantes — voir referentiel/frais_fournisseurs.csv) :"
+        )
+        lignes_rapport += [
+            f"  - {f.fichier} (facture {f.numero_facture}, réf. {c.ligne_facture.reference_fournisseur}) : "
+            f"{c.ligne_facture.montant_ht or 0.0:.2f}€"
+            for f, c in rapport.frais
+        ]
+
+    # Compte rendu chiffré PAR CAUSE (session S0, correction 1e) : combine
+    # les causes déjà posées directement (a_confirmer/inconnus/frais, voir
+    # apparier_facture) et celles dérivées en best-effort du texte des
+    # anomalies "fichier entier" (voir classifier_cause_anomalie) — jamais
+    # un résidu sans cause identifiée qui resterait invisible du compte
+    # rendu ("Pas de résiduel unique", cadrage de session).
+    compteur_causes = {}
+    for _, c in rapport.a_confirmer + rapport.inconnus + rapport.frais:
+        if c.cause is not None:
+            compteur_causes[c.cause] = compteur_causes.get(c.cause, 0) + 1
+    for _, raison in rapport.anomalies_facture:
+        cause = classifier_cause_anomalie(raison)
+        if cause is not None:
+            compteur_causes[cause] = compteur_causes.get(cause, 0) + 1
+    for _, raison in rapport.anomalies_lecture:
+        cause = classifier_cause_anomalie(raison)
+        if cause is not None:
+            compteur_causes[cause] = compteur_causes.get(cause, 0) + 1
+
+    resume["causes"] = {cause.value: n for cause, n in compteur_causes.items()}
+
+    if compteur_causes:
+        lignes_rapport.append("Répartition par cause :")
+        lignes_rapport += [
+            f"  - {cause.value} : {compteur_causes[cause]}"
+            for cause in CauseFacture
+            if cause in compteur_causes
         ]
 
     resume["chemin_rapport"] = ecrire_rapport_facture(dossier_projet / DOSSIER_RAPPORTS, "\n".join(lignes_rapport))

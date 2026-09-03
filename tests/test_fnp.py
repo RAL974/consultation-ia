@@ -396,10 +396,33 @@ def test_generer_etat_fnp_bout_en_bout(tmp_path):
 
     from openpyxl import load_workbook
     wb = load_workbook(chemin_sortie)
-    assert wb.sheetnames == ["Synthèse", "BL non facturés", "Transitaires"]
+    # "Factures reçues" et "Déclaré (hors outil)" : v1.1, session S0 (étapes
+    # 4a/4b) — voir test_generer_etat_fnp_bout_en_bout_sans_exclusion pour le
+    # cas --sans-exclusion (pas d'onglet "Factures reçues" dans ce cas).
+    assert wb.sheetnames == [
+        "Synthèse", "BL non facturés", "Transitaires", "Factures reçues", "Déclaré (hors outil)",
+    ]
     # 1 ligne d'en-tête + 1 ligne valorisée + ligne vide + titre bloc + en-tête bloc + 1 ligne sans prix
     assert wb["BL non facturés"].max_row == 6
     assert wb["Transitaires"].max_row == 2  # en-tête + 1 dossier
+    assert wb["Factures reçues"].max_row == 1  # en-tête seulement, aucune facture PDF déposée dans ce test
+    assert wb["Déclaré (hors outil)"].max_row == 1  # en-tête seulement, aucun fichier fnp_ajustements_*.csv dans ce test
+
+
+def test_generer_etat_fnp_bout_en_bout_sans_exclusion(tmp_path):
+    """--sans-exclusion (repli 16h, voir CLAUDE.md) : pas de scan de
+    a_traiter/Factures/, pas d'onglet "Factures reçues" — les étapes 4b/4c
+    restent actives."""
+
+    dossier_projet, chemin_suivi, chemin_speciales = _arborescence(tmp_path)
+    _classeur_commandes(chemin_suivi, [_ligne_commande()])
+    _classeur_speciales(chemin_speciales, [_ligne_speciale()])
+
+    chemin_sortie = generer_etat_fnp(dossier_projet, "2026-08", appliquer_exclusion=False)
+
+    from openpyxl import load_workbook
+    wb = load_workbook(chemin_sortie)
+    assert wb.sheetnames == ["Synthèse", "BL non facturés", "Transitaires", "Déclaré (hors outil)"]
 
 
 def test_generer_etat_fnp_repli_si_commandes_speciales_absent(tmp_path):
@@ -424,6 +447,303 @@ def test_generer_etat_fnp_suivi_introuvable_leve(tmp_path):
         generer_etat_fnp(dossier_projet, "2026-08")
 
 
+# --- v1.1 (session S0), étape 4a : exclusion "facture reçue non rapprochée" -
+
+
+def _ligne_fnp(**kwargs):
+    from moteur.fnp import LigneFNP
+    defaut = dict(
+        ligne_excel=5, fournisseur="COREDIME", numero_commande="M1.00.001", chantier="100 Chantier",
+        reference="REF1", designation="Article", qte_livree=10.0, montant_ht=50.0, source_prix="Tarif BL",
+        date_livraison=date(2026, 8, 15), anciennete_jours=16, numero_facture="", date_facture=None, note="",
+    )
+    defaut.update(kwargs)
+    return LigneFNP(**defaut)
+
+
+def test_appliquer_exclusion_factures_recues_retire_la_ligne_matchee():
+    from moteur.fnp import _appliquer_exclusion_factures_recues
+
+    l = _ligne_fnp(ligne_excel=5, montant_ht=123.45)
+    lignes_excel_facturees = {5: {
+        "numero_facture": "F999", "date_facture": date(2026, 8, 20),
+        "reference": "REF1", "fournisseur": "COREDIME", "numero_commande": "M1.00.001",
+    }}
+
+    restantes, sans_prix_restantes, recues = _appliquer_exclusion_factures_recues([l], [], lignes_excel_facturees)
+
+    assert restantes == []
+    assert sans_prix_restantes == []
+    [r] = recues
+    assert r.ligne_excel == 5
+    assert r.numero_facture == "F999"
+    assert r.date_facture == date(2026, 8, 20)
+    assert r.montant_facture_bl == 123.45
+
+
+def test_appliquer_exclusion_factures_recues_ligne_non_matchee_reste():
+    from moteur.fnp import _appliquer_exclusion_factures_recues
+
+    l = _ligne_fnp(ligne_excel=7)
+
+    restantes, sans_prix_restantes, recues = _appliquer_exclusion_factures_recues([l], [], {5: {}})
+
+    assert restantes == [l]
+    assert recues == []
+
+
+def test_appliquer_exclusion_factures_recues_fonctionne_aussi_sur_sans_prix():
+    from moteur.fnp import _appliquer_exclusion_factures_recues
+
+    l = _ligne_fnp(ligne_excel=9, montant_ht=0.0, source_prix="Aucune")
+    lignes_excel_facturees = {9: {
+        "numero_facture": "F1", "date_facture": None,
+        "reference": "REF1", "fournisseur": "COREDIME", "numero_commande": "M1.00.001",
+    }}
+
+    restantes_bl, restantes_sans_prix, recues = _appliquer_exclusion_factures_recues([], [l], lignes_excel_facturees)
+
+    assert restantes_sans_prix == []
+    [r] = recues
+    assert r.ligne_excel == 9
+    assert r.date_facture is None
+
+
+def test_identifier_lignes_excel_facturees_sur_une_vraie_facture(tmp_path):
+    """Intégration RÉELLE (voir CLAUDE.md, règle d'or — vrai PDF, pas de
+    texte inventé) : facture_dist109_1_simple.pdf (109 DISTRIBUTION,
+    commande 123.075, facture 360311 datée 15/07/2026, référence P03101)
+    déposée dans a_traiter/Factures/ d'un dossier_projet SYNTHÉTIQUE ->
+    _identifier_lignes_excel_facturees() doit la retrouver et associer la
+    bonne ligne_excel."""
+
+    from moteur.fnp import _identifier_lignes_excel_facturees
+
+    dossier_projet, chemin_suivi, chemin_speciales = _arborescence(tmp_path)
+    _classeur_commandes(chemin_suivi, [
+        _ligne_commande(**{
+            "Référence": "P03101", "N° de commande": "123.075", "Fournisseur": "109 DISTRIBUTION",
+            "Qté livrée": 200, "N° facture": "", "Date facture": None,
+        }),
+    ])
+
+    dossier_factures = dossier_projet / "a_traiter" / "Factures"
+    dossier_factures.mkdir(parents=True)
+    fixture = ROOT / "tests" / "fixtures" / "facture_dist109_1_simple.pdf"
+    (dossier_factures / fixture.name).write_bytes(fixture.read_bytes())
+
+    lignes_excel_facturees, n_bdc_manuel_24x = _identifier_lignes_excel_facturees(
+        dossier_projet, fin_de_mois=date(2026, 7, 31),
+    )
+
+    assert n_bdc_manuel_24x == 0
+    [(ligne_excel, info)] = lignes_excel_facturees.items()
+    assert ligne_excel == 2  # 1re ligne de données (après l'en-tête)
+    assert info["numero_facture"] == "360311"
+    assert info["date_facture"] == date(2026, 7, 15)
+    assert info["reference"] == "P03101"
+
+
+def test_identifier_lignes_excel_facturees_facture_posterieure_a_fin_de_mois_exclue(tmp_path):
+    """Même pièce réelle, mais fin_de_mois AVANT la date de la facture
+    (15/07/2026) -> non retenue (seules les factures datées <= fin_de_mois
+    comptent, voir bandeau du module)."""
+
+    from moteur.fnp import _identifier_lignes_excel_facturees
+
+    dossier_projet, chemin_suivi, chemin_speciales = _arborescence(tmp_path)
+    _classeur_commandes(chemin_suivi, [
+        _ligne_commande(**{
+            "Référence": "P03101", "N° de commande": "123.075", "Fournisseur": "109 DISTRIBUTION",
+            "Qté livrée": 200,
+        }),
+    ])
+
+    dossier_factures = dossier_projet / "a_traiter" / "Factures"
+    dossier_factures.mkdir(parents=True)
+    fixture = ROOT / "tests" / "fixtures" / "facture_dist109_1_simple.pdf"
+    (dossier_factures / fixture.name).write_bytes(fixture.read_bytes())
+
+    lignes_excel_facturees, _ = _identifier_lignes_excel_facturees(dossier_projet, fin_de_mois=date(2026, 6, 30))
+
+    assert lignes_excel_facturees == {}
+
+
+def test_identifier_lignes_excel_facturees_dossier_absent_retourne_vide(tmp_path):
+    from moteur.fnp import _identifier_lignes_excel_facturees
+
+    dossier_projet, chemin_suivi, chemin_speciales = _arborescence(tmp_path)
+    _classeur_commandes(chemin_suivi, [_ligne_commande()])
+    # a_traiter/Factures/ jamais créé.
+
+    lignes_excel_facturees, n_bdc = _identifier_lignes_excel_facturees(dossier_projet, fin_de_mois=date(2026, 8, 31))
+
+    assert lignes_excel_facturees == {}
+    assert n_bdc == 0
+
+
+def test_calculer_rapport_fnp_applique_lexclusion_bout_en_bout(tmp_path):
+    """La ligne Suivi P03101/123.075 est livrée en juillet, jamais facturée
+    dans le Suivi (N° facture vide) -> sans 4a, elle apparaîtrait dans le
+    volet (a). Avec la vraie facture PDF déposée, elle doit en sortir et
+    se retrouver dans factures_recues_non_rapprochees."""
+
+    dossier_projet, chemin_suivi, chemin_speciales = _arborescence(tmp_path)
+    _classeur_commandes(chemin_suivi, [
+        _ligne_commande(**{
+            "Référence": "P03101", "N° de commande": "123.075", "Fournisseur": "109 DISTRIBUTION",
+            "Chantier": "100 Chantier Test", "Date de livraison": datetime(2026, 7, 10),
+            "Qté livrée": 200, "Tarif BL": 0.6, "Facturé BL": 120.0,
+            "N° facture": "", "Date facture": None,
+        }),
+    ])
+    _classeur_speciales(chemin_speciales, [])
+
+    dossier_factures = dossier_projet / "a_traiter" / "Factures"
+    dossier_factures.mkdir(parents=True)
+    fixture = ROOT / "tests" / "fixtures" / "facture_dist109_1_simple.pdf"
+    (dossier_factures / fixture.name).write_bytes(fixture.read_bytes())
+
+    rapport = calculer_rapport_fnp(dossier_projet, "2026-07")
+
+    assert rapport.lignes_bl == []
+    [f] = rapport.factures_recues_non_rapprochees
+    assert f.numero_facture == "360311"
+    assert f.montant_facture_bl == 120.0
+
+
+# --- v1.1 (session S0), étape 4b : ajustements déclarés ---------------------
+
+
+def test_lire_ajustements_fnp_fichier_absent_liste_vide(tmp_path):
+    from moteur.fnp import lire_ajustements_fnp
+
+    assert lire_ajustements_fnp(tmp_path / "inexistant.csv") == []
+
+
+def test_lire_ajustements_fnp_lit_le_csv(tmp_path):
+    from moteur.fnp import lire_ajustements_fnp
+
+    chemin = tmp_path / "fnp_ajustements_2026-08.csv"
+    chemin.write_text(
+        "type;libelle;fournisseur_ou_transitaire;chantier;piece;date_livraison;montant_ht;source;commentaire\n"
+        "BDC_MANUEL;Cable H07;COREDIME;100 Chantier;BC24.0512;12/08/2026;150,50;carnet papier;vu avec le chef\n"
+        "TRANSIT;Conteneur;Steinweg;;D26.099;;2000;mail du 20/08;\n",
+        encoding="utf-8",
+    )
+
+    ajustements = lire_ajustements_fnp(chemin)
+
+    assert len(ajustements) == 2
+    a0 = ajustements[0]
+    assert a0.type == "BDC_MANUEL"
+    assert a0.libelle == "Cable H07"
+    assert a0.date_livraison == date(2026, 8, 12)
+    assert a0.montant_ht == 150.5
+    a1 = ajustements[1]
+    assert a1.type == "TRANSIT"
+    assert a1.date_livraison is None
+    assert a1.montant_ht == 2000.0
+
+
+def test_lire_ajustements_fnp_ignore_ligne_sans_type(tmp_path):
+    from moteur.fnp import lire_ajustements_fnp
+
+    chemin = tmp_path / "fnp_ajustements_2026-08.csv"
+    chemin.write_text(
+        "type;libelle;fournisseur_ou_transitaire;chantier;piece;date_livraison;montant_ht;source;commentaire\n"
+        ";;;;;;;;\n",
+        encoding="utf-8",
+    )
+
+    assert lire_ajustements_fnp(chemin) == []
+
+
+def test_lire_ajustements_fnp_ignore_les_lignes_de_commentaire(tmp_path):
+    from moteur.fnp import lire_ajustements_fnp
+
+    chemin = tmp_path / "fnp_ajustements_2026-08.csv"
+    chemin.write_text(
+        "# ceci est un commentaire d'en-tête\n"
+        "type;libelle;fournisseur_ou_transitaire;chantier;piece;date_livraison;montant_ht;source;commentaire\n"
+        "AUTRE;Test;X;;;;10;;\n",
+        encoding="utf-8",
+    )
+
+    assert len(lire_ajustements_fnp(chemin)) == 1
+
+
+def test_nom_fichier_ajustements():
+    from moteur.fnp import nom_fichier_ajustements
+
+    assert nom_fichier_ajustements("2026-08") == "fnp_ajustements_2026-08.csv"
+
+
+def test_calculer_rapport_fnp_lit_les_ajustements_du_bon_mois(tmp_path):
+    """referentiel/fnp_ajustements_<mois>.csv, PAS un nom fixe — un fichier
+    d'un AUTRE mois ne doit jamais être lu par erreur."""
+
+    dossier_projet, chemin_suivi, chemin_speciales = _arborescence(tmp_path)
+    _classeur_commandes(chemin_suivi, [_ligne_commande()])
+    _classeur_speciales(chemin_speciales, [])
+
+    dossier_referentiel = dossier_projet / "referentiel"
+    dossier_referentiel.mkdir()
+    (dossier_referentiel / "fnp_ajustements_2026-08.csv").write_text(
+        "type;libelle;fournisseur_ou_transitaire;chantier;piece;date_livraison;montant_ht;source;commentaire\n"
+        "AUTRE;Test aout;X;;;;42;;\n",
+        encoding="utf-8",
+    )
+    (dossier_referentiel / "fnp_ajustements_2026-07.csv").write_text(
+        "type;libelle;fournisseur_ou_transitaire;chantier;piece;date_livraison;montant_ht;source;commentaire\n"
+        "AUTRE;Test juillet, ne doit PAS apparaitre;X;;;;999;;\n",
+        encoding="utf-8",
+    )
+
+    rapport = calculer_rapport_fnp(dossier_projet, "2026-08", appliquer_exclusion=False)
+
+    [a] = rapport.ajustements
+    assert a.libelle == "Test aout"
+    assert a.montant_ht == 42.0
+
+
+# --- v1.1 (session S0), étape 4c : réserves de périmètre --------------------
+
+
+def test_compter_dossiers_speciales(tmp_path):
+    from moteur.fnp import compter_dossiers_speciales
+
+    chemin = tmp_path / "speciales.xlsm"
+    _classeur_speciales(chemin, [_ligne_speciale(), _ligne_speciale(**{"N° dossier revient": "R26.002"})])
+
+    assert compter_dossiers_speciales(chemin) == 2
+
+
+def test_compter_dossiers_speciales_fichier_absent_zero(tmp_path):
+    from moteur.fnp import compter_dossiers_speciales
+
+    assert compter_dossiers_speciales(tmp_path / "inexistant.xlsm") == 0
+
+
+def test_calculer_rapport_fnp_reserves_bdc_manuel_et_dossiers_speciales(tmp_path):
+    """rapport.reserves reflète : le nombre de dossiers Commandes spéciales
+    (tout statut, voir compter_dossiers_speciales) et le nombre de
+    transitaires sans estimation déjà connu du volet (b)."""
+
+    dossier_projet, chemin_suivi, chemin_speciales = _arborescence(tmp_path)
+    _classeur_commandes(chemin_suivi, [_ligne_commande()])
+    _classeur_speciales(chemin_speciales, [
+        _ligne_speciale(),
+        _ligne_speciale(**{"N° dossier revient": "R26.002", "Coût estimé": None}),
+    ])
+
+    rapport = calculer_rapport_fnp(dossier_projet, "2026-08", appliquer_exclusion=False)
+
+    assert rapport.reserves.n_bdc_manuel_24x == 0  # exclusion désactivée, jamais scanné
+    assert rapport.reserves.n_dossiers_speciales_total == 2
+    assert rapport.reserves.n_transitaires_sans_estimation == 1  # le 2e dossier, sans Coût estimé
+
+
 # --- vrai classeur (lecture seule, ignoré si absent du poste) ------------
 
 
@@ -435,9 +755,15 @@ def _chemin_vrai_suivi():
 def test_calculer_rapport_fnp_sur_le_vrai_suivi():
     """Vérifie que les en-têtes réels n'ont pas dérivé — ne fige AUCUNE
     valeur métier (les commandes réelles changent en continu), juste que le
-    calcul tourne sans exception et retourne des types cohérents."""
+    calcul tourne sans exception et retourne des types cohérents.
 
-    rapport = calculer_rapport_fnp(ROOT, "2026-08")
+    appliquer_exclusion=False (voir _identifier_lignes_excel_facturees) :
+    ce test vérifie les en-têtes du SUIVI, pas la 4a — sans ce False, il
+    scannerait le VRAI a_traiter/Factures/ (des centaines de PDF réels,
+    OCR compris) à CHAQUE exécution de la suite de tests, beaucoup trop
+    lent pour un test de non-régression sur les seuls en-têtes."""
+
+    rapport = calculer_rapport_fnp(ROOT, "2026-08", appliquer_exclusion=False)
 
     assert rapport.chemin_suivi is not None
     assert isinstance(rapport.lignes_bl, list)

@@ -14,25 +14,34 @@ if not verifier_et_installer(print):
 
 from moteur.fnp import SuiviIntrouvable, generer_etat_fnp
 
-if len(sys.argv) < 2:
-    print("\nUsage : py -3 fnp.py <AAAA-MM> [AAAA-MM-JJ]")
-    print("  <AAAA-MM>     mois de clôture, ex. 2026-08")
-    print("  [AAAA-MM-JJ]  optionnel : ne compter que les livraisons à partir de cette date")
+sans_exclusion = "--sans-exclusion" in sys.argv
+arguments = [a for a in sys.argv[1:] if not a.startswith("--")]
+
+if not arguments:
+    print("\nUsage : py -3 fnp.py <AAAA-MM> [AAAA-MM-JJ] [--sans-exclusion]")
+    print("  <AAAA-MM>          mois de clôture, ex. 2026-08")
+    print("  [AAAA-MM-JJ]       optionnel : ne compter que les livraisons à partir de cette date")
+    print("  [--sans-exclusion] optionnel : désactive l'exclusion « facture reçue non")
+    print("                     rapprochée » (étape 4a) — repli si a_traiter/Factures/")
+    print("                     est trop volumineux/lent à scanner")
     raise SystemExit(1)
 
-mois = sys.argv[1]
+mois = arguments[0]
 depuis = None
-if len(sys.argv) > 2:
+if len(arguments) > 1:
     try:
-        depuis = datetime.strptime(sys.argv[2], "%Y-%m-%d").date()
+        depuis = datetime.strptime(arguments[1], "%Y-%m-%d").date()
     except ValueError:
-        print(f"\n/!\\ Date de filtre invalide : « {sys.argv[2]} » (attendu AAAA-MM-JJ)")
+        print(f"\n/!\\ Date de filtre invalide : « {arguments[1]} » (attendu AAAA-MM-JJ)")
         raise SystemExit(1)
 
 dossier_projet = Path(__file__).parent
 
+if sans_exclusion:
+    print("\n(--sans-exclusion : étape 4a désactivée, le volet (a) inclut les factures déjà reçues mais pas encore rapprochées)")
+
 try:
-    chemin = generer_etat_fnp(dossier_projet, mois, depuis)
+    chemin = generer_etat_fnp(dossier_projet, mois, depuis, appliquer_exclusion=not sans_exclusion)
 except SuiviIntrouvable as e:
     print(f"\n/!\\ {e}")
     raise SystemExit(1)

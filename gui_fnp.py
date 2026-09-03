@@ -206,7 +206,7 @@ class FenetreFNP(tk.Toplevel):
         try:
             from moteur.fnp_brouillon import creer_brouillon_fnp
             creer_brouillon_fnp(
-                self.chemin_genere, destinataires, mois_en_lettres(self.rapport.mois), copie=copie,
+                self.chemin_genere, self.rapport, destinataires, copie=copie,
             )
         except Exception as e:
             messagebox.showerror(

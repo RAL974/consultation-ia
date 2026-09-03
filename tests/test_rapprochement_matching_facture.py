@@ -1,15 +1,27 @@
 """
 moteur.rapprochement.matching_facture — sur des LigneFacture/LigneSuiviFacture
 synthétiques (pas besoin d'un vrai classeur Excel, comme
-tests/test_rapprochement_matching.py côté BL)."""
+tests/test_rapprochement_matching.py côté BL). Un test de bout en bout sur
+un vrai PDF (facture_109_362840_multi_bl_meme_ref.pdf) verrouille en plus
+l'agrégation multi-BL (session S0, correction 1a) sur données réelles."""
 
+from pathlib import Path
+
+from moteur.lecture_pdf import lire_pdf
+from moteur.fournisseurs.dist109 import parse_facture_109
 from moteur.rapprochement.matching_facture import (
+    CauseFacture,
     LigneSuiviFacture,
     StatutFacture,
+    agreger_lignes_meme_reference,
     apparier_facture,
+    charger_frais_fournisseurs,
     colonnes_facture_disponibles,
+    est_bdc_manuel_24x,
 )
 from moteur.rapprochement.modele_facture import LigneFacture
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _ligne_suivi(**kwargs):
@@ -204,3 +216,311 @@ def test_apparier_sur_meme_si_tarif_bl_et_tarif_convenu_absents():
     [c] = apparier_facture([lf], [ls], numero_facture="F1")
 
     assert c.statut is StatutFacture.SUR
+
+
+# --- causes codées (session S0, correction 1e) ------------------------------
+
+
+def test_apparier_qte_partielle_et_superieure_causes_distinctes():
+    """QTE_PARTIELLE (facturé < déjà livré) et QTE_SUPERIEURE (facturé >
+    déjà livré) sont deux causes DISTINCTES — même message "raisons",
+    cause différente pour le compte rendu chiffré."""
+
+    lf_partielle = _ligne_facture(quantite_facturee=8.0)
+    ls = _ligne_suivi(qte_livree=10.0)
+    [c] = apparier_facture([lf_partielle], [ls], numero_facture="F1")
+    assert c.statut is StatutFacture.A_CONFIRMER
+    assert c.cause is CauseFacture.QTE_PARTIELLE
+
+    lf_superieure = _ligne_facture(quantite_facturee=12.0)
+    ls2 = _ligne_suivi(qte_livree=10.0)
+    [c2] = apparier_facture([lf_superieure], [ls2], numero_facture="F1")
+    assert c2.statut is StatutFacture.A_CONFIRMER
+    assert c2.cause is CauseFacture.QTE_SUPERIEURE
+
+
+def test_apparier_doublon_facture_a_la_bonne_cause():
+    lf = _ligne_facture()
+    ls = _ligne_suivi(numero_facture="F0", qte_facturee=10.0, pu_facture=5.0)
+
+    [c] = apparier_facture([lf], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.A_CONFIRMER
+    assert c.cause is CauseFacture.DOUBLON_FACTURE
+
+
+def test_apparier_inconnu_a_la_cause_ref_inconnue():
+    lf = _ligne_facture(reference_fournisseur="XYZ999")
+    ls = _ligne_suivi(reference="ABC123")
+
+    [c] = apparier_facture([lf], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.INCONNU
+    assert c.cause is CauseFacture.REF_INCONNUE
+
+
+def test_apparier_repli_reference_proche_a_la_cause_cle_partielle():
+    lf = _ligne_facture(reference_fournisseur="ABC124")
+    ls = _ligne_suivi(reference="ABC123")
+
+    [c] = apparier_facture([lf], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.A_CONFIRMER
+    assert c.cause is CauseFacture.CLE_PARTIELLE
+
+
+# --- agrégation multi-BL même référence (session S0, correction 1a) --------
+
+
+def test_agreger_lignes_meme_reference_somme_les_quantites_meme_pu():
+    """Cas de base de l'agrégation : 2 lignes, même référence, même PU
+    (ex. réel P03200 réparti sur 2 BL de Facture_362840.pdf) -> UNE seule
+    ligne, quantités/montants sommés, n° de BL concaténés (détail
+    conservé)."""
+
+    lf1 = _ligne_facture(reference_fournisseur="P03200", quantite_facturee=100.0,
+                          prix_unitaire_ht=0.26, montant_ht=26.0)
+    lf1.numero_bl = "731835"
+    lf2 = _ligne_facture(reference_fournisseur="P03200", quantite_facturee=100.0,
+                          prix_unitaire_ht=0.26, montant_ht=26.0)
+    lf2.numero_bl = "731846"
+
+    lignes, refs_prix_differents = agreger_lignes_meme_reference([lf1, lf2])
+
+    assert refs_prix_differents == set()
+    [l] = lignes
+    assert l.quantite_facturee == 200.0
+    assert l.montant_ht == 52.0
+    assert l.numero_bl == "731835 + 731846"
+
+
+def test_agreger_lignes_meme_reference_ne_touche_pas_une_reference_unique():
+    lf = _ligne_facture(reference_fournisseur="SEUL")
+    lignes, refs_prix_differents = agreger_lignes_meme_reference([lf])
+    assert lignes == [lf]
+    assert refs_prix_differents == set()
+
+
+def test_agreger_lignes_meme_reference_pu_different_pas_dagregation():
+    """PU différent selon le BL -> AUCUNE agrégation pour ce groupe (jamais
+    un prix deviné) — les 2 lignes restent séparées, leur clé est ajoutée à
+    refs_prix_differents pour qu'apparier_facture() les fasse ressortir
+    "à confirmer"."""
+
+    lf1 = _ligne_facture(reference_fournisseur="REFX", prix_unitaire_ht=1.0)
+    lf2 = _ligne_facture(reference_fournisseur="REFX", prix_unitaire_ht=1.5)
+
+    lignes, refs_prix_differents = agreger_lignes_meme_reference([lf1, lf2])
+
+    assert lignes == [lf1, lf2]
+    assert len(refs_prix_differents) == 1
+
+
+def test_apparier_agrege_avant_comparaison_a_la_qte_livree():
+    """Bout en bout sur apparier_facture() : sans agrégation, chaque bloc
+    (50 facturés) comparerait à la Qté livrée TOTALE (100) et ressortirait
+    "à confirmer" à tort. Avec l'agrégation (50+50=100), SUR."""
+
+    lf1 = _ligne_facture(reference_fournisseur="REFX", quantite_facturee=50.0, prix_unitaire_ht=2.0)
+    lf1.numero_bl = "BL1"
+    lf2 = _ligne_facture(reference_fournisseur="REFX", quantite_facturee=50.0, prix_unitaire_ht=2.0)
+    lf2.numero_bl = "BL2"
+    ls = _ligne_suivi(reference="REFX", qte_livree=100.0)
+
+    [c] = apparier_facture([lf1, lf2], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.SUR
+    assert c.ligne_facture.quantite_facturee == 100.0
+
+
+def test_apparier_prix_differents_meme_reference_a_confirmer_cause_dediee():
+    """Qté livrée = 50 (pas 100) pour isoler le SEUL problème testé ici (le
+    PU) — sans quoi la 1re ligne (qté facturée 50 vs 100 déjà livré,
+    puisque non agrégée) déclencherait AUSSI un écart de quantité réel, et
+    _comparer_facture garde alors la cause la plus spécifique déjà posée
+    (QTE_PARTIELLE) plutôt que PRIX_DIFF_MEME_REF — comportement voulu
+    (voir apparier_facture, "c.cause or CauseFacture.PRIX_DIFF_MEME_REF"),
+    mais pas ce que CE test vérifie."""
+
+    lf1 = _ligne_facture(reference_fournisseur="REFX", quantite_facturee=50.0, prix_unitaire_ht=2.0)
+    lf2 = _ligne_facture(reference_fournisseur="REFX", quantite_facturee=50.0, prix_unitaire_ht=3.0)
+    ls = _ligne_suivi(reference="REFX", qte_livree=50.0)
+
+    resultats = apparier_facture([lf1, lf2], [ls], numero_facture="F1")
+
+    # Une seule ligne Suivi disponible pour 2 lignes facture non agrégées :
+    # la 1re la prend (SUR, forcé A_CONFIRMER par le garde-fou prix), la 2e
+    # n'a plus de candidat -> INCONNU (jamais un 2e rattachement inventé,
+    # voir apparier_facture — le garde-fou n'y touche alors pas, pour ne
+    # jamais forcer A_CONFIRMER avec ligne_suivi=None).
+    assert len(resultats) == 2
+    c_confirmee = next(c for c in resultats if c.ligne_suivi is not None)
+    assert c_confirmee.statut is StatutFacture.A_CONFIRMER
+    assert c_confirmee.cause is CauseFacture.PRIX_DIFF_MEME_REF
+    assert any("PU" in r or "prix" in r.lower() for r in c_confirmee.raisons)
+
+
+def test_facture_362840_multi_bl_meme_reference_11_lignes_sures():
+    """Test de bout en bout sur données RÉELLES (voir CLAUDE.md, session
+    S0, correction 1a) : Facture_362840.pdf (109 Distribution, commande
+    123.089) a 11 LIGNES BRUTES réparties sur 3 "Bon de livraison" —
+    P03200 et F2U15RVVOO sont chacun répartis sur 2 BL différents.
+    L'agrégation les ramène à 9 CORRESPONDANCES (une par référence
+    DISTINCTE, jamais 2 écritures visant la même ligne Excel) : "362840 ->
+    11/11 sûres" (cadrage de session) se vérifie donc au niveau des 11
+    lignes brutes, entièrement couvertes par ces 9 correspondances, TOUTES
+    sûres. Qté déjà livrée dans le Suivi = qté commandée réelle (lue sur le
+    "DETAIL DE LA COMMANDE" de ce même PDF) car la commande est entièrement
+    soldée."""
+
+    texte = lire_pdf(FIXTURES / "facture_109_362840_multi_bl_meme_ref.pdf")
+    f = parse_facture_109(texte)
+    assert len(f.lignes) == 11  # verrou de non-régression sur le parsing
+
+    quantites_suivi = {
+        "P03200": 200.0, "20080043": 600.0, "F2U15RVVOO": 300.0,
+        "10041540": 100.0, "10041940": 700.0, "10042724": 100.0,
+        "10043324": 150.0, "10043924": 150.0, "PVCORANGE": 5.0,
+    }
+    lignes_suivi = [
+        _ligne_suivi(ligne_excel=i + 2, reference=ref, designation="", qte_livree=qte, tarif_bl=None)
+        for i, (ref, qte) in enumerate(quantites_suivi.items())
+    ]
+
+    correspondances = apparier_facture(f.lignes, lignes_suivi, numero_facture=f.numero_facture)
+
+    # 9 références distinctes (P03200 et F2U15RVVOO agrégées depuis 2
+    # lignes brutes chacune : 11 - 2 = 9) — jamais 11, une agrégation
+    # réussie réduit le nombre de lignes à écrire, elle ne le préserve pas.
+    assert len(correspondances) == 9
+    assert all(c.statut is StatutFacture.SUR for c in correspondances)
+
+    par_ref = {c.ligne_facture.reference_fournisseur: c.ligne_facture for c in correspondances}
+    assert par_ref["P03200"].quantite_facturee == 200.0
+    assert par_ref["P03200"].numero_bl == "731835 + 731846"
+    assert par_ref["F2U15RVVOO"].quantite_facturee == 300.0
+    assert par_ref["F2U15RVVOO"].numero_bl == "731835 + 731934"
+
+
+# --- repli "premier token" : référence Suivi à suffixe libre (1b) ----------
+
+
+def test_apparier_repli_premier_token_suffixe_libre():
+    """Cas réel (session S0, Facture_6108234.pdf, commande M3.14.342) :
+    Suivi "SIXGPCP35 PVC" vs facture "SIXGPCP35" — le premier terme du
+    Suivi correspond exactement. Toujours "à confirmer"."""
+
+    lf = _ligne_facture(reference_fournisseur="SIXGPCP35")
+    ls = _ligne_suivi(reference="SIXGPCP35 PVC")
+
+    [c] = apparier_facture([lf], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.A_CONFIRMER
+    assert c.cause is CauseFacture.CLE_PARTIELLE
+    assert any("suffixe" in r.lower() for r in c.raisons)
+
+
+def test_apparier_repli_premier_token_ignore_si_reference_suivi_sans_espace():
+    """Une référence Suivi SANS espace n'est pas concernée par ce repli
+    (déjà couverte par la comparaison exacte si elle correspond, sinon
+    vraiment une référence différente) — jamais une comparaison "premier
+    token" sur une référence qui n'a pas de suffixe du tout."""
+
+    lf = _ligne_facture(reference_fournisseur="SIXGPCP35")
+    ls = _ligne_suivi(reference="AUTREREF")
+
+    [c] = apparier_facture([lf], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.INCONNU
+
+
+def test_apparier_repli_premier_token_ignore_si_plusieurs_candidats():
+    """2 lignes Suivi partagent le même premier token -> ambigu, jamais un
+    choix au hasard (même garde-fou que _repli_reference_proche)."""
+
+    lf = _ligne_facture(reference_fournisseur="SIXGPCP35")
+    ls1 = _ligne_suivi(ligne_excel=2, reference="SIXGPCP35 PVC")
+    ls2 = _ligne_suivi(ligne_excel=3, reference="SIXGPCP35 AUTRE")
+
+    [c] = apparier_facture([lf], [ls1, ls2], numero_facture="F1")
+
+    assert c.statut is StatutFacture.INCONNU
+
+
+# --- frais connus (session S0, correction 1c) -------------------------------
+
+
+def test_apparier_frais_connu_jamais_bloquant_et_ne_consomme_pas_de_ligne_suivi():
+
+    lf_frais = _ligne_facture(reference_fournisseur="ECO-23", quantite_facturee=10.0,
+                               prix_unitaire_ht=0.08, montant_ht=0.8)
+    lf_normale = _ligne_facture(reference_fournisseur="ABC123")
+    ls = _ligne_suivi(reference="ABC123")
+
+    frais_connus = {"COREDIME": {"ECO-23": "Éco-participation"}}
+
+    resultats = apparier_facture(
+        [lf_frais, lf_normale], [ls], numero_facture="F1",
+        fournisseur="COREDIME", frais_connus=frais_connus,
+    )
+
+    assert len(resultats) == 2
+    c_frais = next(c for c in resultats if c.ligne_facture is lf_frais)
+    assert c_frais.statut is StatutFacture.FRAIS
+    assert c_frais.cause is CauseFacture.FRAIS
+    assert c_frais.ligne_suivi is None
+
+    c_normale = next(c for c in resultats if c.ligne_facture is lf_normale)
+    assert c_normale.statut is StatutFacture.SUR  # la ligne Suivi n'a pas été "mangée" par le frais
+
+
+def test_apparier_frais_connu_uniquement_pour_le_bon_fournisseur():
+    """Le whitelist est PAR FOURNISSEUR — une référence "ECO-23" connue
+    chez COREDIME ne doit rien changer pour un autre fournisseur (jamais un
+    frais générique appliqué à l'aveugle)."""
+
+    lf = _ligne_facture(reference_fournisseur="ECO-23")
+    ls = _ligne_suivi(reference="ECO-23")
+
+    frais_connus = {"COREDIME": {"ECO-23": "Éco-participation"}}
+
+    [c] = apparier_facture(
+        [lf], [ls], numero_facture="F1", fournisseur="109 DISTRIBUTION", frais_connus=frais_connus,
+    )
+
+    assert c.statut is not StatutFacture.FRAIS
+
+
+def test_charger_frais_fournisseurs_fichier_absent_dict_vide(tmp_path):
+    assert charger_frais_fournisseurs(tmp_path / "inexistant.csv") == {}
+
+
+def test_charger_frais_fournisseurs_lit_le_csv(tmp_path):
+
+    chemin = tmp_path / "frais_fournisseurs.csv"
+    chemin.write_text(
+        "Fournisseur;Reference;Libelle\n"
+        "COREDIME;ECO-23;Éco-participation\n"
+        "COREDIME;9993;Livraison avion\n",
+        encoding="utf-8",
+    )
+
+    frais = charger_frais_fournisseurs(chemin)
+
+    assert frais["COREDIME"]["ECO-23"] == "Éco-participation"
+    assert frais["COREDIME"]["9993"] == "Livraison avion"
+
+
+# --- bon manuel "BC/BCN 24XXXX" (session S0, correction 1e) ----------------
+
+
+def test_est_bdc_manuel_24x_reconnait_les_deux_formats_reels():
+    assert est_bdc_manuel_24x(["BC 241766"])       # cas réel Facture_362777.pdf (109)
+    assert est_bdc_manuel_24x(["BCN 241461"])      # cas réel 6100226.pdf (Coredime, "Réf.: BCN 241461")
+
+
+def test_est_bdc_manuel_24x_faux_sur_un_format_suivi_normal():
+    assert not est_bdc_manuel_24x(["123.089"])
+    assert not est_bdc_manuel_24x(["M3.14.342"])
+    assert not est_bdc_manuel_24x([])
+    assert not est_bdc_manuel_24x([""])

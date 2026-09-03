@@ -9,6 +9,7 @@ from pathlib import Path
 
 from moteur.lecture_pdf import lire_pdf
 from moteur.fournisseurs.coredime import parse_facture_coredime
+from moteur.rapprochement.matching_facture import est_bdc_manuel_24x
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -294,3 +295,51 @@ def test_parse_facture_coredime_11_telephone_confondu_avec_ligne_incomplete():
     assert l0.quantite_facturee == 300.0
     assert l0.prix_unitaire_ht == 0.0972
     assert l0.montant_ht == 29.16
+
+
+def test_parse_facture_coredime_12_ecotaxe_montant_correct():
+    """BUG RÉEL CORRIGÉ (session S0) : la ligne d'éco-taxe a DEUX prix
+    consécutifs (brut et net, identiques) là où une ligne normale n'en a
+    qu'un — MOTIF_LIGNE_FACTURE_COREDIME fusionnait les deux derniers
+    nombres en un "montant" invalide, donnant 0,0€ au lieu de 0,80€ (10 x
+    0,08). Voir MOTIF_LIGNE_ECOTAXE_COREDIME."""
+
+    f = _parser("facture_coredime_6107800_ecotaxe.pdf")
+
+    assert f.numero_facture == "6107800"
+    assert f.numeros_commande == ["M3.23.026"]
+    assert f.total_ht_affiche == 55.8
+
+    assert len(f.lignes) == 2
+    refs = {l.reference_fournisseur: l for l in f.lignes}
+    assert refs["ECO-23"].designation == "ECOTAXE"
+    assert refs["ECO-23"].quantite_facturee == 10.0
+    assert refs["ECO-23"].prix_unitaire_ht == 0.08
+    assert refs["ECO-23"].montant_ht == 0.8
+    assert refs["LBCLASTD02"].montant_ht == 55.0
+
+    assert round(sum(l.montant_ht for l in f.lignes), 2) == f.total_ht_affiche
+
+
+def test_parse_facture_coredime_13_ecotaxe_montant_correct_2e_piece_bdc_manuel():
+    """2e confirmation indépendante du même bug (voir test 12), sur une
+    pièce dont le N°Réf.Client est en plus un bon manuel non exploitable
+    ("Réf.:  BCN 241461" — voir CauseFacture.BDC_MANUEL_24X,
+    moteur.rapprochement.matching_facture) : numeros_commande reste vide,
+    comme avant, ce n'est pas ce que ce test vérifie."""
+
+    f = _parser("facture_coredime_6100226_bdc_manuel.pdf")
+
+    assert f.numero_facture == "6100226"
+    assert f.numeros_commande == []
+    assert f.numeros_commande_bruts == ["BCN 241461"]
+    assert est_bdc_manuel_24x(f.numeros_commande_bruts)
+    assert f.total_ht_affiche == 37.81
+
+    assert len(f.lignes) == 2
+    refs = {l.reference_fournisseur: l for l in f.lignes}
+    assert refs["ECO-23"].quantite_facturee == 5.0
+    assert refs["ECO-23"].montant_ht == 0.4
+    assert refs["LBCLASTD02"].montant_ht == 37.41
+
+    assert round(sum(l.montant_ht for l in f.lignes), 2) == f.total_ht_affiche

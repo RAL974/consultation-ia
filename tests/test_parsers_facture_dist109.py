@@ -10,6 +10,7 @@ from pathlib import Path
 
 from moteur.lecture_pdf import lire_pdf
 from moteur.fournisseurs.dist109 import parse_facture_109
+from moteur.rapprochement.matching_facture import est_bdc_manuel_24x
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -62,11 +63,73 @@ def test_parse_facture_dist109_2_bc_interne_non_exploitable():
 
     assert f.numero_facture == "360310"
     assert f.numeros_commande == []
+    assert f.numeros_commande_bruts == ["BC 241659"]  # voir CauseFacture.BDC_MANUEL_24X
+    assert est_bdc_manuel_24x(f.numeros_commande_bruts)
     assert f.numeros_bl == ["723657"]
     assert f.total_ht_affiche == 87.5
 
     assert len(f.lignes) == 2
     assert [l.reference_fournisseur for l in f.lignes] == ["P07312", "515509"]
+    assert round(sum(l.montant_ht for l in f.lignes), 2) == f.total_ht_affiche
+
+
+def test_parse_facture_dist109_5_bon_manuel_bc_24x():
+    """2e confirmation réelle du format "bon manuel" (voir test 2 et
+    CauseFacture.BDC_MANUEL_24X, moteur.rapprochement.matching_facture) :
+    N°Réf.Client = "BC 241766" (préfixe BC + 24 + 4 chiffres) — commande
+    passée sur un carnet papier, structurellement non rattachable à une
+    ligne du Suivi, jamais devinée."""
+
+    f = _parser("facture_109_362777_bdc_manuel.pdf")
+
+    assert f.numero_facture == "362777"
+    assert f.numeros_commande == []
+    assert f.numeros_commande_bruts == ["BC 241766"]
+    assert est_bdc_manuel_24x(f.numeros_commande_bruts)
+    assert f.numeros_bl == ["732796"]
+    assert f.total_ht_affiche == 62.0
+
+    assert len(f.lignes) == 1
+    assert f.lignes[0].reference_fournisseur == "CDS764F"
+    assert round(sum(l.montant_ht for l in f.lignes), 2) == f.total_ht_affiche
+
+
+def test_parse_facture_dist109_6_multi_bl_meme_reference_bases_de_lagregation():
+    """Fixture support de la correction 1a (agrégation multi-BL, voir
+    moteur.rapprochement.matching_facture.agreger_lignes_meme_reference et
+    tests/test_rapprochement_matching_facture.py) — verrouille ICI
+    seulement le PARSING (11 lignes brutes réparties sur 3 BL, P03200 et
+    F2U15RVVOO chacun répartis sur 2 BL), l'agrégation elle-même est
+    testée côté matching."""
+
+    f = _parser("facture_109_362840_multi_bl_meme_ref.pdf")
+
+    assert f.numero_facture == "362840"
+    assert f.numeros_commande == ["123.089"]
+    assert f.numeros_bl == ["731835", "731846", "731934"]
+    assert f.total_ht_affiche == 1972.0
+
+    assert len(f.lignes) == 11
+    refs = [l.reference_fournisseur for l in f.lignes]
+    assert refs.count("P03200") == 2
+    assert refs.count("F2U15RVVOO") == 2
+    assert round(sum(l.montant_ht for l in f.lignes), 2) == f.total_ht_affiche
+
+
+def test_parse_facture_dist109_7_partielle_facturation_inferieure_a_la_livraison():
+    """Fixture "partielle" (voir CLAUDE.md session S0) : une facturation
+    PARTIELLE d'un BL réel, sans bug de parsing — le rapprochement doit la
+    classer QTE_PARTIELLE (voir test_rapprochement_matching_facture.py),
+    pas un correctif de ce parser."""
+
+    f = _parser("facture_109_362763_partielle.pdf")
+
+    assert f.numero_facture == "362763"
+    assert f.numeros_commande == ["M3.23.024"]
+    assert f.numeros_bl == ["729174"]
+    assert f.total_ht_affiche == 135.2
+
+    assert len(f.lignes) == 3
     assert round(sum(l.montant_ht for l in f.lignes), 2) == f.total_ht_affiche
 
 
