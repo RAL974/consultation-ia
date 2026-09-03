@@ -33,6 +33,7 @@ from moteur.modele import Article
 from moteur.outils import to_float, lignes_propres
 from moteur.ocr import regrouper_lignes
 from moteur.rapprochement.modele_bl import BonLivraison, LigneBL
+from moteur.rapprochement.modele_facture import Facture, LigneFacture
 
 _NUM = re.compile(r"^\s*\d[\d\s]*,\d{2}\s*$")
 _TVA = re.compile(r"^C\d$")
@@ -345,6 +346,203 @@ def parse_bl_stand64(mots_par_page: list[list[dict]]) -> BonLivraison:
     )
 
 
+# --- GABARIT FACTURE (Stand 64) --------------------------------------------
+# Session F4 suite (2026-09-02+), ~25 pièces réelles déposées par
+# l'acheteur (Facture_XXXXX.pdf), texte NATIF — jamais de scan (contrairement
+# au BL du même fournisseur, qui lui en a besoin malgré l'apparence nette).
+#
+# Structure par article, ancrée sur le MONTANT — mais ici le Total HT de
+# chaque ligne est imprimé AVANT sa désignation (pas après, contrairement à
+# la plupart des autres fournisseurs) : vérifié par cohérence arithmétique
+# EXACTE sur une pièce riche à 6 articles (facture_33707) — la somme des 6
+# "Total HT" retombe pile sur le Total HT affiché en pied de facture
+# (3 615,00€), et pour CHAQUE ligne, Total HT = Qté x P.U Net, et
+# P.U Net = P.U x (1 - Rem%/100) à l'euro près. Ordre après le code TVA :
+# Qté, P.U Net, P.U (brut), Rem%.
+#
+# N° de commande : préfère notre propre "BON DE COMMANDE" (reproduit en
+# pied de certaines factures, pas systématique) au "BC N°..." de l'en-tête,
+# qui peut souffrir d'un décalage du point réel constaté (cas réel
+# facture_33707 : en-tête "BC N°M2.220.78" vs BON DE COMMANDE "M2.22.078" —
+# mêmes chiffres "22078", point décalé d'une position) — pas de correctif
+# général tenté (un seul exemple, règle d'or), juste une préférence de
+# source quand les deux sont disponibles.
+#
+# Eco-part : colonne listée dans l'en-tête du tableau mais jamais rencontrée
+# non nulle sur les pièces vues à ce jour (toujours 0,00€ en pied de
+# facture) — pas de position confirmée dans le bloc de 4 valeurs, à
+# éclaircir dès qu'un exemple réel avec Eco-part renseignée se présentera.
+MOTIF_NUMERO_FACTURE_STAND64 = re.compile(r"Facture client n°\s*([\d\s]+?)\s+du\s+(\d{2}/\d{2}/\d{4})")
+MOTIF_ECHEANCE_STAND64 = re.compile(r"Date d'échéance\s*:\s*(\d{2}/\d{2}/\d{4})")
+MOTIF_BL_FACTURE_STAND64 = re.compile(r"Bon de livraison n°\s*(\d+)\s+du\s+(\d{2}/\d{2}/\d{4})")
+MOTIF_COMMANDE_ENTETE_STAND64 = re.compile(r"BC N°\s*([A-Z0-9][A-Z0-9.\-]*)")
+MOTIF_TOTAL_HT_AFFICHE_STAND64 = re.compile(r"Total HT\s*\n\s*([\d\s]+,\d{2})\s*EUR")
+MOTIF_NUM_FACTURE_STAND64 = re.compile(r"^\d[\d\s]*,\d{2}$")
+MOTIF_TVA_FACTURE_STAND64 = re.compile(r"^C\d$")
+
+# BUG RÉEL CORRIGÉ : un mot de désignation tout en MAJUSCULES sans aucun
+# chiffre ni tiret (ex. "CHAINETTE", fin d'une désignation qui déborde sur
+# 2 lignes) matchait à tort un motif référence trop permissif — TOUTES les
+# vraies références vues à ce jour contiennent au moins UN TIRET (même
+# "WESTI-COMET-KITLUM-N", sans aucun chiffre) : signal fiable, contrairement
+# à "au moins un chiffre" qui aurait exclu cette référence légitime. "+"
+# toléré dans les segments (référence réelle "ELIOT-ES52-2678-BLC+BLC",
+# déjà connue côté BL du même fournisseur, commande M2.5.126).
+MOTIF_REF_FACTURE_STAND64 = re.compile(r"^[A-Z][A-Z0-9+]*(?:-[A-Z0-9+]+)+$")
+MOTIF_FIN_TABLEAU_FACTURE_STAND64 = re.compile(r"^Total$")
+# --- fin GABARIT FACTURE -----------------------------------------------------
+
+
+def _entete_facture_stand64(lignes: list[str]) -> str:
+    """N° de commande : préfère le "BON DE COMMANDE" (notre propre BC, voir
+    bandeau) ; repli sur le "BC N°..." de l'en-tête sinon."""
+
+    for i, l in enumerate(lignes):
+        if l.strip().upper() == "BON DE COMMANDE" and i + 1 < len(lignes):
+            candidat = lignes[i + 1].strip()
+            if candidat:
+                return candidat
+
+    for l in lignes:
+        m = MOTIF_COMMANDE_ENTETE_STAND64.search(l)
+        if m:
+            return m.group(1).upper()
+
+    return ""
+
+
+def _zone_articles_facture_stand64(lignes: list[str]):
+    """(indice_debut, indice_fin) — entre le "Bon de livraison n°..." (le
+    tableau d'articles suit directement) et le "Total" bare qui introduit
+    le tableau de ventilation TVA."""
+
+    i_bl = next((i for i, l in enumerate(lignes) if MOTIF_BL_FACTURE_STAND64.search(l)), None)
+    if i_bl is None:
+        return None
+
+    debut = i_bl + 1
+    i_fin = next(
+        (i for i in range(debut, len(lignes)) if MOTIF_FIN_TABLEAU_FACTURE_STAND64.match(lignes[i].strip())),
+        len(lignes),
+    )
+
+    return debut, i_fin
+
+
+def _lignes_facture_stand64(lignes: list[str], debut: int, fin: int, numero_bl: str) -> list[LigneFacture]:
+    """Ancrée sur la RÉFÉRENCE (fiable dans les deux sens, voir
+    MOTIF_REF_FACTURE_STAND64), pas sur un compte de valeurs numériques —
+    celui-ci varie réellement d'une ligne à l'autre au sein d'un MÊME
+    document (Eco-part présente ou non par ligne, cas réel facture_34184 :
+    2 lignes sur 3 avec Eco-part renseignée, 1 sans, un compte fixe aurait
+    décalé une ligne sur deux). Qté et P.U Net sont à position FIXE juste
+    après le code TVA (fiable, quel que soit le nombre de valeurs
+    restantes) ; Total HT et désignation sont retrouvés en remontant DEPUIS
+    la référence : tout ce qui n'est pas numérique juste avant elle est
+    désignation, le premier nombre rencontré au-delà est le Total HT — ne
+    dépend jamais du nombre de valeurs consommées par la ligne PRÉCÉDENTE."""
+
+    indices_ref = [i for i in range(debut, fin) if MOTIF_REF_FACTURE_STAND64.match(lignes[i].strip())]
+
+    articles = []
+    for idx_ref in indices_ref:
+
+        i_tva = idx_ref + 1
+        if i_tva >= fin or not MOTIF_TVA_FACTURE_STAND64.match(lignes[i_tva].strip()):
+            continue
+
+        i_qte = i_tva + 1
+        if i_qte + 1 >= fin:
+            continue
+        try:
+            qte = to_float(lignes[i_qte].strip())
+            pu_net = to_float(lignes[i_qte + 1].strip())
+        except ValueError:
+            continue
+
+        k = idx_ref - 1
+        designation_lignes = []
+        while k >= debut and not MOTIF_NUM_FACTURE_STAND64.match(lignes[k].strip()):
+            if lignes[k].strip():
+                designation_lignes.insert(0, lignes[k].strip())
+            k -= 1
+        if k < debut:
+            continue
+        total_ht = to_float(lignes[k].strip())
+
+        if not qte:
+            continue
+
+        articles.append(LigneFacture(
+            reference_fournisseur=lignes[idx_ref].strip(),
+            designation=" ".join(designation_lignes),
+            quantite_facturee=qte,
+            prix_unitaire_ht=pu_net,
+            montant_ht=total_ht,
+            numero_bl=numero_bl,
+        ))
+
+    return articles
+
+
+def parse_facture_stand64(texte: str) -> Facture:
+
+    lignes = lignes_propres(texte)
+
+    numero_facture = ""
+    date_facture = ""
+    m_num = MOTIF_NUMERO_FACTURE_STAND64.search(texte)
+    if m_num:
+        numero_facture = m_num.group(1).replace(" ", "")
+        date_facture = m_num.group(2)
+
+    date_echeance = ""
+    m_ech = MOTIF_ECHEANCE_STAND64.search(texte)
+    if m_ech:
+        date_echeance = m_ech.group(1)
+
+    zone = _zone_articles_facture_stand64(lignes)
+    if zone is None:
+        return Facture(
+            fournisseur="STAND 64", fichier="", numero_facture=numero_facture,
+            date_facture=date_facture, date_echeance=date_echeance,
+        )
+
+    debut, fin = zone
+
+    m_bl = MOTIF_BL_FACTURE_STAND64.search(lignes[debut - 1])
+    numero_bl = m_bl.group(1) if m_bl else ""
+
+    numero_commande = _entete_facture_stand64(lignes)
+
+    lignes_facture = _lignes_facture_stand64(lignes, debut, fin, numero_bl)
+
+    total_ht_affiche = None
+    m_total = MOTIF_TOTAL_HT_AFFICHE_STAND64.search(texte)
+    if m_total:
+        total_ht_affiche = to_float(m_total.group(1))
+        somme = round(sum(l.montant_ht for l in lignes_facture), 2)
+        if abs(somme - total_ht_affiche) > 0.02:
+            print(
+                f"!! STAND 64 (Facture) : Total HT du PDF ({total_ht_affiche:.2f}€) != somme "
+                f"des lignes extraites ({somme:.2f}€) — une ligne a peut-être été oubliée ou mal lue "
+                "(voir bandeau GABARIT FACTURE)."
+            )
+
+    return Facture(
+        fournisseur="STAND 64",
+        fichier="",
+        numero_facture=numero_facture,
+        date_facture=date_facture,
+        date_echeance=date_echeance,
+        numeros_commande=[numero_commande] if numero_commande else [],
+        numeros_bl=[numero_bl] if numero_bl else [],
+        lignes=lignes_facture,
+        total_ht_affiche=total_ht_affiche,
+    )
+
+
 FOURNISSEURS = ["STAND 64"]
 parse = parse_stand64
 parse_bl = parse_bl_stand64
+parse_facture = parse_facture_stand64

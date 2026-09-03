@@ -2847,6 +2847,78 @@ commandée, donc pas de garde-fou sur-livraison déclenché).
   quantité commandée soit par reconstitution du Total HT — 7 BL archivés
   avec leur BC.
 
+## Session suivante — lot de 16 BL du jour, ligne RAVATE silencieusement
+perdue trouvée par recoupement Total HT, cluster 123.107 (10 lignes)
+reconstruit à la main, typo OCR "COMMANBDE" (fait)
+
+- **RAVATE (M3.23.051), même famille de bug que la session précédente
+  (Px Brut illisible décale la fenêtre)** : la ligne 404926 (qté_cmd=20)
+  ressortait à 11,6583 — cellule qté+unité collée (":UN:20,00:") non
+  reconnue par `_ligne_chiffree_bl_ravate()`, retombant sur le repli à 3
+  cellules qui a pris Remises pour Px Net. Corrigé à la main : qté=20
+  (imprimée en clair), prix_net=1,99€. **Plus grave, trouvé en recoupant
+  le Total HT (227,75€) plutôt que ligne par ligne** : une 2e ligne du
+  même BL (069831L, qté_cmd=20) n'apparaissait dans AUCUNE catégorie du
+  rapport (ni SUR, ni A_CONFIRMER, ni INCONNU) — silencieusement perdue
+  car ses cellules chiffrées ("80.6", ":29.9") ne parsaient pas du tout.
+  Reconstruite par soustraction (Total HT − les 3 autres lignes connues =
+  132,60€, qté=20 → prix_net=6,63€) — la somme des 4 montants
+  (39,80+156,00+195,00+58,50... voir détail complet ci-dessous) retombe
+  exactement sur 227,75€. **Leçon générale, au-delà de ce cas précis** :
+  ne pas se contenter de vérifier que les lignes RENVOYÉES sont
+  cohérentes — vérifier aussi que leur NOMBRE correspond aux lignes
+  visibles sur le document ("X lignes" imprimé en pied de tableau chez
+  RAVATE), sans quoi une ligne entière peut disparaître sans qu'aucune
+  anomalie ne soit levée.
+- **RAVATE (123.107, 2 pages), reconstruction complète de 10 lignes de
+  câbles en couronnes de 100m** : toutes les références ressortaient
+  INCONNU car le préfixe "H07" est systématiquement absent de l'OCR
+  ("VU1.5VJ" au lieu de "H07VU1.5VJ" — Suivi attend la forme complète).
+  La page de continuation ("123.107 SUITE.jpg", pied de tableau avec le
+  Total HT réel de 1627,00€) n'a donné 0 ligne — seule la 1ère page
+  contient le tableau. Reconstruit entièrement à la main à partir du
+  nombre de couronnes imprimé par ligne (×100m, prix par couronne divisé
+  par 100) : 9 des 10 lignes ont un nombre de couronnes directement
+  lisible et un prix par couronne strictement identique au sein de chaque
+  famille de section (19,50€/couronne pour tout le 1,5mm², 29,50€ pour
+  tout le 2,5mm²) — ce motif a servi à déduire la 10e ligne (VU2.5R,
+  qté=1100, aucune cellule de qté lisible) par élimination. Vérifié :
+  somme des 10 montants = 1627,00€ = Total HT exact de la page 2.
+- **COREDIME (M3.23.049) : l'intitulé même de l'ancre était corrompu par
+  l'OCR** — "Rfrence COMMANBDE No M3.23.049" (un "B" inséré dans
+  "COMMANDE") a fait échouer le motif de recherche de commande, jamais un
+  problème de cellule de données cette fois. Commande retrouvée par
+  lecture directe du texte brut (aucune ambiguïté, le nom du fichier la
+  confirmait aussi) ; référence SIBP01120 = P01120 (même famille de
+  préfixe SIB que la session précédente), qté=80 confirmée par "80 X 1
+  unite" imprimé, correspond exactement à la quantité commandée.
+- **Fichiers hors périmètre confirmés** : `BL E26.009.pdf` (toujours le
+  même bon de commande interne, pas déplacé faute de consigne) et un
+  nouveau document RAVATE PRO (`doc...164035.pdf`) — fournisseur reconnu
+  par le détecteur mais aucun parser BL n'existe encore pour cette
+  entité (distincte de RAVATE Elec, voir tableau fournisseurs plus haut) ;
+  laissé de côté, pas forcé.
+- **2 fichiers archivés au mauvais endroit ("Commande inconnue") malgré une
+  écriture manuelle réussie** : `123.107 SUITE.jpg` (0 ligne/pas de
+  commande propre à cette page de continuation) et `M3.23.049.pdf` (typo
+  OCR ci-dessus, non résolue par un 2e passage automatique) — corrigés à
+  la main juste après l'archivage (dossier `123.107/` et nouveau dossier
+  `M3.23.049/` créé), aucune donnée perdue. **Leçon opérationnelle** :
+  une correction manuelle de commande faite pour l'ÉCRITURE Suivi n'est
+  PAS automatiquement répercutée sur l'ARCHIVAGE si ce dernier repose sur
+  un nouveau passage de `lire_bl()` — toujours vérifier le dossier de
+  destination après un archivage impliquant un cas corrigé à la main.
+- **Script d'archivage interrompu en cours de lot (13 fichiers), cause
+  non identifiée avec certitude** (aucun message d'erreur informatif au
+  moment du plantage, juste une exception `shutil`/`CopyFile2`) — les 4
+  premiers fichiers archivés avant l'arrêt, relancé sans problème sur les
+  11 restants juste après. Cohérent avec les pannes ponctuelles déjà
+  documentées (fichier verrouillé transitoirement par un autre
+  processus) plutôt qu'un vrai bug — à surveiller si ça se reproduit.
+- **Recette finale** : 58 lignes du Suivi écrites au total (46 sûres
+  automatiques + 12 reconstruites/corrigées à la main), toutes entières,
+  14 BL/pages archivés avec leur BC quand trouvé.
+
 ## Rapprochement factures — cadrage F1 (préparation, aucun parser écrit)
 
 Suite de [Rapprochement AI](#rapprochement-ai-moteurrapprochement--branche-en-cours) :
@@ -3060,9 +3132,10 @@ que **58 factures sur 79 (73 %)** ont EN PLUS, sur une page suivante, une
 copie de NOTRE PROPRE bon de commande (reconnaissable : "BON DE COMMANDE",
 "Electricité Services Réunion", "William AIMAR", "achats@espace-soleil.re"
 — c'est le PDF généré par notre propre flux, pas un document de 109) —
-piste à creuser plus tard (pas bloquant pour ce cadrage) : probablement un
-regroupement de pièces jointes du même e-mail plutôt qu'un ajout de 109
-Distribution elle-même.
+**expliqué a posteriori (session F4/Stand64+EDOI, voir plus bas) : exigence
+du service comptable de l'acheteur, pas un ajout de 109 Distribution
+elle-même** — une facture doit être transmise accompagnée de son BL et de
+son bon de commande, d'où ce regroupement systématique.
 
 **Champs présents, tous en texte natif PyMuPDF** (l'ordre de lecture
 `get_text()` NE SUIT PAS l'ordre visuel — même défi que le gabarit DEVIS de
@@ -3974,8 +4047,465 @@ le BL n'est pas non plus encore rapproché pour ces commandes).
    résorbé" — Coredime ET Cominter le sont maintenant, bon moment pour
    reprendre ces deux points.
 3. Fournisseurs BL déjà couverts mais sans facture testée : Electric
-   Plus/GMR (facture=BL, déjà documenté), Ravate, Stand 64, DEM, YESSS,
+   Plus/GMR (facture=BL, déjà documenté), Ravate, DEM, YESSS,
    Protecthoms — dès que de vraies factures seront déposées pour eux.
+
+## Rapprochement factures — F4 : Stand 64, 4e fournisseur + nouveau lot
+Coredime + EDOI amorcé (fait, 2026-09-02)
+
+Suite directe de F4/Cominter. L'acheteur dépose 3 lots en une fois :
+factures Stand 64 (nouveau fournisseur, ~25 pièces, déposées directement en
+PDF — pas de .msg à extraire cette fois), de nouvelles factures Coredime
+(19 pièces, format `Nouvelles factures disponibles` automatique du portail
+Sonepar — 1 seul PDF en pièce jointe DIRECTE par .msg, pas d'e-mail
+imbriqué comme chez Prisca LEBLÉ, extraction bien plus simple), et EDOI
+(2 pièces, même mécanisme Sonepar) — *"la filiale soeur SONEPAR de
+Coredime à Mayotte [...] les deux principaux cas de BL non chiffrés"*.
+
+### Parser facture Stand 64 (`moteur/fournisseurs/stand64.py`, section
+GABARIT FACTURE, 4 fixtures réelles)
+
+Texte NATIF (jamais de scan pour la facture, contrairement au BL du même
+fournisseur qui, lui, en a besoin malgré l'apparence nette). Structure par
+article : **le Total HT est imprimé AVANT la désignation** (pas après,
+contrairement à la plupart des autres fournisseurs) — vérifié par
+cohérence arithmétique exacte sur une pièce à 6 articles (la somme des 6
+Total HT retombe pile sur le Total HT affiché). Puis Désignation (1-2
+lignes), Référence, code TVA (Cx), puis Qté/P.U Net/P.U/Rem% dans cet
+ordre.
+
+**3 bugs réels trouvés et corrigés en confrontant plusieurs factures
+riches** :
+1. **Un mot de désignation tout en MAJUSCULES sans chiffre ni tiret**
+   ("CHAINETTE", fin d'une désignation qui déborde sur 2 lignes) était pris
+   à tort pour une référence par un motif trop permissif — TOUTES les
+   vraies références contiennent au moins UN TIRET (même
+   "WESTI-COMET-KITLUM-N", sans aucun chiffre) : signal fiable retenu à la
+   place de "au moins un chiffre" (qui aurait exclu cette référence
+   légitime). Référence contenant un "+" ("ELIOT-ES52-2678-BLC+BLC", déjà
+   connue côté BL du même fournisseur) : toléré dans les segments.
+2. **BUG DE FOND, le plus important : l'Eco-part est présente ou non LIGNE
+   PAR LIGNE au sein d'un MÊME document** (cas réel `Facture_34184.pdf` :
+   2 lignes sur 3 avec Eco-part renseignée — une 5e valeur numérique après
+   le code TVA en plus des 4 habituelles —, 1 sans) — un compte de valeurs
+   numériques fixe après le code TVA décalait alors une ligne sur deux
+   (perdait la ligne suivante, polluait sa désignation avec des chiffres
+   errants). Corrigé par un changement d'ANCRAGE : au lieu de compter les
+   valeurs numériques en avançant depuis le code TVA, `_lignes_facture_stand64()`
+   trouve d'abord TOUTES les références de la zone (motif fiable dans les
+   deux sens), puis pour chacune : Qté et P.U Net sont à position FIXE
+   juste après le code TVA (fiable quel que soit le nombre de valeurs
+   restantes, jamais besoin de les compter) ; Total HT et désignation sont
+   retrouvés en REMONTANT depuis la référence (tout ce qui n'est pas
+   numérique juste avant elle est désignation, le premier nombre rencontré
+   au-delà est le Total HT) — ne dépend jamais du nombre de valeurs
+   consommées par la ligne précédente. Un caractère isolé ("+") parfois
+   imprimé entre l'Eco-part d'une ligne et le Total HT de la suivante est
+   ignoré naturellement par cette approche.
+3. **N° de commande** : l'en-tête ("BC N°...") peut avoir un point réel
+   décalé par rapport à notre propre "BON DE COMMANDE" reproduit en pied de
+   certaines factures (cas réel : en-tête "BC N°M2.220.78" vs BON DE
+   COMMANDE "M2.22.078", mêmes chiffres "22078") — celui-ci est préféré
+   quand disponible, pas de correctif général tenté sur l'en-tête (un seul
+   exemple, règle d'or).
+
+Balayage complet sur les 23 vraies factures Stand 64 disponibles : **23/23
+exactes** (Total HT recalculé = Total HT affiché à chaque fois) après ces
+correctifs.
+
+### Nouveau lot Coredime (parser déjà existant, aucun code nécessaire)
+
+19 nouvelles factures extraites depuis les .msg de notification portail
+Sonepar (structure `Cher(e) client(e), veuillez trouver en pièce jointe...`,
+1 PDF direct par .msg — bien plus simple à extraire que le montage
+imbriqué de Prisca LEBLÉ). Traitées par le parser déjà construit en F4
+Coredime, sans aucune modification. 2 anomalies de lecture connues (même
+famille que les gaps déjà documentés : Total HT affiché mais 0 ligne
+extraite, limite acceptée du garde-fou remise-double conservateur).
+
+### EDOI — investigué, PAS ENCORE construit
+
+Les 2 pièces disponibles (format `6005921.pdf`/`6005922.pdf`, mêmes .msg de
+notification Sonepar qu'un nouveau Coredime) révèlent une structure
+prometteuse mais pas encore assez éprouvée pour coder un parser fiable :
+- **Mêmes repères de page que Coredime** (`##ESIGUID;...`, `##NM#FR;...`,
+  `#####DEMAT-FJ;...;Facture;<date>;<montant>;<numero>;...;EDOI;...;`) —
+  cohérent avec le fait que Coredime et EDOI sont deux filiales Sonepar
+  partageant probablement la même plateforme de facturation. Une bonne
+  base de départ pour construire le parser EDOI en réutilisant l'ossature
+  déjà éprouvée côté Coredime plutôt qu'en repartant de zéro.
+- **Un même PDF contient à la fois la FACTURE (page 1) et le BON DE
+  LIVRAISON correspondant** (page suivante, même numéro de document
+  "EDO Bxxxxxx", "BON D'EXPEDITION N°Bxxxxxx"). **Expliqué par
+  l'acheteur, PAS une bizarrerie EDOI** : "c'est une exigence de notre
+  service comptable, les factures doivent venir avec leur BL et leur
+  commande" — même règle que le regroupement facture+BdC déjà observé chez
+  109 Distribution (73 % des factures, voir cadrage F1 plus haut, "piste à
+  creuser" alors non résolue). **Portée générale, à garder en tête pour
+  tout futur fournisseur** : ce n'est pas une structure de document propre
+  à un fournisseur donné, donc pas surprenant de la revoir ailleurs — ne
+  plus la signaler comme une anomalie de format, juste borner la zone
+  BL/BC pour ne pas la confondre avec la zone facture (déjà fait ici et
+  chez 109 Distribution).
+- Énormément de texte de CGV (conditions générales de vente, ~500 lignes)
+  entoure le contenu utile — la zone d'articles réelle devra être bornée
+  aussi précisément que chez Coredime, voire plus.
+- **Seulement 2 pièces disponibles à ce jour, chacune avec 1 seule ligne
+  d'article** — pas assez pour valider un motif de ligne multi-article
+  fiable (règle d'or : jamais de règle de parsing inventée sans assez
+  d'exemples réels). À reprendre dans une session dédiée dès que davantage
+  de factures EDOI seront disponibles. En attendant, les 2 pièces restent
+  `a_traiter/Factures/` (fournisseur EDOI déjà reconnu par le détecteur —
+  utilisé côté devis — mais sans parser facture : `factures_sans_parser`,
+  jamais déplacées vers "À vérifier/", comportement déjà tolérant établi).
+
+### Recette réelle et écriture (2026-09-02)
+
+Lecture seule sur les 47 fichiers du dossier (41 factures lues : 19
+Coredime + 22 Stand 64 ; 2 EDOI mises de côté proprement ; 4 fichiers
+`FA <numéro>.pdf` restés MYSTÉRIEUX — scans purs, 0 caractère, jamais
+identifiés avec certitude, à clarifier avec l'acheteur) : **61 lignes
+sûres, 27 073,72 €**, 5 à confirmer (facturations partielles légitimes +
+1 repli référence-proche), 14 inconnues (surtout des éco-taxes ambiguës),
+7 blocs "commande introuvable" (dont un format Stand 64 sans aucun
+séparateur, "240618", à éclaircir).
+
+Suite complète vérifiée verte avant écriture. **Écriture réelle
+confirmée** : 61 lignes écrites, sauvegarde horodatée, 21 factures
+archivées avec leur BC (7 Coredime + 14 Stand 64), 24 déplacées vers
+`À vérifier/` (0 échec d'archivage). Résorption : **COREDIME** 779/864
+lignes livrées encore sans facture (85 déjà facturées) ; **STAND 64**
+73/102 (29 déjà facturées — premier vrai chiffre pour ce fournisseur tout
+neuf, contre 0 en début de session).
+
+**Reste à faire** :
+1. ~~Identifier les 4 fichiers `FA <numéro>.pdf`~~ **FAIT** — confirmés par
+   l'acheteur comme des factures **Stand 64** (voir section suivante,
+   scans purs, pas encore de `parse_facture_ocr` pour ce fournisseur).
+2. Construire le parser facture EDOI dès que davantage de pièces réelles
+   seront disponibles (voir ci-dessus).
+3. Les 24 factures en `À vérifier/` de cette session, plus le reliquat des
+   sessions précédentes (Coredime/Cominter).
+4. Toujours en attente : extension Hermes, regénération FNP d'août.
+
+## Rapprochement factures — F4 : Electric Plus/GMR, 5e fournisseur, repli
+OCR générique du flux Facture (fait, 2026-09-02)
+
+Suite directe de la session Stand 64 ci-dessus, sur demande explicite de
+l'acheteur : *"je t'ai maintenant ajouté les factures Electric Plus (GMR),
+la particularité c'est que eux n'ont pas de BL à proprement parler, ce sont
+directement des factures qui font office de BL. On suit le même processus
+tout de même, on enchaîne."*
+
+### Repli OCR générique dans le flux Facture (nouveau, architecture)
+
+Jusqu'ici, **tous** les parsers facture (109 Distribution, Coredime,
+Cominter, Cominter Mayotte, Stand 64) lisaient du texte PDF NATIF
+(`moteur.lecture_pdf.lire_pdf`) — `moteur/rapprochement/lecture_facture.py`
+appelait `parser_facture(fournisseur, texte)` sans alternative. Electric
+Plus/GMR est le premier fournisseur FACTURE dont les pièces sont des SCANS
+purs (comme son BL, déjà couvert) : `lire_pdf()` y renvoie une chaîne
+vide.
+
+Plutôt que de câbler un cas spécial "Electric Plus", **repli OCR
+générique** ajouté à `lire_facture()` : si `lire_pdf()` ne renvoie AUCUN
+texte, la lecture bascule sur l'OCR (`moteur.ocr.mots_document`, même
+détection de fournisseur qu'avant mais sur le texte OCR) et appelle un
+NOUVEAU registre `parser_facture_ocr(fournisseur, mots_par_page)` (
+`moteur/rapprochement/parsers_facture.py`, découvre un attribut
+`parse_facture_ocr` optionnel sur chaque module fournisseur, symétrique à
+`parse_facture`). **Profite à tout futur fournisseur facture scanné**, pas
+seulement Electric Plus — par exemple les 4 factures Stand 64 "FA
+<numéro>.pdf" identifiées ci-dessus (scans purs) seront automatiquement
+prises en charge dès qu'un `parse_facture_ocr` existera pour ce
+fournisseur, sans retoucher `lecture_facture.py`.
+
+### Parser (`moteur/fournisseurs/electricplus.py::parse_facture_electricplus_ocr`)
+
+Réutilise au maximum l'extraction déjà éprouvée côté BL (même document,
+même OCR — GMR n'a qu'UN SEUL document, qui sert aux deux flux) :
+refactor pur de `_ligne_vers_article_electricplus`/
+`_parse_une_facture_electricplus` pour extraire une fonction commune
+(`_champs_ligne_electricplus`, `_entete_et_lignes_electricplus`) réutilisée
+par les DEUX constructeurs (`_ligne_vers_article_electricplus` pour
+`LigneBL`, `_ligne_vers_ligne_facture_electricplus`/
+`_construire_facture_electricplus` pour `Facture`/`LigneFacture`) — vérifié
+sans aucune régression sur les 14 tests BL/devis déjà existants (identique
+avant/après refactor).
+
+**Découverte majeure, nouvelle pratique de l'acheteur (pas une bizarrerie
+GMR)** : suite à l'exigence de son service comptable ("les factures
+doivent venir avec leur BL et leur commande", déjà documentée plus haut
+pour 109 Distribution — même règle, 2e fournisseur qui la révèle), chaque
+facture GMR de ce lot est accompagnée de NOTRE PROPRE "BON DE COMMANDE"
+généré par ce projet, et PARFOIS du DEVIS d'origine — plusieurs types de
+documents empilés dans un même fichier PDF.
+
+**2 bugs réels trouvés et corrigés en confrontant 21 vraies factures** :
+
+1. **Désignation étalée sur PLUSIEURS lignes visuelles OCR** (3 des 4
+   articles d'une même facture réelle, `4205720`) : référence + début de
+   désignation sur une ligne, quantité/prix SANS suffixe PF/PR sur la
+   ligne suivante, puis un COMPLÉMENT de désignation (taille, ex.
+   "2,4x180") sur une 3e ligne ENCORE APRÈS les prix. Chaque ligne prise
+   isolément échouait totalement (ni ancre PF, ni assez de cellules pour
+   le repli positionnel) — ces 3 articles disparaissaient purement et
+   simplement. Nouvelle fonction `_regrouper_articles_electricplus()` :
+   une ligne dont la 1re cellule ressemble à une vraie référence
+   (`MOTIF_DEBUT_REFERENCE_ELECTRICPLUS` — lettres majuscules suivies d'au
+   moins un chiffre, jamais vrai pour un nombre nu ni pour un mot pur type
+   "BLIST") démarre un nouvel article ; toute ligne suivante est absorbée,
+   CHAQUE cellule reclassée individuellement en désignation ou en nombre
+   (`_cellule_ressemble_a_nombre_electricplus`) plutôt que simplement
+   concaténée dans l'ordre de lecture — indispensable car la
+   désignation-complément arrive APRÈS les nombres dans l'ordre de
+   lecture : une simple concaténation aurait décalé le repli positionnel
+   "4 dernières cellules" et pris la désignation-complément pour le
+   Montant.
+   **Piège trouvé en l'appliquant d'abord au code PARTAGÉ** : un 1er essai
+   branchait ce regroupement directement dans `_entete_et_lignes_
+   electricplus()` (partagée BL/Facture) — a fait régresser 8 des 14 tests
+   BL déjà verrouillés (une ligne de bruit, auparavant isolée et donc
+   silencieusement ignorée sur les fixtures BL existantes, se retrouvait
+   absorbée à tort dans la désignation d'un article réel). Corrigé en
+   scopant le regroupement au SEUL chemin Facture
+   (`_construire_facture_electricplus`), jamais le chemin BL — aucun cas
+   réel à ce jour ne montre ce besoin côté BL. **Leçon générale** : un
+   refactor "extraire une fonction commune" ne veut pas dire "partager
+   TOUS les traitements futurs" — un correctif motivé par un seul flux
+   doit rester scopé à ce flux tant qu'un besoin réel côté de l'autre flux
+   n'est pas démontré.
+2. **Pages DEVIS/BON DE COMMANDE risquant de fausser le découpage par
+   n° de facture** (`pages_par_identifiant`, ancré sur un nombre nu de 6-7
+   chiffres) : une page DEVIS porte SA PROPRE numérotation (ex. "4104132"
+   pour la facture "4205769" du même article — cas réel) — sans filtrage,
+   elle démarre un groupe à part entière, produisant une 2e "Facture"
+   fantôme avec la ligne d'article DUPLIQUÉE (silencieux, potentiellement
+   grave). Une page de NOTRE PROPRE bon de commande peut, elle, porter un
+   nombre de 6-7 chiffres SANS RAPPORT (ex. une date collée "120720") qui
+   déclenche le même risque, mais avec un symptôme différent et plus
+   sournois : une facture par ailleurs PARFAITEMENT exacte (Total HT
+   extrait = affiché au centime près) se voyait quand même accompagnée
+   d'une 2e "Facture" fantôme à 0 ligne — suffisant pour faire basculer
+   TOUT LE FICHIER vers "à vérifier" malgré une extraction sans le moindre
+   défaut. Nouvelle fonction `_est_page_hors_perimetre_electricplus()` :
+   exclut toute page mentionnant "DEVIS" ou "BON DE COMMANDE" (repéré
+   fiable sur les 3 vraies pages BC confrontées, malgré des libellés de
+   détail différents ensuite) AVANT tout regroupement par identifiant —
+   appliquée UNIQUEMENT dans `parse_facture_electricplus_ocr` (jamais côté
+   BL, où aucune fixture n'a ce problème à ce jour).
+
+### Recette réelle sur 21 vraies factures (lecture seule + confrontation
+individuelle) puis écriture réelle confirmée
+
+**20/21 fichiers parfaitement exacts** (Total HT recalculé = Total HT
+affiché, commande résolue via le libellé "CDE" quand présent) — y compris
+plusieurs factures multi-articles réelles qui valident le correctif n°1 à
+l'échelle (11, 13, 15 lignes sur 3 factures différentes, chacune exacte au
+centime). 6 fichiers regroupent PLUSIEURS factures GMR (jusqu'à 3, comme
+déjà vu côté BL) — chacune correctement séparée par
+`pages_par_identifiant`, aucune fusion à tort entre 2 commandes
+différentes.
+
+**1 fichier à part, 3e bug réel corrigé** (`ESPACE SOLEIL-1206686+1206681+
+1206661+BC-16.07.2026.pdf`, 3 factures bundlées) : les 3 groupes
+ressortaient d'abord à 0 ligne / numéro de facture vide. Creusé en détail :
+sur CES 3 pages précises (et seulement celles-ci, parmi les 21 fichiers),
+**l'ordre des LIGNES ET DES CELLULES est inversé de bout en bout** —
+l'en-tête ressort "MONTANT HT | P.U.NET HT | PRIX UNIT.HT | QTE |
+DESIGNATION | REFERENCES" (la référence en DERNIER) au lieu de l'ordre
+habituel, le pied de tableau ("TOTAL HT"/"CODES TVA") apparaît AVANT les
+lignes d'articles plutôt qu'après, et le bloc [date, date échéance, n° de
+facture] suit l'ordre inverse. Cohérent avec un scan de CE lot précis
+effectué à l'envers (les 3 factures montrent EXACTEMENT la même
+inversion) — pas 3 erreurs OCR indépendantes.
+
+Corrigé par 2 replis, actifs uniquement quand le motif normal échoue
+(comportement des 20 autres fichiers strictement inchangé) :
+- `_zone_tableau_electricplus()` détecte l'inversion en comparant la
+  position de la cellule "REFERENCES" dans la ligne d'en-tête (2e moitié
+  plutôt qu'en tête) : si détectée, cherche le pied de tableau AVANT
+  l'en-tête plutôt qu'après (structurellement impossible sur une page
+  normale, donc un signal sûr) pour délimiter la zone, PUIS réinverse
+  CHAQUE ligne de la zone — tout le reste du code (ancre PF, repli
+  positionnel, regroupement multi-lignes) suppose ensuite l'ordre normal
+  sans dupliquer aucune logique.
+- `MOTIF_FACTURE_DATE_ELECTRICPLUS_MIROIR` : repli sur l'ordre inversé
+  [n° facture, date échéance, date] quand l'ordre normal ne matche pas.
+
+**2 des 3 factures retombent exactement sur leur Total HT après ce
+correctif** (460,00€/5 lignes et 5 600,76€/12 lignes — cette dernière
+valide le correctif à belle échelle, mélangeant câbles/bobines/embouts de
+références très différentes). **La 3e (1206681, 1 seule ligne à 8,90€)
+reste à 0 ligne** : un fragment de cellule illisible ("680", ni un nombre
+ni une référence reconnaissable une fois l'ordre restauré) fait échouer à
+la fois l'ancre PF (une cellule de trop entre l'ancre et la fin de ligne)
+et le repli positionnel (repli sur `to_float()` d'une cellule non
+numérique → 0 → ligne rejetée). Laissé tel quel — honnêtement signalé
+(aucune ligne extraite, la facture partira en "à vérifier"), jamais
+deviné : la 3e occurrence d'une même famille de bug sur un SEUL fichier
+suffisait pour ce correctif-ci, pas de raison d'aller plus loin pour 8,90€
+de résiduel sur une seule ligne (règle d'or).
+
+### Recette finale : 20/21 fichiers parfaitement exacts, 2/3 factures du
+21e récupérées après le correctif miroir — soit **22 factures exactes sur
+23 réellement rapprochables**, la seule restante (1206681) honnêtement
+signalée plutôt que devinée.
+
+### Tests
+
+`tests/test_parsers_facture_electricplus.py` (4 tests, sur 4 vraies pièces
+copiées dans `tests/fixtures/facture_electricplus_1..4_*.pdf`) : le cas
+désignation multi-ligne (4 articles, 1 seul extrait avant le correctif),
+le cas devis+BC agrafés (vérifie qu'une SEULE facture ressort malgré 3
+pages de nature différente), le cas commande via libellé CDE + suffixe PR,
+et le cas 3-pages-miroir (2 factures exactes, la 3e à 0 ligne verrouillée
+telle quelle). Suite BL/devis existante (14 tests) revérifiée verte deux
+fois (après le refactor partagé, puis après le correctif miroir) — aucune
+régression sur les 17 tests au total.
+
+### Écriture réelle confirmée (2026-09-02, Suivi fermé, confirmé
+explicitement par l'acheteur juste avant chaque étape — lecture PUIS
+écriture, elle a rouvert le fichier entre les deux et l'a refermé avant
+que j'écrive)
+
+Relecture fraîche juste avant écriture (jamais un rapport périmé — leçon
+déjà retenue en F2/F4) : **69 lignes sûres, 19 752,05 €**, 1 à confirmer
+(repli référence-proche, "CAB013010C100" vs Suivi "CAB013010T1000"), 40
+inconnues, 3 blocs "commande introuvable" (N°Réf.Client vide + déduction
+par contenu non concluante).
+
+**Motif net parmi les inconnues, à surveiller** : une bonne partie
+(~30/40) sont des références "CAB000XXXC100" (bobines de câble HO7V-U
+1,5mm² par couleur, ex. "CAB000170C100"=violet, "CAB000110C100"=rouge...)
+— ressortent SYSTÉMATIQUEMENT "aucune ligne du Suivi ne correspond" sur
+PLUSIEURS commandes différentes et sans rapport (1206671, 1206684,
+1206685, 1206686, 1206661). Pas assez d'un seul cas pour un correctif
+(règle d'or), mais la RÉCURRENCE sur autant de commandes différentes
+suggère que le Suivi enregistre peut-être ces bobines sous une référence
+différente de façon systématique plutôt que ligne par ligne — à vérifier
+avec l'acheteur si ce motif revient.
+
+**Écriture réelle confirmée** : 69 lignes écrites, sauvegarde horodatée,
+**13 factures archivées** avec leur BC dans `Traités/<commande>/`, **9
+déplacées vers `À vérifier/`** (0 échec d'archivage). EDOI (2 fichiers)
+laissé en place, toujours sans parser. Contrôle anti-imbrication confirmé
+absent. Résorption : **ELECTRIC PLUS** 311 lignes livrées encore sans
+facture sur 377 (66 déjà facturées — premier vrai chiffre pour ce
+fournisseur côté facture, distinct de sa résorption côté BL).
+
+## Rapprochement factures — Coredime au complet, 1er semestre 2026 +
+avoirs (fait, 2026-09-02)
+
+Sur demande explicite de l'acheteur : *"je t'ai déposé les dernières
+factures de 109 ainsi que les factures de Coredime pour les six premiers
+mois de l'année, avoirs compris, sous format zip. On va traiter un
+fournisseur au complet comme ça !"* — le plus gros lot jamais soumis à ce
+projet : **328 factures Coredime** (6 zips) + **29 factures 109
+Distribution** récentes (déposées à plat, non zippées) + les 2 EDOI déjà
+en attente.
+
+**Incident réseau pendant l'extraction** (même famille que la panne déjà
+documentée en session BL) : le lecteur X: est devenu temporairement
+inaccessible en pleine extraction des zips (`unzip` a levé des erreurs
+"bad zipfile offset" en cascade). Diagnostiqué comme une vraie coupure
+(même `echo` en Bash et `Get-ChildItem` en PowerShell échouaient) plutôt
+qu'une corruption : `unzip -t` sur le zip concerné, une fois la connexion
+rétablie (confirmée par l'acheteur), a montré "No errors detected" — zéro
+donnée perdue. **Leçon retenue, suggérée par l'acheteur** : extraire et
+traiter les zips UN PAR UN plutôt qu'en boucle, pour limiter la casse et
+faciliter le diagnostic en cas de nouvelle coupure — adopté pour la suite
+de cette session.
+
+### 3 bugs réels corrigés dans le parser facture Coredime
+(`moteur/fournisseurs/coredime.py`), trouvés en confrontant les 328
+pièces réelles à l'autocontrôle Total HT
+
+Avant tout correctif : **48 factures sur 328 avec un écart de Total HT,
+11 828,13 € d'écart cumulé** — largement au-delà des petits résidus déjà
+connus (garde-fou remise-double, voir plus bas). Sur les pires cas,
+jusqu'à 85 % du montant d'une facture manquait silencieusement.
+
+1. **Troncature prématurée sur les factures multi-folios** (cause de
+   loin la plus lourde : la quasi-totalité des 11 828 € ci-dessus). Le
+   repère de fin de zone facture supposait "2e occurrence du marqueur de
+   page ##ESIGUID" = fin de la facture, un raisonnement valide seulement
+   pour une facture à 1 SEULE page de contenu + 1 annexe. Une facture à
+   beaucoup de lignes s'étale en réalité sur PLUSIEURS folios (pages) DE
+   CONTENU, chacun avec son propre "##ESIGUID" répété en en-tête — le 2e
+   folio (pas une annexe) était donc pris à tort pour la fin de la
+   facture, tronquant tout le reste. Cas réel le plus parlant
+   (`6105181.pdf`) : 24 lignes réelles sur 2 folios, seules 11 extraites,
+   2 984,98 € manquants sur 8 438,47 €.
+2. **Annexe "BON DE LIVRAISON" de Coredime lui-même, DOUBLANT le total**
+   (cas réel `6200396.pdf`, 240,00 € extraits au lieu de 120,00 €) :
+   Coredime peut annexer son propre bon de livraison à la suite de la
+   facture, avec un tableau d'articles dans EXACTEMENT le même format
+   qu'une vraie ligne de facture — sans repère pour l'exclure (la zone
+   s'étendait "jusqu'à la fin du texte" faute de bon de commande sur cette
+   pièce précise), ce 2e tableau était absorbé intégralement.
+3. **Notre propre numéro de téléphone confondu avec une ligne de facture
+   incomplète** (cas réel `6401314.pdf`, 0 ligne extraite pour une
+   facture d'1 seule ligne, 29,16 €) : l'annexe "BON DE COMMANDE" contient
+   un bloc signature ("DATE/ACHETEUR/VISA", notre téléphone "0693 86 68
+   03") resté dans la zone scannée, qui matchait accidentellement le motif
+   de "ligne incomplète" (mécanisme de récupération remise-double) comme
+   un 2e faux candidat à côté du vrai — désamorçant l'appariement 1:1
+   pourtant sans ambiguïté sur cette pièce.
+
+**Leçon commune aux bugs 2 et 3, trouvée en deux temps** : le premier
+réflexe pour exclure une annexe (chercher son TITRE — "BON DE COMMANDE",
+"B O N  D E  L I V R A I S O N" imprimé par Coredime en lettres espacées
+comme "F A C T U R E") échoue dans les deux cas, car ces titres s'impriment
+en PIED de leur propre bloc — donc APRÈS le contenu qu'il fallait
+justement exclure. Repères EN TÊTE de bloc retenus à la place :
+"COR B<num>" (référence isolée de l'annexe BL, même famille que
+"COR F<num>" déjà utilisé pour les totaux) et "DESTINATAIRE" (toute
+première ligne de notre propre BC).
+
+**Résultat final** : 40 factures avec un écart résiduel (contre 48),
+**706,75 € d'écart cumulé (contre 11 828,13 €, -94 %)** — l'immense
+majorité des résidus restants sont désormais de l'ordre du centime à
+quelques euros, cohérents avec la limite déjà connue et acceptée
+(remise multiple ambiguë, voir "Points fragiles"). 4 tests ajoutés
+(`tests/test_parsers_facture_coredime.py`, 11 au total), 3 nouvelles
+fixtures réelles (`facture_coredime_9..11_*.pdf`) verrouillant chacun des
+3 bugs ci-dessus.
+
+### Recette réelle et écriture (2026-09-02, Suivi libéré par l'acheteur
+pour "les prochaines heures")
+
+Lecture seule sur les 358 fichiers (356 factures lues sur 358 — 2 échecs
+de lecture nets : `6100597_1f784aa1-....pdf`, un doublon de scan à 0
+ligne, et `6300524.pdf` — 4 AVOIRS reconnus et mis de côté, 1ère
+confirmation réelle du mécanisme AVOIR sur données Coredime réelles) :
+**434 lignes sûres, 73 818,66 €** (COREDIME 382 lignes/67 347,85 € +
+109 DISTRIBUTION 52 lignes/6 470,81 €), 232 à confirmer, 154 inconnues —
+en très large partie des commandes 2025 introuvables dans le Suivi (qui
+ne couvre que l'année civile en cours), conformément à l'avertissement de
+l'acheteur avant même de déposer le lot.
+
+**Écriture réelle confirmée** (relecture fraîche juste avant, comptes
+identiques à la lecture seule — rien n'avait changé entre-temps) :
+**434 lignes écrites**, sauvegarde horodatée, **105 factures archivées**
+avec leur BC dans `Traités/<commande>/`, **251 déplacées vers
+`À vérifier/`** (0 échec d'archivage), **73 "Tarif BL" renseignés depuis
+la facture** (liste blanche Coredime, Tarif BL vide comblé). EDOI (2
+fichiers) laissé en place, toujours sans parser.
+
+**Résorption, avant/après ce lot — 1ère vraie mise à l'échelle de
+Coredime** :
+
+| Fournisseur | Avant | Après |
+|---|---|---|
+| COREDIME | 0 déjà facturées | **442/865 déjà facturées** (423 restantes) |
+| 109 DISTRIBUTION | 148 déjà facturées | **191/1001 déjà facturées** (810 restantes) |
+
+**Reste à faire** : les 251 factures en `À vérifier/` (dominées par le
+motif "commande introuvable" pré-2026, à trier avec l'acheteur — pas
+grand-chose d'actionnable dessus tant que le Suivi ne couvre pas les
+années antérieures) ; EDOI toujours sans parser ; extension Hermes et
+FNP d'août toujours en attente.
 
 ## État FNP mensuel (moteur/fnp.py) — clôture comptable
 

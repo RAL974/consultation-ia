@@ -440,7 +440,59 @@ MOTIF_ANCRE_TOTAUX_COREDIME = re.compile(r"^COR\s+[FA]\d+\s*$")
 MOTIF_BLOC_FACTURE_COREDIME = re.compile(
     r"\*\s*(?:BON D'EXPEDITION|Bon de Facturation)\s*N?°?\s*(B\d+(?:\.\d+)?)", re.IGNORECASE,
 )
-MOTIF_DEBUT_PAGE_COREDIME = re.compile(r"##ESIGUID;")
+# Repère de fin de zone facture (BUG RÉEL CORRIGÉ, gros lot Coredime H1
+# 2026, ~48/328 factures avec un écart de Total HT — parfois plus de 80%
+# du montant manquant) : remplace l'ancienne heuristique "2e occurrence du
+# marqueur de page ##ESIGUID", qui supposait à tort qu'une facture
+# Coredime tient sur UNE SEULE page de contenu suivie d'UNE SEULE page
+# annexe — une facture à beaucoup de lignes s'étale en réalité sur
+# PLUSIEURS folios (pages) DE CONTENU, chacun avec son propre repère
+# "##ESIGUID" répété en en-tête, faisant conclure à tort que le 2e FOLIO
+# marquait la fin de la facture, tronquant silencieusement tout le reste
+# (cas réel 6105181.pdf : 24 lignes réelles sur 2 folios, seules 11
+# extraites, 2984,98€ manquants).
+#
+# Deux annexes possibles marquent la VRAIE fin de zone (exigence du
+# service comptable, déjà documentée pour 109 Distribution/Electric
+# Plus/EDOI — présentes sur la quasi-totalité des pièces récentes) :
+# notre propre bon de commande, ou le bon de livraison de Coredime
+# lui-même (celui-ci en plus, jamais à la place — cas réel 6200396.pdf).
+# Absentes -> la zone s'étend jusqu'à la fin du texte, comportement sûr
+# par défaut : MOTIF_LIGNE_FACTURE_COREDIME est trop strict (référence +
+# désignation + quantité + prix + montant + TVA sur UNE SEULE ligne
+# visuelle) pour matcher un faux positif dans les CGV ou dans une annexe
+# (champs éclatés sur des lignes séparées, jamais tous réunis sur une
+# seule ligne) — SAUF le tableau d'articles du bon de livraison, identique
+# en tout point à celui d'une facture (d'où le besoin de l'exclure
+# explicitement).
+#
+# LEÇON COMMUNE AUX DEUX ANNEXES, trouvée en 2 temps sur des cas réels
+# différents : le premier réflexe (chercher le TITRE de l'annexe, "BON DE
+# COMMANDE"/"B O N  D E  L I V R A I S O N") échoue dans les DEUX cas, car
+# Coredime imprime ces titres en PIED de leur propre bloc (comme
+# "F A C T U R E" en pied de la vraie facture) — donc APRÈS le contenu
+# qu'il fallait justement exclure :
+# - Annexe BON DE LIVRAISON (cas réel 6200396.pdf) : chercher son titre ne
+#   borne rien d'utile, le tableau dupliqué (identique à la facture,
+#   DOUBLANT le total extrait : 240,00€ au lieu de 120,00€) le précède.
+#   Repère retenu : "COR B<num>", la référence isolée en TÊTE de ce même
+#   bloc annexe (même famille que "COR F<num>" en tête de la vraie
+#   facture, déjà utilisé par MOTIF_ANCRE_TOTAUX_COREDIME — seule la
+#   lettre change, "B" comme "Bon de livraison" plutôt que "F" comme
+#   "Facture").
+# - Annexe BON DE COMMANDE (cas réel 6401314.pdf, trouvé APRÈS le
+#   correctif précédent) : le titre "BON DE COMMANDE" s'imprime après le
+#   tableau ET après le bloc signature "DATE/ACHETEUR/VISA/téléphone" —
+#   notre propre numéro de téléphone ("0693 86 68 03") restait alors DANS
+#   la zone scannée et matchait accidentellement
+#   MOTIF_LIGNE_INCOMPLETE_COREDIME, comme un 2e faux candidat "remise
+#   double" à côté du vrai — désamorçant l'appariement 1:1 pourtant sans
+#   ambiguïté (voir _lignes_remise_double_coredime, qui exige EXACTEMENT
+#   1 ligne incomplète). Repère retenu : "DESTINATAIRE", la toute
+#   PREMIÈRE ligne de contenu de notre BC (avant le fournisseur, le
+#   chantier, le tableau et la signature).
+MOTIF_DEBUT_ANNEXE_BL_COREDIME = re.compile(r"^\s*COR\s+B\d+", re.MULTILINE)
+MOTIF_DEBUT_ANNEXE_BC_COREDIME = re.compile(r"^\s*DESTINATAIRE\s*$", re.MULTILINE | re.IGNORECASE)
 MOTIF_LIGNE_FACTURE_COREDIME = re.compile(
     r"^\s*([A-Z0-9][A-Z0-9\-]+)\s+"                  # référence (tiret parfois, ex. "WAG221-425" ; parfois purement numérique, ex. "227060133")
     r"(.+?)\s+"                                       # désignation
@@ -567,10 +619,16 @@ def parse_facture_coredime(texte: str) -> Facture:
     if not marqueurs:
         return facture_vide()
 
-    # Fin de la page 0 (la Facture) = début de la 2e occurrence du bloc de
-    # métadonnées de page (voir bandeau) — jamais un repère de CONTENU.
-    debuts_page = list(MOTIF_DEBUT_PAGE_COREDIME.finditer(texte))
-    fin_zone = debuts_page[1].start() if len(debuts_page) > 1 else len(texte)
+    # Fin de la zone facture = début de la PREMIÈRE annexe rencontrée
+    # (notre propre bon de commande, ou le bon de livraison de Coredime
+    # lui-même — voir bandeau), sinon la fin du texte.
+    positions_fin = [
+        m.start() for m in (
+            MOTIF_DEBUT_ANNEXE_BC_COREDIME.search(texte),
+            MOTIF_DEBUT_ANNEXE_BL_COREDIME.search(texte),
+        ) if m
+    ]
+    fin_zone = min(positions_fin) if positions_fin else len(texte)
 
     lignes_facture = []
     commandes_vues = []

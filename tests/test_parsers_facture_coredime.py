@@ -169,21 +169,128 @@ def test_parse_facture_coredime_8_remises_multiples_extraction_partielle_honnete
     PLUSIEURS lignes incomplètes ET plusieurs lignes "Remise" (ici :
     document réel avec de nombreuses doubles remises), l'appariement 1:1
     ne s'applique plus (ambiguïté réelle, jamais un choix au hasard) — ces
-    lignes restent NON extraites. Ce test fige l'extraction PARTIELLE
-    actuelle (12 lignes sur un total de 19 réelles) et vérifie que
-    l'écart avec le Total HT affiché est bien signalé (jamais un faux
-    total exact)."""
+    lignes restent NON extraites, l'écart avec le Total HT affiché est
+    signalé (jamais un faux total exact).
+
+    Compte de lignes RELEVÉ (12 -> 21) après le correctif fin_zone (voir
+    CLAUDE.md, gros lot Coredime H1 2026) : cette pièce s'étale elle aussi
+    sur plusieurs folios, la même troncature prématurée qui a motivé ce
+    correctif l'affectait déjà — les 9 lignes retrouvées en plus sont
+    propres (sans remise multiple), seule la limite remise-multiple
+    d'origine reste (124,37€ résiduels, inchangé dans sa nature)."""
 
     f = _parser("facture_coredime_8_remises_multiples_partiel.pdf")
 
     assert f.total_ht_affiche == 1132.51
-    assert len(f.lignes) == 12
+    assert len(f.lignes) == 21
 
     total_extrait = round(sum(l.montant_ht for l in f.lignes), 2)
-    assert total_extrait == 813.83
+    assert total_extrait == 1008.14
     assert total_extrait != f.total_ht_affiche  # écart honnête, pas un faux total exact
 
     # Les lignes propres (sans double remise) restent exactes.
     refs = {l.reference_fournisseur: l for l in f.lignes}
     assert refs["LEG030015"].montant_ht == 184.0
     assert refs["GFO026705"].montant_ht == 148.8
+
+
+def test_parse_facture_coredime_9_multi_folio_zone_tronquee():
+    """BUG RÉEL CORRIGÉ (gros lot Coredime H1 2026, ~48/328 factures
+    touchées, jusqu'à 85% du montant manquant sur les pires cas) : une
+    facture à beaucoup de lignes s'étale sur PLUSIEURS folios (pages) DE
+    CONTENU, chacun avec son propre repère "##ESIGUID" répété en en-tête —
+    l'ancienne borne de zone ("2e occurrence de ##ESIGUID" = fin de la
+    facture) prenait à tort le 2e FOLIO pour notre propre bon de commande
+    annexe, tronquant tout le reste. Sur cette pièce réelle (24 lignes sur
+    2 folios), seules 11 étaient extraites avant le correctif (2984,98€
+    manquants sur 8438,47€) ; le nouveau repère ("BON DE COMMANDE", notre
+    propre annexe, en-tête isolé sur sa ligne) retombe désormais sur 22.
+
+    Petit résidu honnête restant (18,60€) : la référence HAGMJT702 est
+    imprimée DEUX FOIS sur ce document réel (une fois par folio, prix très
+    légèrement différent — 12,2340 vs 12,2300 — montant identique 12,23€
+    arrondi) — un seul exemple à ce jour, pas de règle de déduplication
+    inventée (pourrait être une vraie 2e ligne de commande) ; l'autocontrôle
+    le signale honnêtement plutôt que de deviner."""
+
+    f = _parser("facture_coredime_9_multi_folio_zone_tronquee.pdf")
+
+    assert f.numero_facture == "6105181"
+    assert f.date_facture == "20/05/2026"
+    assert f.numeros_bl == ["B022876"]
+    assert f.total_ht_affiche == 8438.47
+
+    assert len(f.lignes) == 22
+    total_extrait = round(sum(l.montant_ht for l in f.lignes), 2)
+    assert total_extrait == 8457.07
+
+    refs = [l.reference_fournisseur for l in f.lignes]
+    assert refs.count("HAGMJT702") == 2  # voir docstring — résidu honnête, pas dédupliqué
+
+    # Lignes du 2e folio, invisibles avant le correctif — preuve directe
+    # que la zone s'étend maintenant au-delà du 1er folio.
+    refs_set = set(refs)
+    assert "HAGXVL122STI" in refs_set
+    assert "HAGHMC499" in refs_set
+    assert "LEG401333" in refs_set
+
+
+def test_parse_facture_coredime_10_bon_livraison_annexe_duplique():
+    """2e BUG RÉEL CORRIGÉ, trouvé juste après le précédent sur le même
+    gros lot : Coredime peut annexer son PROPRE "BON DE LIVRAISON" à la
+    suite de la facture, avec un tableau d'articles dans EXACTEMENT le
+    même format qu'une vraie ligne de facture — sur cette pièce réelle,
+    les 4 lignes de la facture étaient DOUBLÉES (240,00€ extraits au lieu
+    de 120,00€), la zone (faute de "BON DE COMMANDE" sur cette pièce)
+    s'étendant "jusqu'à la fin du texte" et absorbant le 2e tableau.
+
+    1er essai abandonné : chercher le titre "B O N  D E  L I V R A I S O N"
+    (lettres espacées, comme "F A C T U R E") — il s'imprime en PIED de
+    son propre bloc, donc APRÈS le tableau à exclure, trop tard pour
+    borner quoi que ce soit. Repère retenu : "COR B<num>", la référence
+    isolée en TÊTE de ce même bloc annexe (même famille que "COR F<num>"
+    en tête de la vraie facture — seule la lettre change, B comme "Bon de
+    livraison")."""
+
+    f = _parser("facture_coredime_10_bon_livraison_annexe_duplique.pdf")
+
+    assert f.numero_facture == "6200396"
+    assert f.date_facture == "28/01/2026"
+    assert f.numeros_bl == ["B010202"]
+    assert f.total_ht_affiche == 120.0
+
+    assert len(f.lignes) == 4  # jamais 8 (le tableau dupliqué de l'annexe BL)
+    total_extrait = round(sum(l.montant_ht for l in f.lignes), 2)
+    assert total_extrait == 120.0
+
+    refs = {l.reference_fournisseur: l for l in f.lignes}
+    assert refs["GFO026504"].montant_ht == 36.7
+    assert refs["WAG221-2411"].montant_ht == 33.87
+
+
+def test_parse_facture_coredime_11_telephone_confondu_avec_ligne_incomplete():
+    """3e BUG RÉEL CORRIGÉ, trouvé APRÈS le correctif "BON DE COMMANDE"
+    lui-même (même gros lot) : ce titre s'imprime en PIED de son propre
+    bloc annexe, APRÈS le bloc signature "DATE/ACHETEUR/VISA/téléphone" —
+    notre propre numéro ("0693 86 68 03") restait alors DANS la zone
+    scannée et matchait accidentellement MOTIF_LIGNE_INCOMPLETE_COREDIME
+    (une 2e "ligne incomplète" à côté de la vraie, LEG031955) —
+    désamorçant l'appariement 1:1 (remise double) pourtant sans ambiguïté
+    sur cette pièce : 0 ligne extraite pour une facture d'1 seule ligne
+    réelle (29,16€). Repère retenu : "DESTINATAIRE", la toute PREMIÈRE
+    ligne de notre BC, bien avant le tableau et la signature."""
+
+    f = _parser("facture_coredime_11_telephone_confondu_avec_ligne_incomplete.pdf")
+
+    assert f.numero_facture == "6401314"
+    assert f.date_facture == "29/06/2026"
+    assert f.numeros_commande == ["129.026"]
+    assert f.numeros_bl == ["B027782.1"]
+    assert f.total_ht_affiche == 29.16
+
+    assert len(f.lignes) == 1
+    l0 = f.lignes[0]
+    assert l0.reference_fournisseur == "LEG031955"
+    assert l0.quantite_facturee == 300.0
+    assert l0.prix_unitaire_ht == 0.0972
+    assert l0.montant_ht == 29.16

@@ -7,9 +7,23 @@ fournisseur, contrairement à ses BL) + détection fournisseur
 (moteur/rapprochement/parsers_facture.py) — même principe que
 moteur/rapprochement/lecture_bl.py pour les BL.
 
+**Repli OCR (session F4/Stand64+Electric Plus)** : si le PDF n'a AUCUN texte
+natif (scan pur, `lire_pdf()` renvoie une chaîne vide), repli générique sur
+l'OCR (moteur/ocr.py, même mécanique que lecture_bl.py) — nécessaire pour
+Electric Plus/GMR (sa facture fait aussi office de BL, voir
+moteur.fournisseurs.electricplus, déjà scannée côté BL) et potentiellement
+tout futur fournisseur qui enverrait une facture scannée plutôt qu'en texte
+natif (ex. les 4 factures Stand 64 "FA <numéro>.pdf" identifiées comme des
+scans, voir CLAUDE.md — pas encore couvertes, aucun parse_facture_ocr écrit
+pour Stand 64 à ce jour). Ce n'est PAS un cas spécial câblé sur un nom de
+fournisseur : la détection se fait sur le texte OCR de la même façon que sur
+le texte natif, seul le CHOIX du registre (texte vs OCR) dépend de la
+présence ou non de texte natif.
+
 Même tolérance aux pannes que lecture_bl.py : une facture illisible, d'un
 fournisseur non reconnu, ou d'un fournisseur reconnu mais sans parser
-facture, ne bloque JAMAIS le traitement des autres fichiers du lot.
+facture (texte NI OCR), ne bloque JAMAIS le traitement des autres fichiers
+du lot.
 
 Pas de détection PAR PAGE ici (contrairement à lecture_bl.py) : aucune
 facture réelle ne mélange plusieurs fournisseurs sur des pages différentes
@@ -20,19 +34,23 @@ from pathlib import Path
 
 from moteur.detecteur import detecter_fournisseur
 from moteur.lecture_pdf import lire_pdf
-from moteur.rapprochement.parsers_facture import parser_facture
+from moteur.ocr import lignes_ocr, mots_document
+from moteur.rapprochement.parsers_facture import parser_facture, parser_facture_ocr
 
 EXTENSIONS_SUPPORTEES = (".pdf",)
+
+
+def _texte_page(mots_page: list[dict]) -> str:
+    return "\n".join(lignes_ocr(mots_page))
 
 
 def lire_facture(chemin):
     """Lit un seul fichier. Retourne (liste_de_Facture, liste_de_raisons_en_clair)
     — la liste de raisons est vide en cas de succès complet. Une LISTE de
     Facture, pas une seule : un parser fournisseur pourrait, comme côté BL,
-    retourner plusieurs documents pour un même fichier (aucun cas réel à ce
-    jour pour les factures — normalisé quand même pour rester symétrique
-    avec lecture_bl.lire_bl et ne pas casser si un futur fournisseur en a
-    besoin)."""
+    retourner plusieurs documents pour un même fichier (cas réel désormais :
+    Electric Plus, voir moteur.fournisseurs.electricplus.parse_facture_ocr,
+    même principe que son BL)."""
 
     chemin = Path(chemin)
 
@@ -41,15 +59,34 @@ def lire_facture(chemin):
     except Exception as e:
         return [], [f"PDF illisible ({e})"]
 
-    fournisseur = detecter_fournisseur(texte)
+    if texte.strip():
+        fournisseur = detecter_fournisseur(texte)
 
-    if fournisseur == "INCONNU":
-        return [], ["Fournisseur non reconnu"]
+        if fournisseur == "INCONNU":
+            return [], ["Fournisseur non reconnu"]
 
-    resultat = parser_facture(fournisseur, texte)
+        resultat = parser_facture(fournisseur, texte)
 
-    if resultat is None:
-        return [], [f"Fournisseur {fournisseur} reconnu mais pas encore de parser facture"]
+        if resultat is None:
+            return [], [f"Fournisseur {fournisseur} reconnu mais pas encore de parser facture"]
+
+    else:
+        # PDF sans texte natif (scan) : repli OCR, voir bandeau du module.
+        try:
+            mots_par_page = mots_document(chemin)
+        except Exception as e:
+            return [], [f"PDF illisible ({e})"]
+
+        texte_ocr = "\n".join(_texte_page(mots) for mots in mots_par_page)
+        fournisseur = detecter_fournisseur(texte_ocr)
+
+        if fournisseur == "INCONNU":
+            return [], ["Fournisseur non reconnu (OCR)"]
+
+        resultat = parser_facture_ocr(fournisseur, mots_par_page)
+
+        if resultat is None:
+            return [], [f"Fournisseur {fournisseur} reconnu (OCR) mais pas encore de parser facture"]
 
     factures = resultat if isinstance(resultat, list) else [resultat]
 
