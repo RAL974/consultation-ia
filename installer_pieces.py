@@ -125,7 +125,7 @@ def installer(fichier, est_vivant: bool) -> None:
     t0 = time.time()
     res = executer(fichier, PROJET, BACKUPS, etapes=("0d", "1", "3", "4", "5"), journal=log,
                    colonnes_ligne2=COLONNES_LIGNE2_CONSTATEES)
-    log(f"étapes 0d→5 terminées en {round(time.time() - t0)} s")
+    log(f"étapes 0d a 5 terminées en {round(time.time() - t0)} s")
     r4 = res["4"]
     log(f"migration : {r4['statistiques']} ; PDF lus {r4['pdf_lus']} ; au centime avant {r4['au_centime_avant_ecriture']} "
         f"/ après {r4['au_centime']} ; rapport {r4['chemin_rapport']}")
@@ -133,6 +133,15 @@ def installer(fichier, est_vivant: bool) -> None:
         log(f"  {f}: Commandes {a:.2f} / Pièces {b:.2f} / écart {e:+.2f}")
     assert r4["au_centime"], "STOP : contrôle au centime KO"
 
+    verifier_installation(fichier, avant, est_vivant)
+
+
+def verifier_installation(fichier, avant, est_vivant: bool) -> None:
+    """Vérification par Excel d'une COPIE du classeur écrit + contrôle des 5
+    colonnes contre `avant` (état relevé avant bascule). Ne modifie jamais
+    `fichier`."""
+    fichier = Path(fichier)
+    DOSSIER_VERIF.mkdir(parents=True, exist_ok=True)
     copie = DOSSIER_VERIF / f"{fichier.stem} - verif Excel.xlsx"
     recalcule = DOSSIER_VERIF / f"{fichier.stem} - recalcule.xlsx"
     shutil.copy2(fichier, copie)
@@ -200,6 +209,13 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if mode == "vivant":
         installer(trouver_fichier_suivi_vivant(PROJET), est_vivant=True)
+    elif mode == "verifier":
+        # Rejoue la seule vérification finale (Excel + 5 colonnes) sur le vivant
+        # déjà écrit ; l'état "avant" est relu depuis la sauvegarde de rotation
+        # prise juste avant l'écriture (argument : son chemin).
+        avant = lire_lignes_facturees(Path(sys.argv[2]))
+        log(f"{len(avant)} lignes facturées relevées dans {sys.argv[2]}")
+        verifier_installation(trouver_fichier_suivi_vivant(PROJET), avant, est_vivant=True)
     elif mode == "copie" and len(sys.argv) > 2:
         installer(sys.argv[2], est_vivant=False)
     elif mode == "lot":

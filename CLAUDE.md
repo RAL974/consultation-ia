@@ -5455,31 +5455,53 @@ migration synthétique au centime + idempotence + bascule, extrait de 50
 lignes sur une copie du vivant), pipelines BL/facture adaptés (lignes
 Pièces, FeuillePiecesAbsente, doublon, cumul). Pytest complet du 2026-09-04 soir : **490 passed** (451 avant P1), 22 min 44.
 
-### Exécution sur le vivant (étape 7, 2026-09-04 soir)
+### Exécution sur le vivant (étape 7 — FAITE le 2026-09-05, 01h12-01h49)
 
-**NON EXÉCUTÉE ce soir** : tout est prouvé sur la copie (`Suivi - TEST P1
-.xlsx`, mêmes 1 059 lignes que le vivant, hash MD5 826ADCB3… identique au
-backup permanent `backups/permanents/Suivi commandes - 2026 - AVANT PIECES
-2026-09-04 1714.xlsx`), pytest vert, mais le lancement du script qui écrit
-dans le classeur VIVANT a été refusé par le garde-fou d'exécution de la
-session Claude Code (auto mode classifier) — pas contourné. **Le vivant
-est INTACT** (aucune écriture, vérifié : hash identique, pas de verrou).
-Le script est dans le dépôt, à lancer depuis `Consultation AI/`, Suivi
-FERMÉ, dans cet ordre (chaque commande s'arrête d'elle-même à la 1re
-anomalie et laisse un journal à l'écran) :
+Le 2026-09-04 soir, le lancement du script sur le classeur VIVANT avait été
+refusé par le garde-fou d'exécution de la session (pas contourné). Relancé le
+2026-09-05 après confirmation explicite de l'acheteur dans le chat (« le
+Suivi est fermé, tu peux y aller »), verrou absent et hash MD5 du vivant
+encore identique au backup permanent `backups/permanents/Suivi commandes -
+2026 - AVANT PIECES 2026-09-04 1812.xlsx` (826ADCB3…) :
 
-    py -3 installer_pieces.py vivant   # ~25 min : 0d -> 1 -> 3 -> 4 -> 5 + Excel
-    py -3 installer_pieces.py lot      # puis un lot de factures (lignes sûres)
+    py -3 installer_pieces.py vivant     # 0d -> 1 -> 3 -> 4 -> 5, ~29 min
 
-`installer_pieces.py vivant` refuse de démarrer si le hash du vivant n'est
-plus celui du backup permanent (classeur modifié entre-temps : refaire un
-backup permanent d'abord, puis relancer) ; la comparaison des KPI Dashboard
-attend les valeurs de l'original recalculé +218,54 € sur B6/N6/H9.
+Sauvegarde de rotation `backups/1.3.0.1. Suivi commandes - 2026_20260905_
+011248.xlsx` (= l'état exact d'avant bascule). Résultat IDENTIQUE à la copie
+de la veille : ligne 2 réparée (colonnes 22-30), feuille « Pièces » créée
+(17 tableaux), 4 colonnes calculées (Commandes à 59 colonnes, calcChain
+retiré), **1 076 lignes Pièces écrites, au centime pour les 6 fournisseurs**
+(`rapports/migration_pieces_20260905_014119.txt`), 5 colonnes facture
+basculées en formules.
+
+**Incident sans conséquence** : le script a planté APRÈS l'étape 5 (toutes
+marquées OK, aucun `.tmp` résiduel — chaque patch écrit dans un `.tmp` puis
+remplace) sur un `UnicodeEncodeError` : la ligne de journal « étapes 0d→5 »
+contenait une flèche non encodable en cp1252, l'encodage de stdout quand il
+est REDIRIGÉ vers un fichier (`> journal.log`), alors qu'un terminal direct
+l'avait acceptée la veille. Corrigé (flèche remplacée, et lancer avec
+`PYTHONIOENCODING=utf-8` quand la sortie est redirigée) ; la vérification
+finale, jamais atteinte, a été isolée dans `verifier_installation()` et un
+mode `py -3 installer_pieces.py verifier <sauvegarde d'avant bascule>`, qui
+relit l'état « avant » depuis la sauvegarde de rotation — rejouée à 01h47
+sans rien réécrire dans le vivant (Excel travaille sur une copie dans
+`rapports/verif_excel/`) : **ouverture Excel OK, aucune réparation, 10
+feuilles, 17 tableaux (Pieces A1:Z1077), les 12 KPI Dashboard exactement à
+l'attendu (+218,54 € sur B6/N6/H9), contrôle des 5 colonnes sur 1 059
+lignes : 0 écart hors 177 PU moyen pondéré (max 0,0049 €), Statut facture
+937 ✅ / 3 936 🔵 / 122 ⛔ (Qté livrée = 0)**. Leçon : toute ligne de journal
+d'un script d'exécution doit rester ASCII/cp1252-safe, ou forcer
+`PYTHONIOENCODING=utf-8` — un plantage cosmétique après l'écriture prive de
+la vérification, même si le classeur est correct.
+
+Puis `py -3 installer_pieces.py lot` (34 fichiers dans `a_traiter/Factures/`)
+— résultat à consigner ci-dessous une fois terminé.
 
 ### Reste à faire / [HUMAIN] lundi
 
 - [HUMAIN-P1-e] ouvrir le vivant dans Excel : aucun message de réparation
-  attendu (prouvé par l'outil sur une copie du vivant écrit), onglet
+  attendu (prouvé par l'outil sur une copie du vivant ÉCRIT le 2026-09-05,
+  voir ci-dessus), onglet
   « Pièces » juste après Commandes, filtres, colonnes 56–59 de Commandes.
   Dashboard : mêmes valeurs que l'original recalculé, à +218,54 € près
   (ligne 2 réparée) sur Engagé total / Reste à recevoir / Attente livraison.
