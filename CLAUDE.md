@@ -5494,8 +5494,19 @@ d'un script d'exécution doit rester ASCII/cp1252-safe, ou forcer
 `PYTHONIOENCODING=utf-8` — un plantage cosmétique après l'écriture prive de
 la vérification, même si le classeur est correct.
 
-Puis `py -3 installer_pieces.py lot` (34 fichiers dans `a_traiter/Factures/`)
-— résultat à consigner ci-dessous une fois terminé.
+Puis `py -3 installer_pieces.py lot` (01h50-01h58) : les 34 fichiers à la
+racine de `a_traiter/Factures/` sont TOUS « fournisseur reconnu mais sans
+parser facture » (annexes BL scannées Cominter `xxxxxx_BL_OBLxxxxxx.pdf`,
+`Annexe_1_MFACxxxxx.pdf`, les 2 EDOI…) — 0 ligne sûre, 0 pièce écrite,
+aucune sauvegarde déclenchée, fichiers laissés en place (comportement
+attendu). La vérification Excel après le lot est passée (aucune réparation,
+structure 17 tableaux intacte). **Conséquence honnête** : le pipeline
+factures -> Pièces n'a donc PAS encore écrit de vraie ligne dans le classeur
+vivant (seulement sur classeur synthétique en tests et sur la copie du
+2026-09-04) — la première vraie preuve viendra du prochain dépôt de
+factures rapprochables, ou du retraitement des 412 factures de
+`À vérifier/` après décision de l'acheteur. Même chose pour le pipeline BL
+-> Pièces.
 
 ### Reste à faire / [HUMAIN] lundi
 
