@@ -22,6 +22,19 @@ def lire_pdf(pdf: Path) -> str:
     return texte
 
 
+def longueur_texte_premiere_page(pdf: Path) -> int:
+    """Longueur du texte natif de la SEULE première page — voir
+    moteur.rapprochement.lecture_facture.lire_facture (repli OCR) : une
+    facture scannée peut avoir 0 caractère natif sur sa propre page tout
+    en ayant quelques caractères ailleurs dans le même fichier (annexe
+    BdC/devis, horodatage...), qui fausseraient un test sur le texte du
+    document ENTIER (`lire_pdf(pdf).strip()`) en masquant à tort le
+    besoin d'OCR."""
+
+    with fitz.open(pdf) as doc:
+        return len(doc[0].get_text()) if doc.page_count else 0
+
+
 def analyser_devis(dossier) -> list:
     """
     Lit tous les PDF du dossier et retourne la liste des articles.

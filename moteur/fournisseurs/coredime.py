@@ -1,8 +1,11 @@
 import re
 
+import fitz
+
 from moteur.modele import Article
 from moteur.outils import to_float as _f, chercher_devis
 from moteur.fournisseurs._gabarit import scan_regex
+from moteur import grille
 from moteur.ocr import regrouper_lignes
 from moteur.rapprochement.modele_bl import BonLivraison, LigneBL
 from moteur.rapprochement.modele_facture import Facture, LigneFacture
@@ -515,17 +518,25 @@ MOTIF_LIGNE_FACTURE_COREDIME = re.compile(
     r"([\d\s,]+?)\s+"                                 # montant
     r"(\d)\s*$"                                       # code TVA
 )
-# Repli SÛR uniquement (voir _lignes_remise_double_coredime) : quand une
-# double remise ("Remise 35,00+26,00%") est appliquée, tout le bloc
-# [référence + désignation + quantité + prix base] peut être imprimé SANS
-# sa fin (prix net/montant/TVA), la fin apparaissant sur une ligne "Remise
-# ..." totalement disjointe ailleurs dans le flux PyMuPDF scramblé (vu sur
-# plusieurs pièces réelles, ex. 6107462.pdf, 6108474.pdf, 6108047.pdf) —
-# jamais rattachée par un simple regex multi-ligne, JAMAIS reconstruite
-# sauf quand il n'existe QU'UNE SEULE ligne incomplète ET QU'UNE SEULE
-# ligne "Remise" dans le même bloc (aucune ambiguïté possible sur qui va
-# avec qui) ; sinon laissée non extraite, l'autocontrôle Total HT le
-# signale honnêtement plutôt que de deviner un appariement.
+# Repli quand une double remise ("Remise 35,00+26,00%") est appliquée :
+# tout le bloc [référence + désignation + quantité + prix base] peut être
+# imprimé SANS sa fin (prix net/montant/TVA), la fin apparaissant sur une
+# ligne "Remise ..." totalement disjointe ailleurs dans le flux PyMuPDF
+# scramblé (vu sur plusieurs pièces réelles, ex. 6107462.pdf, 6108474.pdf,
+# 6108047.pdf) — jamais rattachée par un simple regex multi-ligne.
+#
+# RATTACHEMENT PAR COORDONNÉES (voir moteur.grille, _apparier_par_position_
+# coredime) : chaque ligne "Remise" est rattachée à la ligne incomplète
+# dont le Y est immédiatement AU-DESSUS d'elle dans le document — mêmes
+# rangées visuelles que "<qté> X 1 unite" (elle-même juste au-dessus),
+# vérifié sur un document réel à 3 doubles remises
+# (facture_coredime_6108846_remise_double_x3.pdf) : reconstitue
+# EXACTEMENT les 3 bonnes paires (confirmées par cohérence arithmétique
+# indépendante, qté × prix net = montant sur les 3). Remplace l'ancien
+# appariement 1:1 (qui n'osait un rattachement que si le bloc ne
+# contenait QU'UNE SEULE ligne incomplète ET QU'UNE SEULE ligne "Remise" —
+# gardé en repli SANS coordonnées, ex. `chemin` non fourni à
+# parse_facture_coredime : jamais un choix au hasard entre plusieurs).
 MOTIF_LIGNE_INCOMPLETE_COREDIME = re.compile(
     r"^\s*([A-Z0-9][A-Z0-9\-]+)\s+"                  # référence (voir MOTIF_LIGNE_FACTURE_COREDIME)
     r"(.+?)\s+"                                       # désignation
@@ -534,7 +545,7 @@ MOTIF_LIGNE_INCOMPLETE_COREDIME = re.compile(
     r"([\d,]+)\s*$"                                    # prix base HT — RIEN après (sinon ce serait une ligne complète)
 )
 MOTIF_LIGNE_REMISE_SEULE_COREDIME = re.compile(
-    r"^\s*Remise\s+[\d,]+\+[\d,]+%\s+"
+    r"^\s*Remise\s+([\d,]+\+[\d,]+%)\s+"              # taux double (ancre de position, groupe 1)
     r"([\d,]+)\s+"                                    # prix net HT
     r"([\d\s,]+?)\s+"                                 # montant
     r"(\d)\s*$"                                        # code TVA
@@ -571,12 +582,78 @@ MOTIF_LIGNE_ECOTAXE_COREDIME = re.compile(
 # --- fin GABARIT FACTURE -----------------------------------------------------
 
 
-def _lignes_remise_double_coredime(texte_bloc: str, refs_deja_extraites: set) -> list:
-    """Voir MOTIF_LIGNE_INCOMPLETE_COREDIME : n'apparie une ligne
-    incomplète à une ligne "Remise" que si le bloc n'en contient QU'UNE
-    SEULE de chaque, en excluant les références déjà capturées par le
-    passage normal (MOTIF_LIGNE_FACTURE_COREDIME) pour ne jamais compter
-    une même ligne deux fois."""
+def _position_page_coredime(lignes_avec_page: list, sous_texte: str):
+    """Comme moteur.grille.position_y, mais retourne (page, y) plutôt que
+    le seul Y — indispensable pour comparer des lignes de PAGES
+    DIFFÉRENTES : chaque page a son propre système de coordonnées (Y
+    redémarre près de 0 en haut de CHAQUE page) — un tri par Y brut
+    mélangerait à tort le bas d'une page avec le haut de la suivante si
+    leurs valeurs se chevauchent par coïncidence (bug réel évité en
+    confrontant un document réel à 2 pages : deux lignes de pages
+    différentes partageaient exactement le même Y). Comparer des tuples
+    (page, y) trie naturellement PAGE D'ABORD, Y ENSUITE."""
+
+    for page, ligne in lignes_avec_page:
+        texte_ligne = " ".join(m["texte"] for m in ligne)
+        if sous_texte in texte_ligne:
+            return (page, sum(m["y0"] for m in ligne) / len(ligne))
+    return None
+
+
+def _apparier_par_position_coredime(incompletes: list, remises: list, lignes_grille_bloc: list) -> list | None:
+    """Rattache chaque ligne "Remise" à la ligne d'article incomplète dont
+    la position (page, Y) est immédiatement AU-DESSUS d'elle (voir
+    _position_page_coredime) — gère n'importe quel nombre de remises/
+    lignes incomplètes, contrairement à l'ancien appariement 1:1. Retourne
+    None si UNE SEULE position est introuvable (jamais un rattachement à
+    l'aveugle sur une coordonnée manquante) — la ligne concernée reste
+    alors non extraite, comme avant.
+
+    `lignes_grille_bloc` : liste de (page, ligne) — voir
+    _position_page_coredime, jamais une liste de lignes nues (perdrait la
+    page, seule façon fiable de les ordonner entre pages différentes)."""
+
+    positions_articles = []
+    for m in incompletes:
+        pos = _position_page_coredime(lignes_grille_bloc, m.group(1))
+        if pos is None:
+            return None
+        positions_articles.append((pos, m))
+
+    positions_remises = []
+    for m in remises:
+        pos = _position_page_coredime(lignes_grille_bloc, m.group(1))  # "35,00+31,00%", unique par ligne
+        if pos is None:
+            return None
+        positions_remises.append((pos, m))
+
+    paires = []
+    for pos_remise, m_remise in sorted(positions_remises, key=lambda t: t[0]):
+        candidats = [t for t in positions_articles if t[0] < pos_remise]
+        if not candidats:
+            return None
+        choisi = max(candidats, key=lambda t: t[0])
+        paires.append((choisi[1], m_remise))
+        positions_articles.remove(choisi)
+
+    return paires
+
+
+def _lignes_remise_double_coredime(texte_bloc: str, refs_deja_extraites: set,
+                                    lignes_grille_bloc: list | None = None) -> list:
+    """Voir MOTIF_LIGNE_INCOMPLETE_COREDIME : identifie les lignes
+    incomplètes et les lignes "Remise" du bloc (en excluant les références
+    déjà capturées par le passage normal, pour ne jamais compter une même
+    ligne deux fois), puis les apparie :
+
+    - `lignes_grille_bloc` fourni (voir moteur.grille, `chemin` passé à
+      parse_facture_coredime) : appariement PAR POSITION
+      (_apparier_par_position_coredime), gère n'importe quel nombre de
+      lignes de chaque sorte.
+    - `lignes_grille_bloc` absent (aucune coordonnée disponible) : repli
+      sur l'ANCIEN comportement, n'ose une correspondance que dans le cas
+      sans ambiguïté (1 seule ligne de chaque), jamais un choix au hasard
+      entre plusieurs."""
 
     lignes = texte_bloc.splitlines()
 
@@ -586,25 +663,62 @@ def _lignes_remise_double_coredime(texte_bloc: str, refs_deja_extraites: set) ->
     ]
     remises = [m for l in lignes if (m := MOTIF_LIGNE_REMISE_SEULE_COREDIME.match(l))]
 
-    if len(incompletes) != 1 or len(remises) != 1:
+    if not incompletes or not remises:
         return []
 
-    m_ref, m_remise = incompletes[0], remises[0]
-    prix_net = _f(m_remise.group(1))
-    montant = _f(m_remise.group(2))
-    quantite = _f(m_ref.group(3))
+    if lignes_grille_bloc is not None:
+        paires = _apparier_par_position_coredime(incompletes, remises, lignes_grille_bloc)
+        if paires is None:
+            return []
+    else:
+        if len(incompletes) != 1 or len(remises) != 1:
+            return []
+        paires = [(incompletes[0], remises[0])]
 
-    if quantite and prix_net and abs(montant - quantite * prix_net) > max(0.05 * montant, 1.0):
-        return []
+    resultat = []
+    for m_ref, m_remise in paires:
 
-    return [LigneFacture(
-        reference_fournisseur=m_ref.group(1),
-        designation=m_ref.group(2).strip(),
-        quantite_facturee=quantite,
-        prix_unitaire_ht=prix_net,
-        montant_ht=montant,
-        numero_bl="",  # renseigné par l'appelant (numero_bl_bloc)
-    )]
+        prix_net = _f(m_remise.group(2))
+        montant = _f(m_remise.group(3))
+        quantite = _f(m_ref.group(3))
+
+        if quantite and prix_net and abs(montant - quantite * prix_net) > max(0.05 * montant, 1.0):
+            continue
+
+        resultat.append(LigneFacture(
+            reference_fournisseur=m_ref.group(1),
+            designation=m_ref.group(2).strip(),
+            quantite_facturee=quantite,
+            prix_unitaire_ht=prix_net,
+            montant_ht=montant,
+            numero_bl="",  # renseigné par l'appelant (numero_bl_bloc)
+        ))
+
+    return resultat
+
+
+def _limites_pages_coredime(doc) -> list:
+    """Longueur CUMULÉE de page.get_text() pour chaque page — permet de
+    retrouver, pour un intervalle de caractères dans `texte` (= la simple
+    concaténation de ces mêmes textes, voir moteur.lecture_pdf.lire_pdf),
+    quelle(s) page(s) physique(s) il recouvre."""
+
+    limites = []
+    cumul = 0
+    for page in doc:
+        cumul += len(page.get_text())
+        limites.append(cumul)
+    return limites
+
+
+def _pages_pour_intervalle_coredime(limites_pages: list, debut: int, fin: int) -> list:
+    resultat = []
+    debut_page = 0
+    for i, fin_page in enumerate(limites_pages):
+        if fin_page > debut and debut_page < fin:
+            resultat.append(i)
+        debut_page = fin_page
+    return resultat
 
 
 def _type_document_facture_coredime(texte: str) -> str:
@@ -639,7 +753,15 @@ def _total_ht_facture_coredime(texte: str):
     return None
 
 
-def parse_facture_coredime(texte: str) -> Facture:
+def parse_facture_coredime(texte: str, chemin=None) -> Facture:
+    """`chemin` (optionnel, chemin du PDF source) : quand fourni, active le
+    rattachement PAR COORDONNÉES des lignes "Remise" multiples (voir
+    _apparier_par_position_coredime, moteur.grille) — en son absence,
+    repli sur l'ancien appariement 1:1 (jamais un choix au hasard, voir
+    _lignes_remise_double_coredime). `lecture_facture.lire_facture()`
+    fournit toujours ce chemin en production ; seuls d'éventuels appels
+    directs avec juste `texte` (tests unitaires sur chaîne synthétique)
+    perdent cette amélioration, sans jamais planter."""
 
     m_num = MOTIF_NUMERO_FACTURE_COREDIME.search(texte)
     numero_facture = m_num.group(1) if m_num else ""
@@ -671,6 +793,20 @@ def parse_facture_coredime(texte: str) -> Facture:
         ) if m
     ]
     fin_zone = min(positions_fin) if positions_fin else len(texte)
+
+    # Lignes-grille par page (voir moteur.grille), calculées UNE SEULE FOIS
+    # pour tout le document si `chemin` est fourni — jamais si absent
+    # (aucune coordonnée disponible, comportement historique préservé).
+    pages_lignes_grille = None
+    limites_pages = None
+    if chemin is not None:
+        try:
+            with fitz.open(chemin) as doc:
+                pages_lignes_grille = [grille.lignes(grille.mots(p)) for p in doc]
+                limites_pages = _limites_pages_coredime(doc)
+        except Exception:
+            pages_lignes_grille = None
+            limites_pages = None
 
     lignes_facture = []
     commandes_vues = []
@@ -753,7 +889,14 @@ def parse_facture_coredime(texte: str) -> Facture:
                 numero_bl=numero_bl_bloc,
             ))
 
-        for ligne_remise in _lignes_remise_double_coredime(texte_bloc, refs_extraites_bloc):
+        lignes_grille_bloc = None
+        if pages_lignes_grille is not None:
+            pages_concernees = _pages_pour_intervalle_coredime(limites_pages, debut_bloc, fin_bloc)
+            lignes_grille_bloc = [
+                (p, ligne) for p in pages_concernees for ligne in pages_lignes_grille[p]
+            ]
+
+        for ligne_remise in _lignes_remise_double_coredime(texte_bloc, refs_extraites_bloc, lignes_grille_bloc):
             ligne_remise.numero_bl = numero_bl_bloc
             lignes_facture.append(ligne_remise)
 

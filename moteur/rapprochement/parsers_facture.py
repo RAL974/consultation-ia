@@ -30,6 +30,7 @@ devis/BL normalement.
 """
 
 import importlib
+import inspect
 import pkgutil
 
 import moteur.fournisseurs as paquet
@@ -61,13 +62,23 @@ PARSERS_FACTURE = _charger_parsers("parse_facture")
 PARSERS_FACTURE_OCR = _charger_parsers("parse_facture_ocr")
 
 
-def parser_facture(fournisseur: str, texte: str):
+def parser_facture(fournisseur: str, texte: str, chemin=None):
+    """`chemin` (optionnel, chemin du PDF source) : transmis au parser
+    UNIQUEMENT s'il déclare explicitement un paramètre `chemin` dans sa
+    signature (ex. moteur.fournisseurs.coredime.parse_facture_coredime,
+    voir son bandeau — rattachement par coordonnées des lignes "Remise"
+    multiples) — les autres parsers, qui n'en ont pas besoin, continuent
+    de recevoir juste `texte`, sans qu'aucun d'eux n'ait à déclarer un
+    paramètre inutile."""
 
     parser = PARSERS_FACTURE.get(fournisseur.upper())
 
     if parser is None:
         print(f"!! Pas encore de parser facture pour {fournisseur}.")
         return None
+
+    if chemin is not None and "chemin" in inspect.signature(parser).parameters:
+        return parser(texte, chemin=chemin)
 
     return parser(texte)
 

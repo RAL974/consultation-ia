@@ -29,7 +29,10 @@ from moteur.rapprochement.modele_facture import Facture, LigneFacture
 from moteur.rapprochement import pipeline_facture
 from moteur.rapprochement.pipeline_bl import trouver_fichier_suivi_vivant
 from moteur.rapprochement.pipeline_facture import (
+    NOM_FEUILLE_SUBSTITUTIONS,
     RapportRapprochementFacture,
+    _appliquer_confirmations_substitutions,
+    _ecrire_substitutions_probables,
     _est_resolu_facture,
     _resoudre_commandes_facture,
     _verifier_total_ht_facture,
@@ -41,6 +44,7 @@ from moteur.rapprochement.pipeline_facture import (
     regrouper_par_facture,
     FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE,
 )
+from moteur.referentiel import Referentiel
 
 from conftest import ROOT
 
@@ -756,3 +760,141 @@ def test_ecritures_pour_facture_sur_le_vrai_suivi_vivant(tmp_path):
     assert ws.cell(row=2, column=entetes["Qté facturée"]).value == 7.0
     assert ws.cell(row=2, column=entetes["PU facturé"]).value == 12.5
     assert ws.cell(row=2, column=entetes["Montant facturé HT"]).value == 87.5
+
+
+# --- "Substitutions probables" : feuille dédiée + apprentissage (étape 1) --
+
+
+def _rapport_avec_substitution(fichier="f1.pdf", commande="M3.14.342",
+                                ref_facturee="LEG06620", ref_suivi="5120"):
+    f = _facture(fichier, numero_facture="6108234", numeros_commande=[commande])
+    lf = _ligne_facture(reference_fournisseur=ref_facturee, designation="ICTA 3422 20 ATF", quantite_facturee=100.0, prix_unitaire_ht=0.37)
+    lf.numero_commande = commande
+    ls = _ligne_suivi_facture(5353, reference=ref_suivi, designation="ICT 20 BLEU TURBO G-ROUL 100M", qte_livree=100.0, tarif_bl=0.37)
+    c = CorrespondanceFacture(lf, ls, StatutFacture.A_CONFIRMER, ["Substitution probable"], CauseFacture.SUBSTITUTION_PROBABLE)
+
+    rapport = RapportRapprochementFacture()
+    rapport.a_confirmer.append((f, c))
+    return rapport
+
+
+def test_ecrire_substitutions_probables_cree_la_feuille(tmp_path):
+    dossier = tmp_path / "referentiel"
+    dossier.mkdir()
+    rapport = _rapport_avec_substitution()
+
+    _ecrire_substitutions_probables(dossier, "A_confirmer_Facture.xlsx", rapport)
+
+    fichier = dossier / "A_confirmer_Facture.xlsx"
+    assert fichier.exists()
+
+    wb = load_workbook(fichier)
+    assert NOM_FEUILLE_SUBSTITUTIONS in wb.sheetnames
+    ws = wb[NOM_FEUILLE_SUBSTITUTIONS]
+    lignes = list(ws.iter_rows(values_only=True))
+    assert len(lignes) == 2  # en-tête + 1 ligne
+    entetes = lignes[0]
+    ligne = dict(zip(entetes, lignes[1]))
+    assert ligne["Référence facturée"] == "LEG06620"
+    assert ligne["Référence Suivi (connue)"] == "5120"
+    assert ligne["Qté facturée"] == 100.0
+    assert ligne["Commande"] == "M3.14.342"
+
+
+def test_ecrire_substitutions_probables_ne_touche_pas_la_feuille_primaire(tmp_path):
+    """La feuille "À confirmer" déjà écrite par referentiel.ecrire_a_confirmer()
+    (round-trip openpyxl) doit rester intacte quand on ajoute la feuille
+    "Substitutions probables" au même fichier."""
+
+    dossier = tmp_path / "referentiel"
+    dossier.mkdir()
+    fichier = dossier / "A_confirmer_Facture.xlsx"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "À confirmer"
+    ws.append(["Fournisseur", "Décision"])
+    ws.append(["COREDIME", ""])
+    wb.save(fichier)
+
+    _ecrire_substitutions_probables(dossier, "A_confirmer_Facture.xlsx", _rapport_avec_substitution())
+
+    wb2 = load_workbook(fichier)
+    assert set(wb2.sheetnames) == {"À confirmer", NOM_FEUILLE_SUBSTITUTIONS}
+    ws2 = wb2["À confirmer"]
+    # Round-trip openpyxl : une chaîne vide écrite se relit None (quirk
+    # déjà connu), pas une régression de ce test.
+    assert [c.value for c in ws2[2]] == ["COREDIME", None]
+
+
+def test_ecrire_substitutions_probables_supprime_la_feuille_si_plus_aucune(tmp_path):
+    dossier = tmp_path / "referentiel"
+    dossier.mkdir()
+    fichier = dossier / "A_confirmer_Facture.xlsx"
+
+    _ecrire_substitutions_probables(dossier, "A_confirmer_Facture.xlsx", _rapport_avec_substitution())
+    assert fichier.exists()
+
+    rapport_vide = RapportRapprochementFacture()
+    _ecrire_substitutions_probables(dossier, "A_confirmer_Facture.xlsx", rapport_vide)
+
+    # Plus aucune proposition et rien d'autre dans le classeur -> fichier supprimé.
+    assert not fichier.exists()
+
+
+def test_ecrire_substitutions_probables_rien_a_ecrire_et_fichier_absent(tmp_path):
+    dossier = tmp_path / "referentiel"
+    dossier.mkdir()
+    _ecrire_substitutions_probables(dossier, "A_confirmer_Facture.xlsx", RapportRapprochementFacture())
+    assert not (dossier / "A_confirmer_Facture.xlsx").exists()
+
+
+def test_appliquer_confirmations_substitutions_apprend_dans_equivalences_bl(tmp_path):
+    dossier = tmp_path / "referentiel"
+    dossier.mkdir()
+    rapport = _rapport_avec_substitution()
+    _ecrire_substitutions_probables(dossier, "A_confirmer_Facture.xlsx", rapport)
+
+    # L'acheteur coche "OUI" dans le fichier régénéré.
+    fichier = dossier / "A_confirmer_Facture.xlsx"
+    wb = load_workbook(fichier)
+    ws = wb[NOM_FEUILLE_SUBSTITUTIONS]
+    entetes = [c.value for c in ws[1]]
+    ws.cell(row=2, column=entetes.index("Décision") + 1, value="OUI")
+    wb.save(fichier)
+
+    ref = Referentiel(tmp_path / "moteur")
+    try:
+        n = _appliquer_confirmations_substitutions(dossier, "A_confirmer_Facture.xlsx", ref)
+        assert n == 1
+    finally:
+        ref.fermer()
+
+    contenu = (dossier / "equivalences_bl.csv").read_text(encoding="utf-8-sig")
+    assert "5120;LEG06620" in contenu
+    assert "6108234" in contenu  # n° de facture tracé dans la Note
+    assert "M3.14.342" in contenu  # n° de commande tracé dans la Note
+
+
+def test_appliquer_confirmations_substitutions_ignore_sans_decision(tmp_path):
+    dossier = tmp_path / "referentiel"
+    dossier.mkdir()
+    _ecrire_substitutions_probables(dossier, "A_confirmer_Facture.xlsx", _rapport_avec_substitution())
+
+    ref = Referentiel(tmp_path / "moteur")
+    try:
+        assert _appliquer_confirmations_substitutions(dossier, "A_confirmer_Facture.xlsx", ref) == 0
+    finally:
+        ref.fermer()
+
+    assert not (dossier / "equivalences_bl.csv").exists()
+
+
+def test_appliquer_confirmations_substitutions_fichier_absent(tmp_path):
+    dossier = tmp_path / "referentiel"
+    dossier.mkdir()
+    ref = Referentiel(tmp_path / "moteur")
+    try:
+        assert _appliquer_confirmations_substitutions(dossier, "A_confirmer_Facture.xlsx", ref) == 0
+    finally:
+        ref.fermer()

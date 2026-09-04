@@ -8,8 +8,10 @@ contrairement au BL du même fournisseur).
 
 from pathlib import Path
 
+from moteur.detecteur import detecter_fournisseur
 from moteur.lecture_pdf import lire_pdf
-from moteur.fournisseurs.stand64 import parse_facture_stand64
+from moteur.ocr import lignes_ocr, mots_document
+from moteur.fournisseurs.stand64 import parse_facture_stand64, parse_facture_stand64_ocr
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -125,3 +127,54 @@ def test_parse_facture_stand64_4_reference_avec_plus():
     assert l0.montant_ht == 1710.0
 
     assert round(sum(l.montant_ht for l in f.lignes), 2) == 1710.0
+
+
+# --- GABARIT FACTURE OCR (étape 3, voir CLAUDE.md) --------------------------
+# Facture SCANNÉE (contrairement aux 4 fixtures ci-dessus, en texte natif) —
+# fichier "FA 33330.pdf" identifié session F4/Electric Plus, jamais couvert
+# jusqu'ici. Contient à la fois la facture (page 0) et le bon de livraison
+# du même fournisseur (page 1, même n° 43972) scannés ensemble.
+
+
+def test_detecter_fournisseur_stand64_sur_texte_ocr():
+    """detecter_fournisseur reconnaît déjà STAND 64 sur du texte OCR (motif
+    existant STAND\\s?64|STAND64, voir moteur/detecteur.py) — vérifié ici
+    sur le texte OCR réel, où le logo "STAND64" ressort déformé
+    ("STANDE"/"STANDM") mais où "stand64@stand64.fr"/"www.stand64.fr"
+    (adresse mail/site, texte net) suffit à la reconnaissance."""
+
+    pages = mots_document(FIXTURES / "facture_stand64_33330_scan.pdf")
+    texte_ocr = "\n".join(l for mots in pages for l in lignes_ocr(mots))
+
+    assert detecter_fournisseur(texte_ocr) == "STAND 64"
+
+
+def test_parse_facture_stand64_ocr_33330_facture_et_bl_meme_scan():
+    """FA 33330.pdf : facture + BL 43972 dans le même scan (page 0 = la
+    facture elle-même, page 1 = le BL — seule la page 0 est traitée, sinon
+    les 2 lignes seraient comptées deux fois). Structure DIFFÉRENTE du BL
+    de ce fournisseur : ni Eco-part ni code TVA visibles en fin de ligne
+    (voir bandeau GABARIT FACTURE OCR) — seulement 5 valeurs après la
+    désignation (Qté, P.U, Rem%, P.U Net, Total HT), vérifiées par
+    cohérence arithmétique exacte (15 x 91,00 = 1365,00 ; 15 x 12,00 =
+    180,00 ; somme 1545,00 = Total HT affiché)."""
+
+    pages = mots_document(FIXTURES / "facture_stand64_33330_scan.pdf")
+    f = parse_facture_stand64_ocr(pages)
+
+    assert f.fournisseur == "STAND 64"
+    assert f.numero_facture == "33330"
+    assert f.date_facture == "27/05/2026"
+    assert f.numeros_commande == ["M3.18.217"]
+    assert f.numeros_bl == ["43972"]
+    assert f.total_ht_affiche == 1545.0
+
+    assert len(f.lignes) == 2
+    refs = {l.reference_fournisseur: l for l in f.lignes}
+    assert refs["WESTI-73044"].quantite_facturee == 15.0
+    assert refs["WESTI-73044"].prix_unitaire_ht == 91.0
+    assert refs["WESTI-73044"].montant_ht == 1365.0
+    assert refs["WESTI-73044"].numero_bl == "43972"
+    assert refs["WESTI-78800"].montant_ht == 180.0
+
+    assert round(sum(l.montant_ht for l in f.lignes), 2) == f.total_ht_affiche

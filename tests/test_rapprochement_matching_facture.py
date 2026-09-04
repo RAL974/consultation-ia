@@ -7,7 +7,11 @@ l'agrégation multi-BL (session S0, correction 1a) sur données réelles."""
 
 from pathlib import Path
 
+import pytest
+
+from conftest import ROOT
 from moteur.lecture_pdf import lire_pdf
+from moteur.fournisseurs.coredime import parse_facture_coredime
 from moteur.fournisseurs.dist109 import parse_facture_109
 from moteur.rapprochement.matching_facture import (
     CauseFacture,
@@ -18,8 +22,10 @@ from moteur.rapprochement.matching_facture import (
     charger_frais_fournisseurs,
     colonnes_facture_disponibles,
     est_bdc_manuel_24x,
+    lire_lignes_commande_facture,
 )
 from moteur.rapprochement.modele_facture import LigneFacture
+from moteur.rapprochement.pipeline_bl import trouver_fichier_suivi_vivant
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -524,3 +530,170 @@ def test_est_bdc_manuel_24x_faux_sur_un_format_suivi_normal():
     assert not est_bdc_manuel_24x(["M3.14.342"])
     assert not est_bdc_manuel_24x([])
     assert not est_bdc_manuel_24x([""])
+
+
+# --- résiduel unique : "substitution probable" (étape 1) -------------------
+
+
+def test_apparier_residuel_unique_substitution_probable():
+    """1 ligne facturée exacte (ABC123) + 1 ligne facturée sans AUCUN
+    rapport textuel/numérique avec la seule ligne Suivi restante (référence
+    totalement différente) -> "substitution probable", à confirmer, jamais
+    sûre. Même quantité des deux côtés (10.0), condition nécessaire."""
+
+    lf_exacte = _ligne_facture(reference_fournisseur="ABC123", quantite_facturee=5.0, prix_unitaire_ht=1.0)
+    lf_residuelle = _ligne_facture(reference_fournisseur="ZZZ999", quantite_facturee=10.0, prix_unitaire_ht=0.37)
+    ls_exacte = _ligne_suivi(ligne_excel=2, reference="ABC123", qte_livree=5.0, tarif_bl=1.0)
+    ls_residuelle = _ligne_suivi(
+        ligne_excel=3, reference="5120", designation="ICT 20 BLEU TURBO G-ROUL 100M",
+        qte_livree=10.0, tarif_bl=0.37,
+    )
+
+    corr = apparier_facture([lf_exacte, lf_residuelle], [ls_exacte, ls_residuelle], numero_facture="F1")
+
+    par_ref = {c.ligne_facture.reference_fournisseur: c for c in corr}
+    assert par_ref["ABC123"].statut is StatutFacture.SUR
+
+    c = par_ref["ZZZ999"]
+    assert c.statut is StatutFacture.A_CONFIRMER
+    assert c.cause is CauseFacture.SUBSTITUTION_PROBABLE
+    assert c.ligne_suivi.reference == "5120"
+    assert any("substitution probable" in r.lower() for r in c.raisons)
+
+
+def _scenario_residuel(**ecart):
+    """1 paire exacte (ABC123, jamais concernée) + 1 paire résiduelle
+    (ZZZ999 facture / 5120 Suivi, sans aucun rapport textuel) — mêmes
+    qté/PU par défaut (concordants), `ecart` permute un ou plusieurs
+    champs du côté facture ou Suivi pour tester un garde-fou précis. Le
+    couple exact est nécessaire pour que `len(lignes_a_apparier) > 1`
+    (garde-fou "vraie élimination", voir _residuel_unique) — un scénario à
+    1 seule ligne de chaque côté ne peut structurellement plus déclencher
+    ce repli."""
+
+    lf_exacte = _ligne_facture(reference_fournisseur="ABC123", quantite_facturee=5.0, prix_unitaire_ht=1.0)
+    ls_exacte = _ligne_suivi(ligne_excel=2, reference="ABC123", qte_livree=5.0, tarif_bl=1.0)
+
+    defaut_lf = dict(reference_fournisseur="ZZZ999", quantite_facturee=10.0, prix_unitaire_ht=0.37)
+    defaut_ls = dict(ligne_excel=3, reference="5120", qte_livree=10.0, tarif_bl=0.37, numero_facture=None)
+    defaut_lf.update(ecart.get("lf", {}))
+    defaut_ls.update(ecart.get("ls", {}))
+
+    lf_residuelle = _ligne_facture(**defaut_lf)
+    ls_residuelle = _ligne_suivi(**defaut_ls)
+
+    corr = apparier_facture([lf_exacte, lf_residuelle], [ls_exacte, ls_residuelle], numero_facture="F1")
+    return {c.ligne_facture.reference_fournisseur: c for c in corr}["ZZZ999"]
+
+
+def test_apparier_residuel_unique_ignore_si_ligne_suivi_deja_facturee():
+    """La seule ligne Suivi restante porte déjà un n° de facture (d'une
+    AUTRE facture) : jamais proposée comme substitution — "1 ligne Suivi
+    SANS facture" est une condition stricte."""
+
+    c = _scenario_residuel(ls={"numero_facture": "AUTRE-FACTURE"})
+
+    assert c.statut is StatutFacture.INCONNU
+    assert c.cause is CauseFacture.REF_INCONNUE
+
+
+def test_apparier_residuel_unique_ignore_si_quantite_differente():
+    c = _scenario_residuel(ls={"qte_livree": 25.0})
+
+    assert c.statut is StatutFacture.INCONNU
+
+
+def test_apparier_residuel_unique_ignore_si_prix_connus_trop_differents():
+    """Même quantité, mais PU connus des deux côtés et trop éloignés
+    (> 0,02€) : le résiduel unique n'efface pas ce garde-fou."""
+
+    c = _scenario_residuel(lf={"prix_unitaire_ht": 5.0}, ls={"tarif_bl": 1.0})
+
+    assert c.statut is StatutFacture.INCONNU
+
+
+def test_apparier_residuel_unique_accepte_ecart_prix_sous_le_seuil():
+    c = _scenario_residuel(lf={"prix_unitaire_ht": 1.01}, ls={"tarif_bl": 1.0})
+
+    assert c.statut is StatutFacture.A_CONFIRMER
+    assert c.cause is CauseFacture.SUBSTITUTION_PROBABLE
+
+
+def test_apparier_residuel_unique_ignore_si_une_seule_ligne_de_chaque_cote():
+    """Garde-fou "vraie élimination" : une commande à 1 SEULE ligne facture
+    dès le départ (aucun autre pair à avoir résolu pour se convaincre que
+    facture et commande se correspondent) ne déclenche jamais le résiduel
+    unique, même si qté/PU concordent par coïncidence — reste "inconnu"
+    (cas réel : les tests génériques de ce module utilisent tous la même
+    qté/PU par défaut des deux côtés, sans rapport avec ce garde-fou)."""
+
+    lf = _ligne_facture(reference_fournisseur="ZZZ999", quantite_facturee=10.0)
+    ls = _ligne_suivi(reference="5120", qte_livree=10.0)
+
+    [c] = apparier_facture([lf], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.INCONNU
+
+
+def test_apparier_residuel_unique_ignore_si_plusieurs_inconnues():
+    """2 lignes facture inconnues pour 1 seule ligne Suivi restante :
+    ambigu, jamais un choix au hasard entre les deux."""
+
+    lf1 = _ligne_facture(reference_fournisseur="ZZZ999", quantite_facturee=10.0)
+    lf2 = _ligne_facture(reference_fournisseur="YYY888", quantite_facturee=10.0)
+    ls = _ligne_suivi(reference="5120", qte_livree=10.0)
+
+    corr = apparier_facture([lf1, lf2], [ls], numero_facture="F1")
+
+    assert all(c.statut is StatutFacture.INCONNU for c in corr)
+
+
+def test_apparier_residuel_unique_ignore_si_plusieurs_disponibles():
+    """1 seule ligne facture inconnue (mais une 2e, exacte, prouve qu'il y
+    a bien eu élimination), 2 lignes Suivi encore disponibles : ambigu,
+    jamais un choix au hasard."""
+
+    # Reconstruit le scénario à la main (le helper _scenario_residuel n'a
+    # qu'1 ligne résiduelle Suivi) pour ajouter une 2e ligne disponible.
+    lf_exacte = _ligne_facture(reference_fournisseur="ABC123", quantite_facturee=5.0, prix_unitaire_ht=1.0)
+    lf_residuelle = _ligne_facture(reference_fournisseur="ZZZ999", quantite_facturee=10.0, prix_unitaire_ht=0.37)
+    ls_exacte = _ligne_suivi(ligne_excel=2, reference="ABC123", qte_livree=5.0, tarif_bl=1.0)
+    ls1 = _ligne_suivi(ligne_excel=3, reference="5120", qte_livree=10.0, tarif_bl=0.37)
+    ls2 = _ligne_suivi(ligne_excel=4, reference="6130", qte_livree=10.0, tarif_bl=0.37)
+
+    corr = apparier_facture([lf_exacte, lf_residuelle], [ls_exacte, ls1, ls2], numero_facture="F1")
+    c = {c.ligne_facture.reference_fournisseur: c for c in corr}["ZZZ999"]
+
+    assert c.statut is StatutFacture.INCONNU
+
+
+@pytest.mark.skipif(
+    trouver_fichier_suivi_vivant(ROOT) is None,
+    reason="Classeur Suivi commandes VIVANT introuvable depuis ce poste",
+)
+def test_apparier_residuel_unique_sur_la_vraie_piece_6108234():
+    """Bout en bout sur données réelles (facture_coredime_6108234_suffixe.pdf,
+    commande M3.14.342) : après le repli premier-token (SIXGPCP35 ->
+    SIXGPCP35 PVC) et les correspondances exactes/cœur-numérique déjà
+    écrites lors d'une session précédente, il ne reste plus qu'une seule
+    ligne facture inconnue ("LEG06620") et qu'une seule ligne Suivi non
+    facturée ("5120", même désignation "ICT 20 BLEU TURBO G-ROUL 100M",
+    même quantité 100, même tarif 0,37€) — voir CLAUDE.md, étape 1."""
+
+    texte = lire_pdf(FIXTURES / "facture_coredime_6108234_suffixe.pdf")
+    f = parse_facture_coredime(texte)
+
+    suivi = trouver_fichier_suivi_vivant(ROOT)
+    lignes_suivi = lire_lignes_commande_facture(suivi, "COREDIME", "M3.14.342")
+
+    corr = apparier_facture(f.lignes, lignes_suivi, numero_facture=f.numero_facture)
+
+    par_ref = {c.ligne_facture.reference_fournisseur: c for c in corr}
+    c = par_ref["LEG06620"]
+
+    assert c.statut is StatutFacture.A_CONFIRMER
+    assert c.cause is CauseFacture.SUBSTITUTION_PROBABLE
+    # La référence "5120" est purement numérique : Excel/openpyxl la relit
+    # comme un int, pas une chaîne (déjà le cas ailleurs dans ce projet).
+    assert str(c.ligne_suivi.reference) == "5120"
+    assert c.ligne_suivi.qte_livree == 100.0

@@ -569,6 +569,59 @@ class Referentiel:
 
         return n
 
+    def apprendre_equivalence(self, csv_path, reference_connue: str, reference_facturee: str, note: str) -> bool:
+        """
+        Ajoute une ligne à referentiel/equivalences_bl.csv (Reference_1;
+        Reference_2;Note) — utilisé quand une substitution SANS AUCUN
+        rapport textuel/numérique (voir importer_equivalences_bl) est
+        confirmée par l'acheteur via un mécanisme EXTERNE à ce module (ex.
+        le "résiduel unique" du rapprochement factures, voir
+        moteur.rapprochement.matching_facture._residuel_unique et
+        moteur.rapprochement.pipeline_facture._appliquer_confirmations_
+        substitutions) : ce module reste la SEULE façon d'écrire ce
+        fichier, mais n'a pas besoin d'être celui qui a PROPOSÉ la paire
+        au départ (contrairement à `_propositions`, alimenté uniquement
+        par resoudre()/proposer_correspondances_designation()).
+
+        Écrit dans le fichier CSV (portable, suivi par git) plutôt que
+        directement dans la table `alias` (SQLite, gitignorée, propre à ce
+        poste) : une substitution pure, découverte par élimination et donc
+        impossible à re-proposer automatiquement, mérite une trace
+        durable et partageable, pas seulement un cache local — voir
+        CLAUDE.md, "Enrichissement continu du référentiel partagé".
+
+        Idempotent : ne réécrit rien si cette paire (dans un sens ou
+        l'autre) existe déjà. Retourne True si une ligne a été ajoutée.
+        """
+        csv_path = Path(csv_path)
+        r1, r2 = normaliser_ref(reference_connue), normaliser_ref(reference_facturee)
+
+        if not r1 or not r2:
+            return False
+
+        paires_existantes = set()
+        if csv_path.exists():
+            with open(csv_path, encoding="utf-8-sig") as f:
+                lignes_utiles = (l for l in f if not l.lstrip().startswith("#"))
+                for row in csv.DictReader(lignes_utiles, delimiter=";"):
+                    a = normaliser_ref((row.get("Reference_1") or "").strip())
+                    b = normaliser_ref((row.get("Reference_2") or "").strip())
+                    if a and b:
+                        paires_existantes.add(frozenset((a, b)))
+
+        if frozenset((r1, r2)) in paires_existantes:
+            return False
+
+        nouveau_fichier = not csv_path.exists()
+        with open(csv_path, "a", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f, delimiter=";")
+            if nouveau_fichier:
+                w.writerow(["Reference_1", "Reference_2", "Note"])
+            w.writerow([reference_connue, reference_facturee, note])
+
+        print(f"Équivalence apprise : {reference_connue} <-> {reference_facturee} ({csv_path.name})")
+        return True
+
     # ------------------------------------------------------------------
     # Confirmation (fichier Excel aller-retour)
     # ------------------------------------------------------------------

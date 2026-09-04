@@ -42,6 +42,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font
+
 from moteur.referentiel import Referentiel
 from moteur.rapprochement.ecriture import ENTETES_FACTURE, Ecriture, appliquer
 from moteur.rapprochement.lecture_facture import analyser_dossier
@@ -85,6 +88,16 @@ NOM_FRAIS_FOURNISSEURS = "frais_fournisseurs.csv"  # referentiel/ — voir
 # moteur.rapprochement.matching_facture.charger_frais_fournisseurs, session
 # S0 : références connues qui ne sont PAS de vrais articles (frais de port,
 # éco-taxe...), jamais rapprochées à une ligne du Suivi, jamais bloquantes.
+NOM_FEUILLE_SUBSTITUTIONS = "Substitutions probables"  # 2e feuille de
+# A_confirmer_Facture.xlsx (même fichier que le référentiel, feuille à
+# part) — voir _ecrire_substitutions_probables/_appliquer_confirmations_
+# substitutions : les correspondances CauseFacture.SUBSTITUTION_PROBABLE
+# (voir matching_facture._residuel_unique) ne viennent PAS de
+# Referentiel.resoudre() (aucune ressemblance structurelle de référence à
+# proposer), impossible de les glisser dans Referentiel._propositions sans
+# dénaturer ce mécanisme — une feuille séparée, écrite/lue directement ici,
+# reste le moyen le plus simple de les faire transiter par le MÊME fichier
+# de confirmation qu'utilise déjà l'acheteur pour ce flux.
 
 # Seuil de réconciliation Total HT facture vs somme des lignes extraites —
 # même tolérance que le contrôle interne (console) de chaque parser (voir
@@ -220,6 +233,142 @@ def _verifier_total_ht_facture(facture) -> str | None:
     )
 
 
+def _appliquer_confirmations_substitutions(dossier_referentiel: Path, nom_fichier: str,
+                                            referentiel: Referentiel) -> int:
+    """Lit la feuille NOM_FEUILLE_SUBSTITUTIONS de A_confirmer_Facture.xlsx
+    (si elle existe) : chaque ligne dont Décision == "OUI" est apprise dans
+    referentiel/equivalences_bl.csv (voir Referentiel.apprendre_equivalence)
+    — JAMAIS directement dans la table alias comme un repli référentiel
+    ordinaire (voir bandeau de NOM_FEUILLE_SUBSTITUTIONS). Une ligne dont
+    Décision est vide ou "NON" est simplement laissée de côté (ni apprise,
+    ni marquée rejetée — elle réapparaîtra tant que le résiduel unique se
+    reproduit ; contrairement au workflow référentiel classique, il n'y a
+    pas de notion de "rejet définitif" ici, une substitution proposée par
+    élimination n'a pas vocation à être mémorisée comme fausse pour
+    toujours). Retourne le nombre de paires nouvellement apprises."""
+
+    fichier = Path(dossier_referentiel) / nom_fichier
+    if not fichier.exists():
+        return 0
+
+    wb = load_workbook(fichier, data_only=True)
+    if NOM_FEUILLE_SUBSTITUTIONS not in wb.sheetnames:
+        return 0
+    ws = wb[NOM_FEUILLE_SUBSTITUTIONS]
+
+    lignes = list(ws.iter_rows(values_only=True))
+    if not lignes:
+        return 0
+
+    entetes = [str(c).strip() if c else "" for c in lignes[0]]
+
+    def idx(nom):
+        return entetes.index(nom) if nom in entetes else None
+
+    i_ref_facturee = idx("Référence facturée")
+    i_ref_suivi = idx("Référence Suivi (connue)")
+    i_decision = idx("Décision")
+    i_facture = idx("Facture")
+    i_commande = idx("Commande")
+
+    if i_ref_facturee is None or i_ref_suivi is None or i_decision is None:
+        return 0
+
+    n = 0
+    for ligne in lignes[1:]:
+
+        if ligne is None or i_decision >= len(ligne):
+            continue
+
+        decision = str(ligne[i_decision] or "").strip().upper()
+        if decision != "OUI":
+            continue
+
+        ref_facturee = str(ligne[i_ref_facturee] or "").strip()
+        ref_suivi = str(ligne[i_ref_suivi] or "").strip()
+        if not ref_facturee or not ref_suivi:
+            continue
+
+        note = (
+            f"Substitution probable confirmée (résiduel unique) — facture "
+            f"{ligne[i_facture] if i_facture is not None else '?'}, commande "
+            f"{ligne[i_commande] if i_commande is not None else '?'}"
+        )
+        if referentiel.apprendre_equivalence(
+            Path(dossier_referentiel) / "equivalences_bl.csv", ref_suivi, ref_facturee, note,
+        ):
+            n += 1
+
+    if n:
+        print(f"{n} équivalence(s) apprise(s) depuis « {NOM_FEUILLE_SUBSTITUTIONS} » (equivalences_bl.csv).")
+
+    return n
+
+
+def _ecrire_substitutions_probables(dossier_referentiel: Path, nom_fichier: str,
+                                     rapport: "RapportRapprochementFacture") -> None:
+    """Ajoute (ou retire, si plus aucune) la feuille NOM_FEUILLE_SUBSTITUTIONS
+    dans A_confirmer_Facture.xlsx — appelée APRÈS referentiel.
+    ecrire_a_confirmer() (qui régénère/supprime la feuille primaire "À
+    confirmer" du référentiel), donc le fichier peut ou non déjà exister à
+    cet instant. Round-trip openpyxl (load_workbook/save) : sans risque
+    pour ce fichier de confirmation jetable (pas le classeur Suivi vivant,
+    qui lui passe TOUJOURS par un patch XML chirurgical, jamais
+    openpyxl.save() — voir moteur.rapprochement.ecriture)."""
+
+    lignes = [
+        (facture, c) for facture, c in rapport.a_confirmer
+        if c.cause is CauseFacture.SUBSTITUTION_PROBABLE
+    ]
+
+    fichier = Path(dossier_referentiel) / nom_fichier
+
+    if not lignes:
+        if not fichier.exists():
+            return
+        wb = load_workbook(fichier)
+        if NOM_FEUILLE_SUBSTITUTIONS not in wb.sheetnames:
+            return
+        del wb[NOM_FEUILLE_SUBSTITUTIONS]
+        if wb.sheetnames:
+            wb.save(fichier)
+        else:
+            fichier.unlink()
+        return
+
+    if fichier.exists():
+        wb = load_workbook(fichier)
+        if NOM_FEUILLE_SUBSTITUTIONS in wb.sheetnames:
+            del wb[NOM_FEUILLE_SUBSTITUTIONS]
+        ws = wb.create_sheet(NOM_FEUILLE_SUBSTITUTIONS)
+    else:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = NOM_FEUILLE_SUBSTITUTIONS
+
+    entetes = [
+        "Fournisseur", "Facture", "Commande", "Référence facturée", "Désignation facturée",
+        "Qté facturée", "PU facturé", "Référence Suivi (connue)", "Désignation Suivi",
+        "Qté Suivi", "Tarif Suivi", "Décision",
+    ]
+    ws.append(entetes)
+
+    for facture, c in lignes:
+        lf, ls = c.ligne_facture, c.ligne_suivi
+        ws.append([
+            facture.fournisseur, facture.numero_facture, lf.numero_commande,
+            lf.reference_fournisseur, lf.designation, lf.quantite_facturee, lf.prix_unitaire_ht,
+            ls.reference, ls.designation, ls.qte_livree, ls.tarif_bl or ls.tarif_convenu,
+            "",
+        ])
+
+    for cellule in ws[1]:
+        cellule.font = Font(bold=True)
+
+    wb.save(fichier)
+    print(f"{len(lignes)} substitution(s) probable(s) à confirmer : feuille « {NOM_FEUILLE_SUBSTITUTIONS} » de {fichier}")
+
+
 def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRapprochementFacture:
     """Lecture seule : lit toutes les factures du dossier, les rapproche du
     Suivi. Ne modifie ni le Suivi ni les fichiers de `dossier_a_traiter`."""
@@ -241,6 +390,7 @@ def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRap
     referentiel.importer_bdd(dossier_projet / "base" / "BDD_articles.csv")
     referentiel.importer_equivalences_bl(dossier_referentiel / "equivalences_bl.csv")
     referentiel.appliquer_confirmations(dossier_referentiel / NOM_A_CONFIRMER_FACTURE)
+    _appliquer_confirmations_substitutions(dossier_referentiel, NOM_A_CONFIRMER_FACTURE, referentiel)
     frais_connus = charger_frais_fournisseurs(dossier_referentiel / NOM_FRAIS_FOURNISSEURS)
 
     for facture in factures:
@@ -353,6 +503,7 @@ def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRap
     _desamorcer_conflits_meme_ligne_suivi_facture(rapport)
 
     referentiel.ecrire_a_confirmer(dossier_referentiel, NOM_A_CONFIRMER_FACTURE)
+    _ecrire_substitutions_probables(dossier_referentiel, NOM_A_CONFIRMER_FACTURE, rapport)
     referentiel.fermer()
 
     return rapport

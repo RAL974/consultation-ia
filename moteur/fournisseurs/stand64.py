@@ -542,7 +542,138 @@ def parse_facture_stand64(texte: str) -> Facture:
     )
 
 
+# --- GABARIT FACTURE OCR (Stand 64) -----------------------------------------
+# Facture SCANNÉE (contrairement au format habituel en texte natif, voir
+# GABARIT FACTURE ci-dessus) — cas réel identifié session F4/Electric Plus,
+# jamais couvert jusqu'ici : les fichiers "FA <numéro>.pdf" (voir CLAUDE.md).
+# Seule pièce réelle disponible à ce jour : FA 33330.pdf, qui contient à la
+# fois la FACTURE (page 0) ET le BON DE LIVRAISON du même fournisseur
+# (page 1, même n° 43972) scannés dans le même fichier — même schéma que
+# "facture + BdC agrafés" déjà rencontré chez 109 Distribution/Electric
+# Plus/EDOI (exigence du service comptable). Seule la page 0 est traitée
+# ici : la page 1 reliste les 2 mêmes lignes (BL), les compter aussi
+# doublonnerait le montant.
+#
+# Réutilise le MÊME repérage de tableau que le BL de ce fournisseur
+# (_zone_tableau_bl_stand64, MOTIF_ENTETE_TABLEAU_BL_STAND64/MOTIF_PIED_
+# TABLEAU_BL_STAND64 — même en-tête de colonnes "Référence article |
+# Description | Qté | P.U | Rem% | P.U Net | Eco-part | Total HT | TVA"),
+# et le MÊME motif de commande ("BC N°M3.18.217", MOTIF_COMMANDE_BL_STAND64).
+#
+# Structure de ligne DIFFÉRENTE du BL cependant : sur l'unique pièce
+# réelle disponible, NI Eco-part NI code TVA ne sont visibles en fin de
+# ligne (contrairement au BL, qui les a toujours) — seulement 5 valeurs
+# après la désignation (Qté, P.U, Rem%, P.U Net, Total HT). Vérifié par
+# cohérence arithmétique EXACTE sur les 2 lignes réelles (15 x 91,00 =
+# 1365,00 ; 15 x 12,00 = 180,00 ; somme 1545,00 = Total affiché en pied de
+# page) — pas de 2e hypothèse "avec éco-part" tentée ici (un seul exemple,
+# règle d'or, contrairement au BL qui, lui, a 2 pièces réelles justifiant
+# les deux hypothèses).
+#
+# N° de facture/date ("Facture client n° 33 330 du 27/05/2026") et n° de
+# BL ("Bon de livraison n° 43972 du...", cité en TÊTE du tableau, juste
+# après l'en-tête de colonnes) : cherchés sur le texte COMPACTÉ (comme le
+# n° de BL du gabarit BL de ce même fournisseur, _sans_espaces_stand64) —
+# l'OCR éclate ces libellés en plusieurs mots, jamais fiable à chercher
+# avec des espaces explicites.
+MOTIF_NUMERO_FACTURE_OCR_STAND64 = re.compile(r"FACTURECLIENTN(\d+)DU(\d{2}/\d{2}/\d{4})")
+MOTIF_BL_FACTURE_OCR_STAND64 = re.compile(r"LIVRAISONN(\d{3,6})")
+MOTIF_TOTAL_HT_OCR_STAND64 = re.compile(r"TOTALHT([\d,]+)EUR")
+# --- fin GABARIT FACTURE OCR --------------------------------------------------
+
+
+def _ligne_facture_ocr_vers_article_stand64(cellules: list[str]) -> LigneFacture | None:
+    """5 valeurs après la désignation (Qté, P.U, Rem%, P.U Net, Total HT) —
+    voir bandeau GABARIT FACTURE OCR. Validé par qté x P.U Net ≈ Total HT,
+    même garde-fou que le BL de ce fournisseur."""
+
+    if len(cellules) < 7:
+        return None
+
+    try:
+        total_ht = _nombre_bl_stand64(cellules[-1])
+        pu_net = _nombre_bl_stand64(cellules[-2])
+        quantite = _nombre_bl_stand64(cellules[-5])
+    except Exception:
+        return None
+
+    if not quantite or not pu_net:
+        return None
+    if abs(quantite * pu_net - total_ht) > max(0.02 * total_ht, 0.5):
+        return None
+
+    reference = cellules[0].strip()
+    if not reference:
+        return None
+
+    return LigneFacture(
+        reference_fournisseur=reference,
+        designation=" ".join(cellules[1:-5]).strip(),
+        quantite_facturee=quantite,
+        prix_unitaire_ht=pu_net,
+        montant_ht=total_ht,
+    )
+
+
+def parse_facture_stand64_ocr(mots_par_page: list[list[dict]]) -> Facture:
+
+    mots_page0 = mots_par_page[0] if mots_par_page else []
+
+    lignes_plates = [mot["texte"] for ligne in regrouper_lignes(mots_page0) for mot in ligne]
+    texte = "\n".join(lignes_plates)
+    texte_compact = _sans_espaces_stand64(texte)
+
+    numero_facture = ""
+    date_facture = ""
+    m_num = MOTIF_NUMERO_FACTURE_OCR_STAND64.search(texte_compact)
+    if m_num:
+        numero_facture = m_num.group(1)
+        date_facture = m_num.group(2)
+
+    numero_bl = ""
+    m_bl = MOTIF_BL_FACTURE_OCR_STAND64.search(texte_compact)
+    if m_bl:
+        numero_bl = m_bl.group(1)
+
+    numero_commande = ""
+    m_cde = MOTIF_COMMANDE_BL_STAND64.search(texte)
+    if m_cde:
+        numero_commande = m_cde.group(1).upper()
+
+    lignes_facture = []
+    for ligne in _zone_tableau_bl_stand64(regrouper_lignes(mots_page0)):
+        cellules = [m["texte"] for m in ligne]
+        article = _ligne_facture_ocr_vers_article_stand64(cellules)
+        if article is not None:
+            article.numero_bl = numero_bl
+            lignes_facture.append(article)
+
+    total_ht_affiche = None
+    m_total = MOTIF_TOTAL_HT_OCR_STAND64.search(texte_compact)
+    if m_total:
+        total_ht_affiche = _nombre_bl_stand64(m_total.group(1))
+        somme = round(sum(l.montant_ht for l in lignes_facture), 2)
+        if abs(somme - total_ht_affiche) > 0.02:
+            print(
+                f"!! STAND 64 (Facture OCR) : Total HT du PDF ({total_ht_affiche:.2f}€) != somme "
+                f"des lignes extraites ({somme:.2f}€) — une ligne a peut-être été oubliée ou mal lue "
+                "(voir bandeau GABARIT FACTURE OCR)."
+            )
+
+    return Facture(
+        fournisseur="STAND 64",
+        fichier="",
+        numero_facture=numero_facture,
+        date_facture=date_facture,
+        numeros_commande=[numero_commande] if numero_commande else [],
+        numeros_bl=[numero_bl] if numero_bl else [],
+        lignes=lignes_facture,
+        total_ht_affiche=total_ht_affiche,
+    )
+
+
 FOURNISSEURS = ["STAND 64"]
 parse = parse_stand64
 parse_bl = parse_bl_stand64
 parse_facture = parse_facture_stand64
+parse_facture_ocr = parse_facture_stand64_ocr

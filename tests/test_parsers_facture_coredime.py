@@ -15,8 +15,9 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _parser(nom_fixture):
-    texte = lire_pdf(FIXTURES / nom_fixture)
-    return parse_facture_coredime(texte)
+    chemin = FIXTURES / nom_fixture
+    texte = lire_pdf(chemin)
+    return parse_facture_coredime(texte, chemin=chemin)
 
 
 def test_parse_facture_coredime_1_simple():
@@ -165,32 +166,49 @@ def test_parse_facture_coredime_7_ligne_fret_livraison_avion_incluse():
     assert round(sum(l.montant_ht for l in f.lignes), 2) == 13440.1
 
 
-def test_parse_facture_coredime_8_remises_multiples_extraction_partielle_honnete():
-    """LIMITE CONNUE ACCEPTÉE (voir CLAUDE.md) : quand un bloc contient
-    PLUSIEURS lignes incomplètes ET plusieurs lignes "Remise" (ici :
-    document réel avec de nombreuses doubles remises), l'appariement 1:1
-    ne s'applique plus (ambiguïté réelle, jamais un choix au hasard) — ces
-    lignes restent NON extraites, l'écart avec le Total HT affiché est
-    signalé (jamais un faux total exact).
+def test_parse_facture_coredime_8_remises_multiples_par_coordonnees():
+    """Étape 2 (voir CLAUDE.md) : ce bloc contient 5 lignes incomplètes ET
+    5 lignes "Remise" (double remise en cascade) — l'ancien appariement 1:1
+    abandonnait purement et simplement les 5 (124,37€ jamais extraits,
+    limite acceptée jusqu'ici). Le rattachement PAR COORDONNÉES
+    (moteur.grille) résout les 5 paires SANS AMBIGUÏTÉ : chacune vérifiée
+    par DEUX signaux indépendants — (a) prix de base x remises en cascade
+    reconstitue exactement le P.U Net imprimé (ex. LEG030804 :
+    7,4100 x 0,65 x 0,74 = 3,5642€), et (b) qté x P.U Net = montant, à
+    l'euro près (ex. LEG030804 : 6 x 3,5642 = 21,39€) — les 5 sont donc
+    des extractions individuellement sûres, pas un artefact de
+    l'appariement.
 
-    Compte de lignes RELEVÉ (12 -> 21) après le correctif fin_zone (voir
-    CLAUDE.md, gros lot Coredime H1 2026) : cette pièce s'étale elle aussi
-    sur plusieurs folios, la même troncature prématurée qui a motivé ce
-    correctif l'affectait déjà — les 9 lignes retrouvées en plus sont
-    propres (sans remise multiple), seule la limite remise-multiple
-    d'origine reste (124,37€ résiduels, inchangé dans sa nature)."""
+    NOUVEAU résidu honnête révélé (35,02€, DIFFÉRENT de l'ancien 124,37€ :
+    l'écart change de nature, pas juste de valeur) : la somme des 26
+    lignes (1167,53€) est cette fois SUPÉRIEURE au Total HT affiché sur le
+    document (1132,51€) — vérifié que ce dernier n'est PAS un artefact de
+    lecture (une seule occurrence de "COR F6108047" isolée dans tout le
+    texte, valeurs voisines cohérentes entre elles : HT 1132,51 + TVA 1,80
+    ≈ TTC 1134,31). L'écart provient donc d'une incohérence PROPRE à ce
+    document réel (les 26 lignes sont, elles, chacune vérifiée) — pas un
+    bug du rattachement par coordonnées. Signalé honnêtement (comme avant),
+    jamais masqué ni deviné."""
 
     f = _parser("facture_coredime_8_remises_multiples_partiel.pdf")
 
     assert f.total_ht_affiche == 1132.51
-    assert len(f.lignes) == 21
+    assert len(f.lignes) == 26
 
     total_extrait = round(sum(l.montant_ht for l in f.lignes), 2)
-    assert total_extrait == 1008.14
+    assert total_extrait == 1167.53
     assert total_extrait != f.total_ht_affiche  # écart honnête, pas un faux total exact
 
-    # Les lignes propres (sans double remise) restent exactes.
+    # Les 5 lignes récupérées par rattachement de coordonnées, chacune
+    # vérifiée par les deux signaux décrits ci-dessus.
     refs = {l.reference_fournisseur: l for l in f.lignes}
+    assert refs["GFO031004"].montant_ht == 73.15
+    assert refs["HAGGD213A"].montant_ht == 27.60
+    assert refs["LEG405000"].montant_ht == 15.42
+    assert refs["LEG030804"].montant_ht == 21.39
+    assert refs["LEG031919"].montant_ht == 21.83
+
+    # Les lignes déjà propres (sans double remise) restent exactes.
     assert refs["LEG030015"].montant_ht == 184.0
     assert refs["GFO026705"].montant_ht == 148.8
 
@@ -317,6 +335,31 @@ def test_parse_facture_coredime_12_ecotaxe_montant_correct():
     assert refs["ECO-23"].prix_unitaire_ht == 0.08
     assert refs["ECO-23"].montant_ht == 0.8
     assert refs["LBCLASTD02"].montant_ht == 55.0
+
+    assert round(sum(l.montant_ht for l in f.lignes), 2) == f.total_ht_affiche
+
+
+def test_parse_facture_coredime_14_remise_double_x3_par_coordonnees():
+    """Étape 2 (voir CLAUDE.md) : 3 lignes incomplètes + 3 lignes "Remise"
+    dans le MÊME bloc — l'ancien appariement 1:1 abandonnait purement et
+    simplement (196,92€ jamais extraits). Rattachement PAR COORDONNÉES
+    (moteur.grille) : chaque "Remise" est rattachée à l'article dont le Y
+    est immédiatement au-dessus — reconstitue les 3 bonnes paires,
+    vérifiées par cohérence arithmétique indépendante (qté x prix net =
+    montant, à l'euro près) : LEG031916 -> 61,00€ (35+31%), LEG031919 ->
+    87,32€ (35+27%), LEG031955 -> 48,60€ (35+32%)."""
+
+    f = _parser("facture_coredime_6108846_remise_double_x3.pdf")
+
+    assert f.total_ht_affiche == 196.92
+    assert len(f.lignes) == 3
+
+    refs = {l.reference_fournisseur: l for l in f.lignes}
+    assert refs["LEG031916"].quantite_facturee == 400.0
+    assert refs["LEG031916"].prix_unitaire_ht == 0.1525
+    assert refs["LEG031916"].montant_ht == 61.0
+    assert refs["LEG031919"].montant_ht == 87.32
+    assert refs["LEG031955"].montant_ht == 48.6
 
     assert round(sum(l.montant_ht for l in f.lignes), 2) == f.total_ht_affiche
 

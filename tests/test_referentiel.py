@@ -458,3 +458,54 @@ def test_importer_equivalences_bl_idempotent_et_vide_sans_fichier(tmp_path, refe
     fichier.write_text("Reference_1;Reference_2;Note\nA;B;\n", encoding="utf-8-sig")
     assert referentiel.importer_equivalences_bl(fichier) == 1
     assert referentiel.importer_equivalences_bl(fichier) == 1  # ré-import : pas de doublon
+
+
+# ------------------------------------------------------------------
+# apprendre_equivalence() — écrit dans referentiel/equivalences_bl.csv
+# (portable, suivi par git), jamais directement dans la table alias
+# (SQLite, gitignorée) — voir CLAUDE.md, "Rapprochement factures — étape 1".
+# ------------------------------------------------------------------
+def test_apprendre_equivalence_cree_le_fichier_avec_entete(tmp_path, referentiel):
+    fichier = tmp_path / "equivalences_bl.csv"
+    assert not fichier.exists()
+
+    ajoute = referentiel.apprendre_equivalence(fichier, "5120", "LEG06620", "substitution probable, facture 6108234")
+    assert ajoute is True
+
+    contenu = fichier.read_text(encoding="utf-8-sig")
+    assert "Reference_1;Reference_2;Note" in contenu
+    assert "5120;LEG06620;substitution probable, facture 6108234" in contenu
+
+    # Le nouvel alias est immédiatement exploitable via importer_equivalences_bl.
+    referentiel.importer_equivalences_bl(fichier)
+    cle1, statut1 = referentiel.resoudre("5120")
+    cle2, statut2 = referentiel.resoudre("LEG06620")
+    assert statut1 == statut2 == "connu"
+    assert cle1 == cle2
+
+
+def test_apprendre_equivalence_preserve_les_lignes_existantes(tmp_path, referentiel):
+    fichier = tmp_path / "equivalences_bl.csv"
+    fichier.write_text(
+        "# commentaire\nReference_1;Reference_2;Note\nCFF1BIS;59210;déjà là\n", encoding="utf-8-sig",
+    )
+
+    referentiel.apprendre_equivalence(fichier, "5120", "LEG06620", "nouvelle paire")
+
+    contenu = fichier.read_text(encoding="utf-8-sig")
+    assert "CFF1BIS;59210;déjà là" in contenu
+    assert "5120;LEG06620;nouvelle paire" in contenu
+
+
+def test_apprendre_equivalence_idempotent_dans_les_deux_sens(tmp_path, referentiel):
+    fichier = tmp_path / "equivalences_bl.csv"
+
+    assert referentiel.apprendre_equivalence(fichier, "5120", "LEG06620", "1ère fois") is True
+    # Même paire, même sens : pas de doublon.
+    assert referentiel.apprendre_equivalence(fichier, "5120", "LEG06620", "2e fois") is False
+    # Même paire, sens inversé : toujours pas de doublon (une équivalence
+    # n'a pas de sens privilégié une fois apprise).
+    assert referentiel.apprendre_equivalence(fichier, "LEG06620", "5120", "3e fois") is False
+
+    contenu = fichier.read_text(encoding="utf-8-sig")
+    assert contenu.count("LEG06620") == 1

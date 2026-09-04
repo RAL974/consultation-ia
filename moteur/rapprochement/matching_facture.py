@@ -134,6 +134,7 @@ class CauseFacture(Enum):
     FRAIS = "frais"
     AVOIR = "avoir"
     PRIX_DIFF_MEME_REF = "prix_diff_meme_ref"
+    SUBSTITUTION_PROBABLE = "substitution_probable"
 
 
 @dataclass
@@ -401,6 +402,79 @@ def _repli_premier_token(ligne_facture: LigneFacture, disponibles: list) -> tupl
     return None, None
 
 
+def _residuel_unique(resultats: list, lignes_a_apparier: list, disponibles: list) -> None:
+    """Modifie `resultats` EN PLACE (dernier repli, appelé après tous les
+    autres) : si, pour cette commande, il ne reste plus qu'UNE SEULE ligne
+    facture INCONNUE et qu'UNE SEULE ligne Suivi jamais réclamée
+    (`disponibles`), ET que cette ligne Suivi n'a encore AUCUN n° de
+    facture, ET que les deux quantités concordent (et les PU aussi, à
+    0,02€ près, quand les deux sont connus) -> "substitution probable",
+    TOUJOURS "à confirmer" (jamais "sûr" : aucune preuve textuelle ou
+    structurelle, seulement un processus d'élimination — contrairement à
+    _repli_reference_proche/_repli_premier_token/_repli_referentiel, qui
+    exigent tous une ressemblance).
+
+    Cas réel qui motive ce repli (Facture_6108234.pdf/Coredime, commande
+    M3.14.342) : référence facturée "LEG06620" (aucune ligne Suivi ne s'en
+    approche, même avec tous les replis existants) alors qu'il ne reste,
+    à la fin, QU'UNE ligne Suivi non facturée pour cette commande ("5120",
+    même désignation "ICT 20 BLEU TURBO G-ROUL 100M", même quantité 100,
+    même tarif 0,37€) — "5120" est manifestement une ancienne référence
+    reprise par Coredime sous un autre code, sans AUCUN rapport textuel ni
+    numérique. Une correspondance retenue ici est destinée, une fois
+    confirmée par l'acheteur, à être apprise dans
+    referentiel/equivalences_bl.csv (voir moteur.rapprochement.
+    pipeline_facture._ecrire_substitutions_probables/
+    _appliquer_confirmations_substitutions) — jamais directement dans la
+    table alias comme un repli référentiel ordinaire, ce fichier CSV
+    étant le ledger partagé BL+Facture des substitutions pures (voir
+    CLAUDE.md)."""
+
+    # Garde-fou : n'a de sens qu'après une VRAIE élimination parmi
+    # plusieurs lignes facture (c'est la convergence à 1 seul survivant sur
+    # 9, par exemple, qui rend le rapprochement crédible malgré l'absence
+    # de ressemblance) — jamais sur une commande à 1 seule ligne facture
+    # dès le départ, où "il ne reste qu'une ligne inconnue" est vrai par
+    # construction et ne prouve rien (bug réel trouvé en confrontant les
+    # tests synthétiques déjà existants, qui utilisent tous une quantité/
+    # un prix par défaut identiques des deux côtés pour une raison sans
+    # rapport : sans ce garde-fou, n'importe quelle paire 1 vs 1 aux
+    # références totalement différentes se faisait proposer comme
+    # "substitution probable" au lieu de rester "inconnue").
+    if len(lignes_a_apparier) <= 1:
+        return
+
+    inconnus = [i for i, c in enumerate(resultats) if c.statut is StatutFacture.INCONNU]
+    if len(inconnus) != 1 or len(disponibles) != 1:
+        return
+
+    ls = disponibles[0]
+    if ls.numero_facture:
+        return
+
+    i = inconnus[0]
+    lf = lignes_a_apparier[i]
+
+    if abs(lf.quantite_facturee - ls.qte_livree) > 0.001:
+        return
+
+    prix_ref = ls.tarif_bl or ls.tarif_convenu
+    if lf.prix_unitaire_ht and prix_ref and abs(lf.prix_unitaire_ht - prix_ref) > 0.02:
+        return
+
+    disponibles.remove(ls)
+    resultats[i] = CorrespondanceFacture(
+        lf, ls, StatutFacture.A_CONFIRMER,
+        [
+            f"Substitution probable : après rapprochement, il ne reste plus, pour cette "
+            f"commande, qu'une seule ligne facture non rapprochée (« {lf.reference_fournisseur} ») "
+            f"et qu'une seule ligne Suivi sans facture (« {ls.reference} ») — même quantité "
+            f"({lf.quantite_facturee:g}). À confirmer avant d'apprendre cette équivalence."
+        ],
+        CauseFacture.SUBSTITUTION_PROBABLE,
+    )
+
+
 def _comparer_facture(ligne_facture: LigneFacture, ligne_suivi: LigneSuiviFacture, numero_facture: str) -> CorrespondanceFacture:
     """Une facture n'est jamais "cumulée" comme un BL : elle est confrontée
     à ce qui est DÉJÀ enregistré (Qté livrée, Tarif BL/Tarif convenu, et le
@@ -471,7 +545,7 @@ def apparier_facture(lignes_facture: list[LigneFacture], lignes_suivi: list[Lign
     facture ; 2e passe, ce qui reste (repli référence proche / premier
     token / référentiel / ambiguïté), sur les lignes Suivi déjà réduites.
 
-    Trois ajouts (session S0, voir CLAUDE.md) :
+    Quatre ajouts (session S0, voir CLAUDE.md) :
     - `frais_connus` (voir charger_frais_fournisseurs) : toute ligne dont la
       référence est un FRAIS connu pour ce fournisseur (ex. COREDIME ECO-23,
       COREDIME 9993 LIVRAISON AVION) est retirée du rapprochement AVANT
@@ -488,7 +562,11 @@ def apparier_facture(lignes_facture: list[LigneFacture], lignes_suivi: list[Lign
       (CauseFacture.PRIX_DIFF_MEME_REF).
     - Repli "premier token" (voir _repli_premier_token), entre le repli
       référence-proche et le repli référentiel : la référence Suivi porte
-      un suffixe libre (texte descriptif ajouté à la saisie)."""
+      un suffixe libre (texte descriptif ajouté à la saisie).
+    - Résiduel unique (voir _residuel_unique), en tout dernier repli :
+      exactement 1 ligne facture encore inconnue + exactement 1 ligne
+      Suivi jamais réclamée pour cette commande, mêmes quantité/PU ->
+      "substitution probable", toujours à confirmer."""
 
     frais_du_fournisseur = (frais_connus or {}).get(fournisseur.upper(), {})
 
@@ -597,5 +675,7 @@ def apparier_facture(lignes_facture: list[LigneFacture], lignes_suivi: list[Lign
             ],
             c.cause or CauseFacture.PRIX_DIFF_MEME_REF,
         )
+
+    _residuel_unique(resultats, lignes_a_apparier, disponibles)
 
     return resultats + correspondances_frais

@@ -5056,6 +5056,194 @@ le chat, jamais devinées), pièce jointe `rapports/FNP_2026-08.xlsx`.
 **C'est l'acheteur qui relit et envoie depuis Outlook** — jamais envoyé par
 la session, conformément à la règle absolue de ce module.
 
+## Rapprochement factures — P0 : résiduel unique, remise double par
+coordonnées, OCR Stand 64, recette (2026-09-04)
+
+Suite directe de S0, plan en 4 étapes exécutées dans l'ordre.
+
+**Étape 1 — Résiduel unique ("substitution probable")**
+(`moteur/rapprochement/matching_facture.py::_residuel_unique`, appelé en
+tout dernier repli dans `apparier_facture()`) : dans une commande, s'il ne
+reste plus qu'UNE SEULE ligne facture inconnue et qu'UNE SEULE ligne Suivi
+sans facture, même quantité (et même PU à 0,02€ près si connu) ->
+`StatutFacture.A_CONFIRMER`/`CauseFacture.SUBSTITUTION_PROBABLE` — jamais
+"sûr" (aucune ressemblance textuelle, un pur processus d'élimination).
+**Garde-fou décisif ajouté après coup** : ne se déclenche QUE si la
+commande avait PLUSIEURS lignes facture au départ (`len(lignes_a_apparier)
+> 1`) — sans lui, plusieurs tests synthétiques déjà existants (1 seule
+ligne de chaque côté, qté/PU par défaut coïncidemment identiques)
+auraient été promus à tort en "substitution probable" ; une commande à 1
+seule ligne ne prouve rien par élimination, contrairement à une commande
+à 9 lignes où 8 se sont résolues normalement.
+
+Cas réel qui a servi de test (`facture_coredime_6108234_suffixe.pdf`,
+commande M3.14.342) : facture "LEG06620" (ICTA 3422 20 ATF, 100m, 0,37€)
+face à la ligne Suivi "5120" (ICT 20 BLEU TURBO, même quantité/tarif,
+AUCUN rapport textuel) — exactement le type de substitution jusqu'ici
+seulement découvert à la main (voir CFF1BIS/59210, 411651/092897 côté BL).
+
+**Apprentissage séparé de la table alias** (`Referentiel.
+apprendre_equivalence()`, nouveau, `moteur/referentiel.py`) : une fois
+confirmée, la paire est ajoutée à `referentiel/equivalences_bl.csv` (le
+ledger PORTABLE partagé BL+Facture, suivi par git) — PAS à la table
+`alias` de `moteur/articles.db` (SQLite, gitignorée, propre à ce poste)
+comme le ferait le mécanisme référentiel classique. Justification : une
+substitution pure, découverte par élimination, ne peut structurellement
+JAMAIS être re-proposée automatiquement si sa trace est perdue — mérite
+une persistance durable, pas un cache local. Nouvelle feuille
+**"Substitutions probables"** dans `referentiel/A_confirmer_Facture.xlsx`
+(`pipeline_facture._ecrire_substitutions_probables`/
+`_appliquer_confirmations_substitutions`, appelées respectivement en fin
+et en début de `rapprocher_dossier_factures()`) : feuille à part de la
+feuille "À confirmer" du référentiel (round-trip openpyxl, jamais touchée)
+— ces propositions ne viennent pas de `Referentiel.resoudre()` (aucune
+ressemblance structurelle à faire apparaître dans `_propositions`).
+Décision "OUI" -> `equivalences_bl.csv` ; vide/"NON" -> pas de rejet
+définitif (la proposition n'est pas mémorisée comme fausse pour toujours,
+contrairement au workflow référentiel classique — un résiduel unique n'a
+pas vocation à ça). **Recette réelle : 18 substitutions probables trouvées
+sur le lot complet**, feuille générée et vérifiée dans le vrai
+`A_confirmer_Facture.xlsx`.
+
+**Étape 2 — Remise double Coredime par coordonnées**
+(`moteur/grille.py`, nouveau module : `mots(page)` =
+`page.get_text("words")`, `lignes(mots)` regroupées par Y avec tolérance =
+demi-hauteur MÉDIANE des mots de la page — pas une constante comme
+`moteur.ocr.regrouper_lignes`, un PDF natif est en points, pas en pixels à
+un DPI fixe). `moteur.fournisseurs.coredime._apparier_par_position_coredime`
+remplace l'ancien appariement 1:1 de `_lignes_remise_double_coredime`
+(qui n'osait un rattachement que si le bloc contenait EXACTEMENT 1 ligne
+incomplète et 1 ligne "Remise") : chaque ligne "Remise" est désormais
+rattachée à l'article dont la position est immédiatement AU-DESSUS
+d'elle, quel que soit leur nombre. `parse_facture_coredime(texte,
+chemin=None)` : nouveau paramètre optionnel `chemin`, transmis
+automatiquement en production par `parsers_facture.parser_facture()` (via
+`inspect.signature`, seulement aux parsers qui le déclarent — aucun autre
+fournisseur touché) ; sans lui (tests unitaires sur texte synthétique),
+repli sur l'ancien comportement 1:1, jamais un plantage.
+
+**BUG RÉEL TROUVÉ ET CORRIGÉ pendant la construction, avant tout dégât** :
+un premier jet triait les positions par le seul Y brut, en mélangeant des
+lignes de PAGES DIFFÉRENTES — or chaque page a son propre système de
+coordonnées (Y redémarre près de 0 en haut de CHAQUE page). Sur un
+document réel à 2 pages (`facture_coredime_8_remises_multiples_partiel.pdf`),
+deux lignes de pages différentes partageaient exactement le même Y — n'a
+PAS faussé ce cas précis par chance d'ordonnancement, mais ce n'était pas
+garanti. Corrigé : `_position_page_coredime()` retourne un tuple
+`(page, y)`, comparé lexicographiquement (page d'abord, Y ensuite) —
+`lignes_grille_bloc` porte désormais `(page, ligne)`, jamais une ligne
+nue. `grille.position_y()` (version sans page, devenue inutile une fois
+ce correctif fait) a été retirée pour ne pas laisser de code mort.
+
+**Validé sur les 14 fixtures facture Coredime** (`_parser()` du fichier de
+test passe désormais systématiquement `chemin=`) : 13 identiques, 1
+strictement améliorée avec un nouveau résidu HONNÊTE d'une nature
+différente — `facture_coredime_8_remises_multiples_partiel.pdf` passe de
+21 lignes/1008,14€ (5 lignes ambiguës jamais extraites, écart -124,37€
+connu) à **26 lignes/1167,53€** : les 5 nouvelles lignes sont chacune
+vérifiées par DEUX signaux indépendants (prix de base × remises en
+cascade reconstitue exactement le P.U Net imprimé, ET qté × P.U Net =
+montant) — mais la somme totale dépasse maintenant le Total HT AFFICHÉ
+sur le document (1132,51€, écart +35,02€) alors qu'avant elle était en
+dessous. Vérifié que ce total affiché n'est pas un artefact de lecture
+("COR F6108047" isolé une seule fois dans tout le texte, HT+TVA≈TTC
+cohérents) : l'écart est donc une incohérence PROPRE à ce document réel
+(pas un bug du rattachement par coordonnées, chaque ligne étant
+individuellement exacte) — signalé honnêtement dans le test, jamais deviné
+ni masqué.
+
+**Nouveau test dédié** `tests/test_grille.py` (3 tests, sur PDF réel) —
+verrouille que `lignes()` reconstruit l'ordre visuel exact d'un document
+scramblé par PyMuPDF.
+
+**Étape 3 — OCR facture affiné + gabarit Stand 64 scanné**
+
+`moteur.lecture_pdf.longueur_texte_premiere_page()` (nouveau) +
+`moteur.rapprochement.lecture_facture.SEUIL_TEXTE_NATIF_PAGE1 = 20` :
+le repli OCR générique (session F4/Electric Plus) se déclenchait sur
+`lire_pdf(chemin).strip()` VIDE sur le DOCUMENT ENTIER — affiné pour
+tester la seule PREMIÈRE PAGE, avec un seuil de 20 caractères plutôt que
+zéro strict. Motivation : un scan peut porter quelques caractères de
+texte natif ailleurs dans le même fichier (annexe BdC/devis, horodatage)
+sans que sa propre page en ait, ce qui aurait masqué à tort le besoin
+d'OCR sur la page utile.
+
+**`moteur/fournisseurs/stand64.py::parse_facture_stand64_ocr`** (nouveau,
+découvert automatiquement via `parse_facture_ocr`) : 1re pièce facture
+Stand 64 SCANNÉE (`FA 33330.pdf`, un des 4 fichiers "FA <numéro>.pdf"
+identifiés sans parser depuis la session Electric Plus). Réutilise le
+MÊME repérage de tableau que le BL de ce fournisseur
+(`_zone_tableau_bl_stand64`, `MOTIF_ENTETE_TABLEAU_BL_STAND64`/
+`MOTIF_PIED_TABLEAU_BL_STAND64`) et le même motif de commande
+(`MOTIF_COMMANDE_BL_STAND64`), mais une structure de ligne DIFFÉRENTE :
+sur l'unique pièce réelle disponible, ni Eco-part ni code TVA ne sont
+visibles en fin de ligne (contrairement au BL) — seulement 5 valeurs
+après la désignation (Qté, P.U, Rem%, P.U Net, Total HT), vérifiées par
+qté × P.U Net ≈ Total HT. Le fichier contient facture (page 0) ET bon de
+livraison du même fournisseur (page 1, même n° 43972) scannés ensemble —
+seule la page 0 est traitée, sinon les 2 lignes seraient comptées deux
+fois. Détection : `detecter_fournisseur` reconnaissait DÉJÀ "STAND 64" sur
+texte OCR sans aucune modification (le logo "STAND64" ressort déformé en
+"STANDE"/"STANDM" mais "stand64@stand64.fr"/"www.stand64.fr" suffisent) —
+verrouillé par un nouveau test dédié. **Validé du premier coup** : 2
+lignes, 1 545,00€, commande M3.18.217, BL 43972 — exactement l'attendu.
+
+**Étape 4 — Recette sur le lot complet**
+
+Les 458 fichiers de `a_traiter/Factures/À vérifier/` remontés à la racine
+(règle 0.4.8) — root passé à 459 fichiers PDF (+ 1 déjà présent). Lecture
+seule complète (`rapprocher_dossier_factures`) : **8 sûres (1 783,19€),
+285 à confirmer (dont les 18 substitutions probables), 200 inconnues
+(surtout référence introuvable), 21 frais, 76 anomalies de lecture
+(fournisseur inconnu 20, parser absent 34 — Cominter/EDOI scannés sans
+parser facture, 0 ligne 22, écart total 10), 258 anomalies facture
+(commande absente 234 — très majoritairement des commandes pré-2026 hors
+périmètre du Suivi, déjà documenté ; bon manuel 9 ; avoir 5).**
+
+**Deux coupures réseau transitoires pendant cette étape** (même symptôme
+déjà documenté ailleurs dans ce fichier — lecteur X: temporairement
+inaccessible, TOUS les outils shell y compris PowerShell échouant en
+silence le temps de la coupure) :
+1. Une 1re tentative de diagnostic a crashé (`FileNotFoundError: WinError
+   53`) en pleine lecture — après avoir déjà lu les 459 PDF avec succès,
+   juste au moment d'ouvrir le référentiel. Aucune perte : relecture
+   propre après reconnexion.
+2. Une 2e coupure, plus sévère (tous les outils shell, PAS seulement
+   l'accès à X:, ont échoué le temps de la fenêtre), a interrompu la
+   PREMIÈRE tentative d'écriture réelle — le process s'est arrêté sans
+   traceback visible (probablement tué plutôt qu'une exception propre),
+   pendant la phase de lecture de `rapprocher_dossier_factures()` (avant
+   tout accès en écriture). **Vérifié de façon DÉFINITIVE avant de
+   retenter** : aucune nouvelle sauvegarde dans `backups/` à la date/heure
+   de l'incident (la dernière datait de la session S0 la veille) — preuve
+   que `ecriture.appliquer()` (qui sauvegarde TOUJOURS en tout premier)
+   n'a jamais été atteint. Classeur vivant confirmé intact, aucun fichier
+   déplacé dans `a_traiter/Factures/`. Reconfirmé "Suivi fermé" par
+   l'acheteur avant de retenter (jamais réutilisé une confirmation
+   antérieure à un incident, conformément à la leçon déjà retenue —
+   [[feedback_suivi_verrou_ne_pas_se_fier_seul]]).
+
+**Écriture réelle confirmée** (relecture fraîche juste avant, comptes
+identiques : 8 sûres/1 783,19€) : sauvegarde
+`backups/1.3.0.1. Suivi commandes - 2026_20260904_103012.xlsx`, **8
+lignes écrites**, **13 factures archivées** avec leur BC dans
+`Traités/<commande>/` (dont `6108846.pdf`/`6108847.pdf` — les vraies
+pièces Coredime remise-double de l'étape 2, "Tarif BL" renseigné depuis la
+facture pour LEG031916/LEG031919/LEG031955 — et `FA 33330.pdf` — la pièce
+Stand 64 OCR de l'étape 3 —, confirmant les deux fonctionnalités bout en
+bout sur le classeur vivant, pas seulement sur fixture), 0 échec
+d'archivage, 412 factures restées en `À vérifier/` (décision humaine).
+Résorption après écriture : 109 DISTRIBUTION 805/1001 encore à facturer,
+COMINTER 1225/1415, COREDIME 411/865, ELECTRIC PLUS 327/393, STAND 64
+71/102.
+
+**Reste à faire** : les 285 lignes "à confirmer" (18 substitutions
+probables en tête, feuille dédiée déjà prête dans
+`A_confirmer_Facture.xlsx`) et les 200 "inconnues" du lot, à trier avec
+l'acheteur ; les 412 factures en `À vérifier/`. Parsers facture toujours
+manquants : Cominter (scan, 34 fichiers de ce lot), EDOI (2 fichiers,
+toujours en attente de plus de pièces réelles, voir session F4).
+
 ## Tests
 
     py -3 -m pytest          # tout le socle
