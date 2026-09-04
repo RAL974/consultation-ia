@@ -155,9 +155,11 @@ def test_apparier_deja_a_jour_meme_numero_facture_deja_enregistre():
     assert c.statut is StatutFacture.DEJA_A_JOUR
 
 
-def test_apparier_a_confirmer_autre_numero_facture_deja_present():
-    """Une AUTRE facture est déjà enregistrée sur cette ligne — jamais
-    écrasée silencieusement, doublon/litige à trancher à la main."""
+def test_apparier_a_confirmer_autre_facture_deja_complete_sur_la_ligne():
+    """P1 : une AUTRE facture a déjà facturé toute la quantité livrée —
+    l'ajout porterait le cumul facturé au-delà du livré : jamais écrit
+    automatiquement, cause QTE_SUPERIEURE (garde-fou double facturation),
+    la facture déjà présente citée en clair."""
 
     lf = _ligne_facture()
     ls = _ligne_suivi(numero_facture="F0", qte_facturee=10.0, pu_facture=5.0)
@@ -165,7 +167,22 @@ def test_apparier_a_confirmer_autre_numero_facture_deja_present():
     [c] = apparier_facture([lf], [ls], numero_facture="F1")
 
     assert c.statut is StatutFacture.A_CONFIRMER
-    assert any("F0" in r for r in c.raisons)
+    assert c.cause is CauseFacture.QTE_SUPERIEURE
+    assert any("F0" in r and "cumul" in r for r in c.raisons)
+
+
+def test_apparier_sur_facturation_en_plusieurs_fois_qui_complete_le_livre():
+    """P1 : une ligne livrée 10 déjà facturée 4 par F0 ; F1 facture les 6
+    restants -> cumul exact, sûr (feuille Pièces : une ligne par document,
+    Commandes[Qté facturée] = somme)."""
+
+    lf = _ligne_facture(quantite_facturee=6.0)
+    ls = _ligne_suivi(numero_facture="F0", qte_facturee=4.0, pu_facture=5.0)
+
+    [c] = apparier_facture([lf], [ls], numero_facture="F1")
+
+    assert c.statut is StatutFacture.SUR
+    assert ls.numeros_factures == ["F0"]
 
 
 def test_apparier_inconnu_sans_correspondance():
@@ -245,14 +262,17 @@ def test_apparier_qte_partielle_et_superieure_causes_distinctes():
     assert c2.cause is CauseFacture.QTE_SUPERIEURE
 
 
-def test_apparier_doublon_facture_a_la_bonne_cause():
+def test_apparier_deja_a_jour_parmi_plusieurs_numeros_de_facture():
+    """P1 : la ligne porte déjà F0 et F1 (« F0; F1 » tel que la formule
+    N° facture de Commandes l'affiche) — F1 redéposée ressort déjà à jour."""
+
     lf = _ligne_facture()
-    ls = _ligne_suivi(numero_facture="F0", qte_facturee=10.0, pu_facture=5.0)
+    ls = _ligne_suivi(numero_facture="F0; F1", qte_facturee=10.0, pu_facture=5.0)
 
     [c] = apparier_facture([lf], [ls], numero_facture="F1")
 
-    assert c.statut is StatutFacture.A_CONFIRMER
-    assert c.cause is CauseFacture.DOUBLON_FACTURE
+    assert c.statut is StatutFacture.DEJA_A_JOUR
+    assert ls.numeros_factures == ["F0", "F1"]
 
 
 def test_apparier_inconnu_a_la_cause_ref_inconnue():

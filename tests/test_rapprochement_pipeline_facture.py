@@ -23,7 +23,16 @@ from datetime import date
 import pytest
 from openpyxl import Workbook, load_workbook
 
-from moteur.rapprochement.ecriture import ENTETES_FACTURE, ColonneNonModifiable, appliquer, lire_entetes
+from moteur.rapprochement.ecriture import ColonneNonModifiable, appliquer, lire_entetes
+from moteur.rapprochement.pieces import (
+    COLONNES_FACTURE_CALCULEES,
+    FeuillePiecesAbsente,
+    IndexPieces,
+    ecrire_pieces,
+    feuille_pieces_presente,
+    installer_feuille_pieces,
+    lire_pieces,
+)
 from moteur.rapprochement.matching_facture import CauseFacture, CorrespondanceFacture, LigneSuiviFacture, StatutFacture
 from moteur.rapprochement.modele_facture import Facture, LigneFacture
 from moteur.rapprochement import pipeline_facture
@@ -40,7 +49,9 @@ from moteur.rapprochement.pipeline_facture import (
     archiver_facture,
     classifier_cause_anomalie,
     compter_lignes_a_facturer,
-    ecritures_pour_facture,
+    _chemin_archive_facture,
+    _doublon_facture,
+    pieces_pour_facture,
     regrouper_par_facture,
     FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE,
 )
@@ -84,11 +95,12 @@ def _classeur_avec_colonnes_facture(chemin, lignes=()):
     ws.append([
         "Référence", "Désignation", "Qté commandée", "N° de commande", "Fournisseur",
         "Qté livrée", "Tarif BL", "Tarif convenu",
-        *ENTETES_FACTURE,  # N° facture, Date facture, Qté facturée, PU facturé, Montant facturé HT
+        *COLONNES_FACTURE_CALCULEES,  # N° facture, Date facture, Qté facturée, PU facturé, Montant facturé HT
     ])
     for ligne in lignes:
         ws.append(ligne)
     wb.save(chemin)
+    installer_feuille_pieces(chemin, chemin.parent / "backups")  # P1 : feuille Pièces
 
 
 def _classeur_sans_colonnes_facture(chemin, lignes=()):
@@ -166,73 +178,101 @@ def test_est_resolu_facture_avec_anomalie_jamais_resolue():
     assert _est_resolu_facture(g, set()) is False
 
 
-def test_ecritures_pour_facture_construit_les_5_champs_montant_imprime():
-    """"Montant facturé HT" reprend le montant IMPRIMÉ sur la facture
-    (LigneFacture.montant_ht) — jamais recalculé quand il est disponible,
-    et aucune entrée dans montants_recalcules dans ce cas (voir
-    pipeline_facture.ecritures_pour_facture)."""
+def test_pieces_pour_facture_construit_une_ligne_facture_montant_imprime():
+    """P1 : une ligne Pièces de type Facture par correspondance écrite —
+    « Montant HT » reprend le montant IMPRIMÉ (LigneFacture.montant_ht),
+    jamais recalculé quand il est disponible ; Chantier/Référence Suivi
+    copiés de la ligne Commandes ; Fichier = chemin d'archive."""
 
     f = _facture("f1.pdf", numero_facture="360311", date_facture="15/07/2026")
     lf = _ligne_facture(quantite_facturee=200.0, prix_unitaire_ht=0.6, montant_ht=120.0)
-    c = CorrespondanceFacture(lf, _ligne_suivi_facture(5), StatutFacture.SUR)
+    lf.numero_commande = "129.034"
+    lf.numero_bl = "OBL1"
+    ls = _ligne_suivi_facture(5, chantier="Chantier Z", sous_chantier="SC9")
+    c = CorrespondanceFacture(lf, ls, StatutFacture.SUR)
 
-    ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
+    pieces, ecritures, montants_recalcules, tarif_bl_ecrit = pieces_pour_facture([(f, c)], "Traités")
 
-    par_colonne = {e.colonne: e.valeur for e in ecritures if e.ligne == 5}
-    assert par_colonne["N° facture"] == "360311"
-    assert par_colonne["Date facture"] == date(2026, 7, 15)
-    assert par_colonne["Qté facturée"] == 200.0
-    assert par_colonne["PU facturé"] == 0.6
-    assert par_colonne["Montant facturé HT"] == 120.0
-    assert montants_recalcules == []
+    [p] = pieces
+    assert p["Type"] == "Facture" and p["Fournisseur"] == "109 Distribution"
+    assert p["N° pièce"] == "360311" and p["Date pièce"] == date(2026, 7, 15)
+    assert p["N° de commande"] == "129.034" and p["Chantier"] == "Chantier Z" and p["Sous-Chantier"] == "SC9"
+    assert p["Référence Suivi"] == "REF1" and p["Référence fournisseur"] == "REF1"
+    assert p["Qté"] == 200.0 and p["PU HT"] == 0.6 and p["Montant HT"] == 120.0
+    assert p["N° BL lié"] == "OBL1" and p["Mode de rapprochement"] == "Auto"
+    assert p["Fichier"].cache == "2026-07-15 - 109 DISTRIBUTION - Facture 360311 - BC 129.034.pdf"
+    assert p["ID pièce"] == "109 Distribution|Facture|360311|129.034|REF1|OBL1"
+    assert p["Commentaire"] is None
+    assert ecritures == [] and montants_recalcules == [] and tarif_bl_ecrit == []
 
 
-def test_ecritures_pour_facture_recalcule_montant_absent_et_le_signale():
-    """Si la facture n'imprime pas de montant par ligne (aucun exemple réel
-    chez 109 Distribution à ce jour, mais un futur fournisseur pourrait) :
-    "Montant facturé HT" = Qté facturée × PU facturé, ET la ligne est
-    signalée dans montants_recalcules — JAMAIS silencieusement (voir
-    CLAUDE.md)."""
+def test_pieces_pour_facture_recalcule_montant_absent_et_le_signale():
+    """Facture sans montant par ligne : Montant HT = Qté × PU, Commentaire
+    « montant recalculé » ET entrée dans montants_recalcules — JAMAIS
+    silencieusement (voir CLAUDE.md)."""
 
     f = _facture("f1.pdf", numero_facture="360311")
     lf = _ligne_facture(reference_fournisseur="REFX", quantite_facturee=10.0, prix_unitaire_ht=2.5, montant_ht=None)
     c = CorrespondanceFacture(lf, _ligne_suivi_facture(5), StatutFacture.SUR)
 
-    ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
+    pieces, _, montants_recalcules, _ = pieces_pour_facture([(f, c)], "Traités")
 
-    par_colonne = {e.colonne: e.valeur for e in ecritures if e.ligne == 5}
-    assert par_colonne["Montant facturé HT"] == 25.0
-
+    [p] = pieces
+    assert p["Montant HT"] == 25.0 and p["Commentaire"] == "montant recalculé"
     [m] = montants_recalcules
-    assert m["fichier"] == "f1.pdf"
-    assert m["facture"] == "360311"
-    assert m["reference"] == "REFX"
-    assert m["ligne_excel"] == 5
-    assert m["montant"] == 25.0
+    assert m["fichier"] == "f1.pdf" and m["facture"] == "360311" and m["reference"] == "REFX"
+    assert m["ligne_excel"] == 5 and m["montant"] == 25.0
 
 
-def test_ecritures_pour_facture_ignore_deja_a_jour():
+def test_pieces_pour_facture_ignore_deja_a_jour_et_modes():
     f = _facture("f1.pdf")
     c_sur = CorrespondanceFacture(_ligne_facture(), _ligne_suivi_facture(5), StatutFacture.SUR)
     c_deja = CorrespondanceFacture(_ligne_facture(), _ligne_suivi_facture(6), StatutFacture.DEJA_A_JOUR)
+    c_confirme = CorrespondanceFacture(_ligne_facture(), _ligne_suivi_facture(7), StatutFacture.A_CONFIRMER, ["qté"], CauseFacture.QTE_PARTIELLE)
+    c_repli = CorrespondanceFacture(_ligne_facture(), _ligne_suivi_facture(8), StatutFacture.A_CONFIRMER, ["proche"], CauseFacture.CLE_PARTIELLE)
 
-    ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture([(f, c_sur), (f, c_deja)])
+    pieces, _, _, _ = pieces_pour_facture([(f, c_sur), (f, c_deja), (f, c_confirme), (f, c_repli)], "Traités")
 
-    assert all(e.ligne != 6 for e in ecritures)
-    assert any(e.ligne == 5 for e in ecritures)
-    assert montants_recalcules == []  # c_sur a un montant_ht imprimé (défaut du helper _ligne_facture)
+    assert [p["Mode de rapprochement"] for p in pieces] == ["Auto", "Confirmé", "Équivalence"]
+
+
+def test_pieces_pour_facture_ajoute_les_frais_des_factures_ecrites():
+    """Les frais connus (StatutFacture.FRAIS) de la facture écrite deviennent
+    des lignes Pièces de type Frais (sans Référence Suivi, chantier de la
+    commande) ; ceux d'une facture NON écrite dans ce passage attendent."""
+
+    f = _facture("f1.pdf", numero_facture="6107800")
+    f.fournisseur = "COREDIME"
+    lf = _ligne_facture(montant_ht=35.0)
+    lf.numero_commande = "102.061"
+    c = CorrespondanceFacture(lf, _ligne_suivi_facture(5, chantier="Chantier Q"), StatutFacture.SUR)
+    lf_frais = _ligne_facture(reference_fournisseur="ECO-23", designation="Éco-participation", quantite_facturee=1.0, prix_unitaire_ht=0.8, montant_ht=0.8)
+    lf_frais.numero_commande = "102.061"
+    c_frais = CorrespondanceFacture(lf_frais, None, StatutFacture.FRAIS, ["Frais connu (Éco-part)"], CauseFacture.FRAIS)
+    f2 = _facture("f2.pdf", numero_facture="9999")
+    c_frais2 = CorrespondanceFacture(_ligne_facture(reference_fournisseur="PORT"), None, StatutFacture.FRAIS, [], CauseFacture.FRAIS)
+
+    pieces, _, _, _ = pieces_pour_facture([(f, c)], "Traités", frais=[(f, c_frais), (f2, c_frais2)])
+
+    assert [p["Type"] for p in pieces] == ["Facture", "Frais"]
+    frais = pieces[1]
+    assert frais["Référence Suivi"] is None and frais["Référence fournisseur"] == "ECO-23"
+    assert frais["Chantier"] == "Chantier Q" and frais["N° de commande"] == "102.061"
+    assert frais["Montant HT"] == 0.8 and frais["Commentaire"] == "Frais connu (Éco-part)"
+    assert frais["ID pièce"] == "COREDIME|Frais|6107800|102.061|F:ECO-23|"
 
 
 # --- exception Tarif BL depuis facture (liste blanche, session F4) -------
 
 
-def test_ecritures_pour_facture_ecrit_tarif_bl_pour_fournisseur_en_liste_blanche():
+def test_pieces_pour_facture_ecrit_tarif_bl_pour_fournisseur_en_liste_blanche():
     """COREDIME : ses BL n'affichent jamais de prix (voir
     moteur.fournisseurs.coredime) — Tarif BL doit être renseigné depuis la
     facture quand il est encore vide, sinon "Statut commande"/⚠️
     Surfacturation (formule Excel qui LIT Tarif BL directement) resterait
     aveugle pour ce fournisseur. Proposition validée par l'acheteur en une
-    phrase (voir CLAUDE.md, cadrage F4)."""
+    phrase (voir CLAUDE.md, cadrage F4). Seule colonne de Commandes encore
+    écrite par ce flux depuis P1."""
 
     assert "COREDIME" in FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE
 
@@ -242,52 +282,69 @@ def test_ecritures_pour_facture_ecrit_tarif_bl_pour_fournisseur_en_liste_blanche
     ls = _ligne_suivi_facture(5, tarif_bl=None)
     c = CorrespondanceFacture(lf, ls, StatutFacture.SUR)
 
-    ecritures, _, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
+    pieces, ecritures, _, tarif_bl_ecrit = pieces_pour_facture([(f, c)], "Traités")
 
-    par_colonne = {e.colonne: e.valeur for e in ecritures if e.ligne == 5}
-    assert par_colonne["Tarif BL"] == 0.35
-
+    assert len(pieces) == 1
+    [e] = ecritures
+    assert (e.ligne, e.colonne, e.valeur) == (5, "Tarif BL", 0.35)
     [t] = tarif_bl_ecrit
-    assert t["fichier"] == "f1.pdf"
-    assert t["reference"] == lf.reference_fournisseur
-    assert t["ligne_excel"] == 5
-    assert t["tarif_bl"] == 0.35
+    assert t["fichier"] == "f1.pdf" and t["reference"] == lf.reference_fournisseur
+    assert t["ligne_excel"] == 5 and t["tarif_bl"] == 0.35
 
 
-def test_ecritures_pour_facture_necrase_jamais_un_tarif_bl_deja_present():
-    """Même fournisseur en liste blanche, mais Tarif BL a DÉJÀ une valeur
-    (renseignée par ailleurs, ex. un BL exceptionnel avec prix) : jamais
-    écrasée — l'exception ne joue que si Tarif BL est vide."""
-
-    f = _facture("f1.pdf")
+def test_pieces_pour_facture_necrase_jamais_un_tarif_bl_deja_present():
+    f = _facture("f1.pdf", numero_facture="6107293")
     f.fournisseur = "COREDIME"
-    lf = _ligne_facture(prix_unitaire_ht=0.35, montant_ht=175.0)
-    ls = _ligne_suivi_facture(5, tarif_bl=0.40)
-    c = CorrespondanceFacture(lf, ls, StatutFacture.SUR)
+    lf = _ligne_facture(quantite_facturee=500.0, prix_unitaire_ht=0.35, montant_ht=175.0)
+    c = CorrespondanceFacture(lf, _ligne_suivi_facture(5, tarif_bl=0.33), StatutFacture.SUR)
 
-    ecritures, _, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
+    _, ecritures, _, tarif_bl_ecrit = pieces_pour_facture([(f, c)], "Traités")
 
-    assert not any(e.colonne == "Tarif BL" for e in ecritures)
-    assert tarif_bl_ecrit == []
+    assert ecritures == [] and tarif_bl_ecrit == []
 
 
-def test_ecritures_pour_facture_najoute_pas_tarif_bl_hors_liste_blanche():
-    """109 DISTRIBUTION (hors liste blanche) : jamais de Tarif BL écrit
-    depuis la facture, même si Tarif BL est vide — son BL affiche déjà un
-    vrai prix (voir moteur.fournisseurs.dist109), pas besoin de l'exception."""
+def test_pieces_pour_facture_najoute_pas_tarif_bl_hors_liste_blanche():
+    f = _facture("f1.pdf")  # 109 DISTRIBUTION
+    lf = _ligne_facture(quantite_facturee=500.0, prix_unitaire_ht=0.35, montant_ht=175.0)
+    c = CorrespondanceFacture(lf, _ligne_suivi_facture(5, tarif_bl=None), StatutFacture.SUR)
 
-    f = _facture("f1.pdf")  # fournisseur par défaut = "109 DISTRIBUTION"
-    lf = _ligne_facture(prix_unitaire_ht=0.35, montant_ht=175.0)
-    ls = _ligne_suivi_facture(5, tarif_bl=None)
-    c = CorrespondanceFacture(lf, ls, StatutFacture.SUR)
+    _, ecritures, _, tarif_bl_ecrit = pieces_pour_facture([(f, c)], "Traités")
 
-    ecritures, _, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
-
-    assert not any(e.colonne == "Tarif BL" for e in ecritures)
-    assert tarif_bl_ecrit == []
+    assert ecritures == [] and tarif_bl_ecrit == []
 
 
-# --- réconciliation Total HT (session S0, correction 1e/TOTAL_ECART) ------
+# --- garde-fou doublon de facture (niveau document, P1) -------------------
+
+
+def _pieces_existantes(fichier_libelle, numero="360311", fournisseur="109 Distribution"):
+    return IndexPieces([{
+        "ID pièce": "x", "Type": "Facture", "Fournisseur": fournisseur, "N° pièce": numero,
+        "N° de commande": "129.034", "Référence Suivi": "REF1", "Fichier": fichier_libelle,
+    }])
+
+
+def test_doublon_facture_meme_numero_autre_document():
+    f = _facture("Facture_360311.pdf", numero_facture="360311", date_facture="15/07/2026")
+    autre = _pieces_existantes("2026-06-01 - 109 DISTRIBUTION - Facture 360311 - BC 129.034.pdf")
+    raison = _doublon_facture(f, autre)
+    assert raison and "DOUBLON" in raison and "360311" in raison
+    assert pipeline_facture.classifier_cause_anomalie(raison) is CauseFacture.DOUBLON_FACTURE
+
+
+def test_doublon_facture_meme_document_redepose_nest_pas_un_doublon():
+    f = _facture("Facture_360311.pdf", numero_facture="360311", date_facture="15/07/2026")
+    meme = _pieces_existantes("2026-07-15 - 109 DISTRIBUTION - Facture 360311 - BC 129.034.pdf")
+    assert _doublon_facture(f, meme) is None
+    autre_commande = _pieces_existantes("2026-07-15 - 109 DISTRIBUTION - Facture 360311 - BC 130.001.pdf")
+    assert _doublon_facture(f, autre_commande) is None  # facture multi-BC : même document
+    assert _doublon_facture(f, IndexPieces([])) is None
+    assert _doublon_facture(f, IndexPieces(None)) is None  # pas de feuille Pièces : pas de garde-fou possible
+
+
+def test_chemin_archive_facture_est_le_nom_de_larchive():
+    f = _facture("f1.pdf", numero_facture="360311", date_facture="15/07/2026")
+    chemin = _chemin_archive_facture(f, "129.034", "Traités")
+    assert chemin.as_posix().endswith("Traités/129.034/2026-07-15 - 109 DISTRIBUTION - Facture 360311 - BC 129.034.pdf")
 
 
 def test_verifier_total_ht_facture_aucun_ecart_rien_a_signaler():
@@ -473,10 +530,16 @@ def test_compter_lignes_a_facturer(tmp_path):
 
     chemin_suivi = tmp_path / "suivi.xlsx"
     _classeur_avec_colonnes_facture(chemin_suivi, lignes=[
-        ["REF1", "", 10, "C1", "109 DISTRIBUTION", 10, 1.0, None, "F1", None, 10, 1.0, 10.0],  # déjà facturée
+        ["REF1", "", 10, "C1", "109 DISTRIBUTION", 10, 1.0, None, None, None, None, None, None],  # déjà facturée (Pièces)
         ["REF2", "", 5, "C2", "109 DISTRIBUTION", 5, 1.0, None, None, None, None, None, None],  # livrée, pas facturée
         ["REF3", "", 5, "C3", "109 DISTRIBUTION", 0, None, None, None, None, None, None, None],  # pas livrée du tout
     ])
+    # P1 : « déjà facturée » se lit dans la feuille Pièces (source de
+    # vérité), pas dans les colonnes de Commandes (formules, cache).
+    from moteur.rapprochement.pieces import nouvelle_piece
+    ecrire_pieces(chemin_suivi, [nouvelle_piece(
+        "Facture", "109 DISTRIBUTION", "F1", date(2026, 7, 15), "C1", None, None, "REF1", "REF1", "", 10, 1.0, 10.0,
+    )], tmp_path / "backups")
 
     r = compter_lignes_a_facturer(chemin_suivi, "109 DISTRIBUTION")
 
@@ -527,16 +590,21 @@ def test_appliquer_et_archiver_factures_ecrit_et_archive(tmp_path):
     resume = appliquer_et_archiver_factures(tmp_path, dossier_a_traiter, rapport, rapport.surs)
 
     assert resume["lignes_ecrites"] == 1
+    assert resume["pieces_ecrites"] == 1
     assert resume["sauvegarde"].exists()
     assert resume["montants_recalcules"] == []  # montant_ht imprimé (défaut du helper), rien à recalculer
 
+    # P1 : la ligne de document est dans Pièces, plus dans les 5 colonnes
+    # de Commandes (devenues des formules — jamais écrites par l'outil).
+    [p] = lire_pieces(chemin_suivi)
+    assert p["Type"] == "Facture" and p["N° pièce"] == "360311"
+    assert p["N° de commande"] == "129.034" and p["Référence Suivi"] == "REF1"
+    assert p["Qté"] == 200.0 and p["PU HT"] == 0.6 and p["Montant HT"] == 120.0
+    assert p["Fichier"] == "2026-07-15 - 109 DISTRIBUTION - Facture 360311 - BC 129.034.pdf"
     from openpyxl import load_workbook
     wb = load_workbook(chemin_suivi, data_only=True)
     ws = wb["Commandes"]
-    assert ws["I2"].value == "360311"       # N° facture
-    assert ws["K2"].value == 200.0          # Qté facturée
-    assert ws["L2"].value == 0.6            # PU facturé
-    assert ws["M2"].value == 120.0          # Montant facturé HT (imprimé = 200 × 0,6)
+    assert ws["I2"].value is None and ws["K2"].value is None  # rien écrit dans les colonnes facture
 
     [(fichier, cibles)] = resume["factures_archivees"]
     assert fichier == "f1.pdf"
@@ -661,18 +729,16 @@ def test_appliquer_et_archiver_factures_sans_parser_vs_vraie_anomalie(tmp_path):
     assert not (dossier_a_traiter / "illisible.pdf").exists()  # bien déplacé, comportement inchangé
 
 
-def test_ecriture_echoue_proprement_sans_les_colonnes_facture(tmp_path):
-    """Un classeur qui n'a pas (ou plus) les 5 colonnes facture (ex. un
-    export périmé, ou un poste dont le Suivi n'a pas encore été mis à jour —
-    les colonnes existent bien dans le VRAI Suivi vivant depuis le
-    2026-09-01, voir CLAUDE.md "colonnes créées dans le Suivi vivant") doit
-    échouer proprement -> ColonneNonModifiable, message clair, jamais un
-    plantage générique ni une écriture partielle."""
+def test_ecriture_echoue_proprement_sans_feuille_pieces(tmp_path):
+    """P1 : un classeur sans feuille Pièces (export périmé, poste pas à jour)
+    doit échouer proprement -> FeuillePiecesAbsente, message clair, jamais
+    un plantage générique ni une écriture partielle ; rien n'est déplacé."""
 
     chemin_suivi = tmp_path / "suivi.xlsx"
     _classeur_sans_colonnes_facture(chemin_suivi, lignes=[
         ["REF1", "", 10, "C1", "109 DISTRIBUTION", 10, 1.0, None],
     ])
+    assert not feuille_pieces_presente(chemin_suivi)
 
     dossier_a_traiter = tmp_path / "a_traiter" / "Factures"
     dossier_a_traiter.mkdir(parents=True)
@@ -685,12 +751,37 @@ def test_ecriture_echoue_proprement_sans_les_colonnes_facture(tmp_path):
 
     rapport = RapportRapprochementFacture(surs=[(f, c)], fichier_suivi=chemin_suivi)
 
-    with pytest.raises(ColonneNonModifiable):
+    with pytest.raises(FeuillePiecesAbsente):
         appliquer_et_archiver_factures(tmp_path, dossier_a_traiter, rapport, rapport.surs)
 
-    # Rien n'a été déplacé : mieux vaut tout laisser en l'état qu'archiver
-    # sur la base d'une écriture qui n'a en réalité jamais eu lieu.
     assert (dossier_a_traiter / "f1.pdf").exists()
+
+
+def test_appliquer_et_archiver_factures_est_idempotent_par_id_piece(tmp_path):
+    """Redéposer la même facture : les lignes Pièces ne sont jamais
+    réécrites (ID pièce déjà présent), comptées dans pieces_ignorees."""
+
+    chemin_suivi = tmp_path / "suivi.xlsx"
+    _classeur_avec_colonnes_facture(chemin_suivi, lignes=[
+        ["REF1", "Article test", 200, "129.034", "109 DISTRIBUTION", 200, 0.6, None, None, None, None, None, None],
+    ])
+    dossier_a_traiter = tmp_path / "a_traiter" / "Factures"
+    dossier_a_traiter.mkdir(parents=True)
+
+    def _passage():
+        (dossier_a_traiter / "f1.pdf").write_bytes(b"1")
+        lf = _ligne_facture(reference_fournisseur="REF1", quantite_facturee=200.0, prix_unitaire_ht=0.6)
+        lf.numero_commande = "129.034"
+        f = _facture("f1.pdf", numero_facture="360311", date_facture="15/07/2026", lignes=[lf])
+        c = CorrespondanceFacture(lf, _ligne_suivi_facture(2, reference="REF1", qte_commandee=200.0, qte_livree=200.0, tarif_bl=0.6), StatutFacture.SUR)
+        rapport = RapportRapprochementFacture(surs=[(f, c)], fichier_suivi=chemin_suivi)
+        return appliquer_et_archiver_factures(tmp_path, dossier_a_traiter, rapport, rapport.surs)
+
+    assert _passage()["pieces_ecrites"] == 1
+    resume = _passage()
+    assert resume["pieces_ecrites"] == 0
+    assert resume["pieces_ignorees"] == ["109 Distribution|Facture|360311|129.034|REF1|"]
+    assert len(lire_pieces(chemin_suivi)) == 1
 
 
 # --- écriture réelle sur une COPIE du vrai Suivi commandes vivant ----------
@@ -700,66 +791,46 @@ def test_ecriture_echoue_proprement_sans_les_colonnes_facture(tmp_path):
     trouver_fichier_suivi_vivant(ROOT) is None,
     reason="Classeur Suivi commandes VIVANT introuvable depuis ce poste",
 )
-def test_ecritures_pour_facture_sur_le_vrai_suivi_vivant(tmp_path):
-    """Preuve définitive au niveau PIPELINE (pas seulement ecriture.py) :
-    sur une COPIE du vrai classeur vivant (jamais l'original), les 5
-    Ecriture construites par ecritures_pour_facture() (réutilisant
-    ENTETES_FACTURE, voir bandeau du module) s'écrivent correctement via
-    appliquer(), en ne modifiant STRICTEMENT que la partie XML de la
-    feuille "Commandes" — tout le reste du zip (styles, tableaux,
-    validations, calcChain, sharedStrings, customXml, printerSettings, les
-    autres feuilles Dashboard/Analyses/Calculs...) reste identique octet
-    pour octet."""
+def test_pieces_pour_facture_sur_le_vrai_suivi_vivant(tmp_path):
+    """Preuve au niveau PIPELINE sur une COPIE du vrai classeur vivant
+    (jamais l'original) : la ligne Pièces construite par
+    pieces_pour_facture() s'écrit via ecrire_pieces() en ne modifiant que
+    la feuille Pièces, sa définition de tableau (et styles.xml si un style
+    manquait) — tout le reste du zip (Commandes, Dashboard, Analyses,
+    Calculs, validations, sharedStrings...) reste identique octet pour
+    octet. La feuille Pièces est installée sur la copie si le vivant ne l'a
+    pas encore (avant l'étape 7 de P1)."""
 
     fichier_reel = trouver_fichier_suivi_vivant(ROOT)
     copie = tmp_path / fichier_reel.name
     shutil.copy2(fichier_reel, copie)
-
-    entetes = lire_entetes(copie)
-    assert set(ENTETES_FACTURE) <= set(entetes)  # les 5 colonnes existent bien
+    if not feuille_pieces_presente(copie):
+        installer_feuille_pieces(copie, tmp_path / "backups")
 
     with zipfile.ZipFile(copie) as z:
         contenu_avant = {n: z.read(n) for n in z.namelist()}
 
     f = _facture("f1.pdf", numero_facture="TEST-360999", date_facture="01/09/2026")
-    lf = _ligne_facture(
-        reference_fournisseur="TESTREF", quantite_facturee=7.0, prix_unitaire_ht=12.5, montant_ht=87.5,
-    )
-    ls = _ligne_suivi_facture(2, reference="TESTREF", qte_livree=7.0, tarif_bl=12.5)
+    lf = _ligne_facture(reference_fournisseur="TESTREF", quantite_facturee=7.0, prix_unitaire_ht=12.5, montant_ht=87.5)
+    lf.numero_commande = "TEST.001"
+    ls = _ligne_suivi_facture(2, reference="TESTREF", qte_livree=7.0, tarif_bl=12.5, chantier="Test")
     c = CorrespondanceFacture(lf, ls, StatutFacture.SUR)
 
-    ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture([(f, c)])
-    assert montants_recalcules == []
-
-    appliquer(copie, ecritures, tmp_path / "backups")
+    pieces, ecritures, montants_recalcules, _ = pieces_pour_facture([(f, c)], tmp_path / "Traités")
+    assert montants_recalcules == [] and ecritures == []
+    resultat = ecrire_pieces(copie, pieces, tmp_path / "backups")
+    assert resultat["ajoutees"] == 1
 
     with zipfile.ZipFile(copie) as z:
         contenu_apres = {n: z.read(n) for n in z.namelist()}
+    modifiees = {n for n in contenu_avant if contenu_avant[n] != contenu_apres[n]}
+    assert "xl/worksheets/sheet1.xml" not in modifiees  # Commandes jamais touchée
+    assert all(n.startswith("xl/worksheets/sheet") or n.startswith("xl/tables/table") or n == "xl/styles.xml" for n in modifiees)
+    assert len([n for n in modifiees if n.startswith("xl/worksheets/")]) == 1
 
-    chemin_feuille = "xl/worksheets/sheet1.xml"
-    assert set(contenu_avant) == set(contenu_apres)
-    for nom in contenu_avant:
-        if nom == chemin_feuille:
-            assert contenu_avant[nom] != contenu_apres[nom]
-        else:
-            assert contenu_avant[nom] == contenu_apres[nom], f"partie modifiée à tort : {nom}"
-
-    wb = load_workbook(copie, data_only=True)
-    ws = wb["Commandes"]
-    assert ws.cell(row=2, column=entetes["N° facture"]).value == "TEST-360999"
-    # "Date facture" : pas d'assertion de valeur ici, même limite déjà
-    # rencontrée par tests/test_rapprochement_ecriture.py sur cette même
-    # colonne toute neuve — une cellule qui n'a JAMAIS existé dans le XML
-    # (colonne créée le 2026-09-01, aucune ligne n'y a encore de style)
-    # n'hérite d'aucun format de date : openpyxl relit un flottant (numéro
-    # de série Excel), pas un date(). Écriture correcte (voir
-    # test_appliquer_ecrit_les_colonnes_facture pour la preuve sur classeur
-    # synthétique où la cellule existe déjà) — seul l'AFFICHAGE Excel tant
-    # que la colonne n'a pas encore de format de date appliqué est en jeu,
-    # hors périmètre de cette étape.
-    assert ws.cell(row=2, column=entetes["Qté facturée"]).value == 7.0
-    assert ws.cell(row=2, column=entetes["PU facturé"]).value == 12.5
-    assert ws.cell(row=2, column=entetes["Montant facturé HT"]).value == 87.5
+    derniere = lire_pieces(copie)[-1]
+    assert derniere["N° pièce"] == "TEST-360999" and derniere["Qté"] == 7.0 and derniere["Montant HT"] == 87.5
+    assert derniere["Chantier"] == "Test"
 
 
 # --- "Substitutions probables" : feuille dédiée + apprentissage (étape 1) --

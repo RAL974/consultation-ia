@@ -46,7 +46,21 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 
 from moteur.referentiel import Referentiel
-from moteur.rapprochement.ecriture import ENTETES_FACTURE, Ecriture, appliquer
+from moteur.rapprochement.ecriture import Ecriture, appliquer
+from moteur.rapprochement.pieces import (
+    COMMENTAIRE_MONTANT_RECALCULE,
+    MODE_AUTO,
+    MODE_CONFIRME,
+    MODE_EQUIVALENCE,
+    TYPE_AVOIR,
+    TYPE_FACTURE,
+    TYPE_FRAIS,
+    IndexPieces,
+    dedoublonner_ids,
+    ecrire_pieces,
+    lire_pieces,
+    nouvelle_piece,
+)
 from moteur.rapprochement.lecture_facture import analyser_dossier
 from moteur.rapprochement.matching import deduire_commande_par_contenu
 from moteur.rapprochement.matching_facture import (
@@ -56,6 +70,7 @@ from moteur.rapprochement.matching_facture import (
     apparier_facture,
     charger_frais_fournisseurs,
     est_bdc_manuel_24x,
+    index_pieces_du_suivi,
     lire_lignes_commande_facture,
     lire_lignes_fournisseur_facture,
 )
@@ -133,6 +148,8 @@ def classifier_cause_anomalie(raison: str) -> CauseFacture | None:
     compte rendu chiffré par cause en fin de rapport, jamais à une
     décision de rapprochement elle-même. None si aucun motif reconnu."""
 
+    if "DOUBLON" in raison:
+        return CauseFacture.DOUBLON_FACTURE
     if "AVOIR" in raison:
         return CauseFacture.AVOIR
     if "bon manuel" in raison:
@@ -392,8 +409,17 @@ def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRap
     referentiel.appliquer_confirmations(dossier_referentiel / NOM_A_CONFIRMER_FACTURE)
     _appliquer_confirmations_substitutions(dossier_referentiel, NOM_A_CONFIRMER_FACTURE, referentiel)
     frais_connus = charger_frais_fournisseurs(dossier_referentiel / NOM_FRAIS_FOURNISSEURS)
+    index_pieces = index_pieces_du_suivi(fichier_suivi)  # feuille Pièces lue UNE fois par lot
 
     for facture in factures:
+
+        doublon = _doublon_facture(facture, index_pieces)
+        if doublon:
+            # Même n° de facture déjà écrit dans Pièces pour ce fournisseur
+            # depuis un AUTRE document (date/fichier différents) : jamais
+            # écrit, jamais rapproché — décision humaine (À vérifier).
+            rapport.anomalies_facture.append((facture, doublon))
+            continue
 
         if facture.type_document == "AVOIR":
             # Jamais rapprochée automatiquement (voir CLAUDE.md, Volet 3) —
@@ -463,7 +489,9 @@ def rapprocher_dossier_factures(dossier_a_traiter, dossier_projet) -> RapportRap
         for numero_commande, groupe in par_commande.items():
 
             try:
-                lignes_suivi = lire_lignes_commande_facture(fichier_suivi, facture.fournisseur, numero_commande)
+                lignes_suivi = lire_lignes_commande_facture(
+                    fichier_suivi, facture.fournisseur, numero_commande, index_pieces=index_pieces,
+                )
             except Exception as e:
                 rapport.anomalies_facture.append((facture, f"Erreur de lecture du Suivi ({e})"))
                 continue
@@ -574,8 +602,6 @@ def regrouper_par_facture(rapport: RapportRapprochementFacture) -> dict:
     return groupes
 
 
-_COL_NUM_FACTURE, _COL_DATE_FACTURE, _COL_QTE_FACTUREE, _COL_PU_FACTURE, _COL_MONTANT_FACTURE = ENTETES_FACTURE
-
 # Exception ENCADRÉE, demandée et validée par l'acheteur en une phrase
 # (session F4, cadrage avant code Coredime) : ses BL n'affichent JAMAIS de
 # prix (voir moteur.fournisseurs.coredime, "GABARIT BL" — réglé à la
@@ -593,78 +619,153 @@ _COL_NUM_FACTURE, _COL_DATE_FACTURE, _COL_QTE_FACTUREE, _COL_PU_FACTURE, _COL_MO
 FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE = {"COREDIME"}
 
 
-def ecritures_pour_facture(correspondances) -> tuple:
-    """Construit les Ecriture pour les 5 colonnes facture (voir
-    ENTETES_FACTURE, moteur.rapprochement.ecriture — réutilisées telles
-    quelles, jamais retypées ici) pour une liste de (Facture,
-    CorrespondanceFacture) déjà décidées "à écrire". Lève ColonneNonModifiable
-    (via ecriture.appliquer) si ces colonnes n'existent pas dans le Suivi
-    visé — rien de spécial à faire ici, le garde-fou est déjà dans
-    moteur.rapprochement.ecriture.
+def _prefixe_archive_facture(facture) -> str:
+    """"<date> - <fournisseur> - Facture <n°>" : identité d'un DOCUMENT dans
+    le libellé « Fichier » de Pièces (voir _nom_archive_facture), commune à
+    toutes ses copies par commande."""
+    return _nom_archive_facture(facture, "x").rsplit(" - BC ", 1)[0]
 
-    Retourne (ecritures, montants_recalcules, tarif_bl_ecrit). "Montant
-    facturé HT" est une colonne de SAISIE (pas une formule Excel, voir
-    CLAUDE.md "colonnes créées dans le Suivi vivant") : reprend le montant
-    IMPRIMÉ sur la facture pour cette ligne (LigneFacture.montant_ht, déjà
-    extrait tel quel par le parser — pour 109 Distribution, toujours
-    imprimé, jamais None). Si un futur fournisseur n'imprime PAS ce montant
-    ligne à ligne, il est recalculé (Qté facturée × PU facturé) — JAMAIS
-    silencieusement : chaque recalcul est ajouté à `montants_recalcules`,
-    repris dans le rapport écrit par appliquer_et_archiver_factures().
-    `tarif_bl_ecrit` (voir FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE) : liste des
-    lignes où Tarif BL a aussi été renseigné depuis cette facture."""
 
+def _doublon_facture(facture, index_pieces) -> str | None:
+    """Garde-fou double facturation au niveau du DOCUMENT : le même n° de
+    facture, chez le même fournisseur, est déjà écrit dans Pièces depuis un
+    fichier dont l'identité (date - fournisseur - n°) diffère -> raison en
+    clair (jamais écrit), sinon None. Un redépôt du MÊME document (même
+    identité) n'est pas un doublon : ses lignes ressortent « déjà à jour »
+    par leur ID (voir matching_facture._comparer_facture)."""
+
+    if index_pieces is None or not index_pieces.disponible or facture.type_document == "AVOIR":
+        return None
+    fichiers = index_pieces.fichiers_facture(facture.fournisseur, facture.numero_facture)
+    if not fichiers:
+        return None
+    prefixe = _prefixe_archive_facture(facture)
+    if any(f.startswith(prefixe + " - BC") for f in fichiers):
+        return None
+    return (
+        f"DOUBLON : la facture {facture.numero_facture} de {facture.fournisseur} est déjà enregistrée dans Pièces "
+        f"depuis un autre document ({', '.join(sorted(fichiers))}) — jamais réécrite, à vérifier à la main"
+    )
+
+
+def _chemin_archive_facture(facture, numero_commande: str, dossier_traites_bl) -> Path:
+    """Chemin FUTUR (ou présent) de la copie archivée de cette facture pour
+    cette commande — c'est ce chemin qui va dans Pièces[Fichier]
+    (=HYPERLINK), écrit AVANT l'archivage (voir appliquer_et_archiver_
+    factures : l'écriture précède le rangement) ; identique quel que soit
+    le sort du fichier source (archivé tout de suite, ou après passage par
+    À vérifier/)."""
+
+    suffixe = Path(facture.fichier or "").suffix or ".pdf"
+    return _dossier_pour_commande(Path(dossier_traites_bl), numero_commande) / f"{_nom_archive_facture(facture, numero_commande)}{suffixe}"
+
+
+def _mode_rapprochement(c) -> str:
+    if c.statut is StatutFacture.SUR:
+        return MODE_AUTO
+    if c.cause in (CauseFacture.CLE_PARTIELLE, CauseFacture.SUBSTITUTION_PROBABLE):
+        return MODE_EQUIVALENCE  # ligne obtenue par un repli (référence proche / référentiel / résiduel), confirmée
+    return MODE_CONFIRME
+
+
+def pieces_pour_facture(correspondances, dossier_traites_bl, frais=()) -> tuple:
+    """Construit les lignes Pièces (voir moteur.rapprochement.pieces) pour une
+    liste de (Facture, CorrespondanceFacture) déjà décidées « à écrire » :
+    une ligne de type Facture (Avoir si le document en est un) par
+    correspondance, avec Chantier/Sous-Chantier/Référence Suivi copiés de
+    la ligne Commandes rapprochée, N° BL lié = BL cité sur la facture pour
+    cette ligne, Fichier = chemin d'archive (voir _chemin_archive_facture),
+    Mode = Auto (sûre) / Confirmé (cochée) / Équivalence (repli confirmé).
+    Les `frais` (StatutFacture.FRAIS, jamais rapprochés à une ligne du
+    Suivi) des factures effectivement écrites deviennent des lignes de
+    type Frais, sans Référence Suivi.
+
+    « Montant HT » = montant IMPRIMÉ (LigneFacture.montant_ht) ; s'il
+    manque, recalculé Qté × PU avec Commentaire « montant recalculé » ET
+    une entrée dans `montants_recalcules` — jamais silencieusement.
+
+    Retourne (pieces, ecritures_tarif_bl, montants_recalcules,
+    tarif_bl_ecrit) — les Ecriture « Tarif BL » de la liste blanche
+    FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE restent écrites dans Commandes
+    (seule colonne de Commandes encore écrite par ce flux)."""
+
+    pieces = []
     ecritures = []
     montants_recalcules = []
     tarif_bl_ecrit = []
+    factures_ecrites = {}  # id(facture) -> {n° commande: (chantier, sous-chantier)}
 
     for facture, c in correspondances:
 
-        if c.statut is StatutFacture.DEJA_A_JOUR:
+        if c.statut is StatutFacture.DEJA_A_JOUR or c.ligne_suivi is None:
             continue
 
-        ligne = c.ligne_suivi.ligne_excel
-        lf = c.ligne_facture
-
-        ecritures.append(Ecriture(ligne, _COL_NUM_FACTURE, facture.numero_facture))
-
-        d = _parser_date_bl(facture.date_facture)
-        if d is not None:
-            ecritures.append(Ecriture(ligne, _COL_DATE_FACTURE, d))
-
-        ecritures.append(Ecriture(ligne, _COL_QTE_FACTUREE, lf.quantite_facturee))
-
-        if lf.prix_unitaire_ht:
-            ecritures.append(Ecriture(ligne, _COL_PU_FACTURE, lf.prix_unitaire_ht))
-
-            if (
-                facture.fournisseur.upper() in FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE
-                and not c.ligne_suivi.tarif_bl
-            ):
-                ecritures.append(Ecriture(ligne, "Tarif BL", lf.prix_unitaire_ht))
-                tarif_bl_ecrit.append({
-                    "fichier": facture.fichier,
-                    "facture": facture.numero_facture,
-                    "reference": lf.reference_fournisseur,
-                    "ligne_excel": ligne,
-                    "tarif_bl": lf.prix_unitaire_ht,
-                })
+        ls, lf = c.ligne_suivi, c.ligne_facture
+        numero_commande = lf.numero_commande or ls.numero_commande
+        commentaire = None
 
         if lf.montant_ht:
             montant = lf.montant_ht
         else:
             montant = round(lf.quantite_facturee * (lf.prix_unitaire_ht or 0.0), 2)
+            commentaire = COMMENTAIRE_MONTANT_RECALCULE
             montants_recalcules.append({
                 "fichier": facture.fichier,
                 "facture": facture.numero_facture,
                 "reference": lf.reference_fournisseur,
-                "ligne_excel": ligne,
+                "ligne_excel": ls.ligne_excel,
                 "montant": montant,
             })
 
-        ecritures.append(Ecriture(ligne, _COL_MONTANT_FACTURE, montant))
+        qte = lf.quantite_facturee
+        type_piece = TYPE_FACTURE
+        if facture.type_document == "AVOIR":
+            type_piece, qte, montant = TYPE_AVOIR, -abs(qte), -abs(montant)
 
-    return ecritures, montants_recalcules, tarif_bl_ecrit
+        pieces.append(nouvelle_piece(
+            type_piece, facture.fournisseur, facture.numero_facture, _parser_date_bl(facture.date_facture),
+            numero_commande, ls.chantier, ls.sous_chantier, ls.reference,
+            lf.reference_fournisseur, lf.designation, qte, lf.prix_unitaire_ht, montant,
+            numero_bl_lie=lf.numero_bl, mode=_mode_rapprochement(c),
+            fichier=_chemin_archive_facture(facture, numero_commande, dossier_traites_bl),
+            commentaire=commentaire,
+        ))
+        factures_ecrites.setdefault(id(facture), {})[numero_commande] = (ls.chantier, ls.sous_chantier)
+
+        if (
+            lf.prix_unitaire_ht
+            and facture.fournisseur.upper() in FOURNISSEURS_TARIF_BL_DEPUIS_FACTURE
+            and not ls.tarif_bl
+        ):
+            ecritures.append(Ecriture(ls.ligne_excel, "Tarif BL", lf.prix_unitaire_ht))
+            tarif_bl_ecrit.append({
+                "fichier": facture.fichier,
+                "facture": facture.numero_facture,
+                "reference": lf.reference_fournisseur,
+                "ligne_excel": ls.ligne_excel,
+                "tarif_bl": lf.prix_unitaire_ht,
+            })
+
+    for facture, c in frais:
+        commandes = factures_ecrites.get(id(facture))
+        if not commandes:
+            continue  # facture pas écrite dans ce passage : ses frais attendront
+        lf = c.ligne_facture
+        numero_commande = lf.numero_commande or (next(iter(commandes)) if len(commandes) == 1 else "")
+        if not numero_commande:
+            continue
+        chantier, sous_chantier = commandes.get(numero_commande, (None, None))
+        montant = lf.montant_ht if lf.montant_ht is not None else round(lf.quantite_facturee * (lf.prix_unitaire_ht or 0.0), 2)
+        pieces.append(nouvelle_piece(
+            TYPE_FRAIS, facture.fournisseur, facture.numero_facture, _parser_date_bl(facture.date_facture),
+            numero_commande, chantier, sous_chantier, None,
+            lf.reference_fournisseur, lf.designation, lf.quantite_facturee, lf.prix_unitaire_ht, montant,
+            numero_bl_lie=lf.numero_bl, mode=MODE_AUTO,
+            fichier=_chemin_archive_facture(facture, numero_commande, dossier_traites_bl),
+            commentaire="; ".join(c.raisons) or None,
+        ))
+
+    return dedoublonner_ids(pieces), ecritures, montants_recalcules, tarif_bl_ecrit
 
 
 def _nom_archive_facture(facture, numero_commande: str) -> str:
@@ -803,7 +904,7 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
     dossier_traites_bl = dossier_projet / DOSSIER_TRAITES_BL
 
     resume = {
-        "sauvegarde": None, "lignes_ecrites": 0,
+        "sauvegarde": None, "lignes_ecrites": 0, "pieces_ecrites": 0, "pieces_ignorees": [],
         "factures_archivees": [], "factures_a_verifier": [],
         "archivage_echoue": [], "chemin_rapport": None, "resorption": None,
         "montants_recalcules": [], "factures_sans_parser": [],
@@ -811,10 +912,21 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
     }
 
     if correspondances_a_ecrire:
-        ecritures, montants_recalcules, tarif_bl_ecrit = ecritures_pour_facture(correspondances_a_ecrire)
-        resume["sauvegarde"] = appliquer(
-            rapport.fichier_suivi, ecritures, dossier_projet / DOSSIER_BACKUPS,
+        # Depuis P1 : les lignes de document vont dans la feuille Pièces
+        # (une par ligne de facture + les frais des factures écrites) ;
+        # dans Commandes ne reste écrit que « Tarif BL » (liste blanche).
+        # Pièces d'abord (l'essentiel, refusé net si la feuille manque —
+        # FeuillePiecesAbsente), Tarif BL ensuite.
+        pieces, ecritures_tarif_bl, montants_recalcules, tarif_bl_ecrit = pieces_pour_facture(
+            correspondances_a_ecrire, dossier_traites_bl, frais=rapport.frais,
         )
+        resultat_pieces = ecrire_pieces(rapport.fichier_suivi, pieces, dossier_projet / DOSSIER_BACKUPS)
+        resume["sauvegarde"] = resultat_pieces["sauvegarde"]
+        resume["pieces_ecrites"] = resultat_pieces["ajoutees"]
+        resume["pieces_ignorees"] = resultat_pieces["ignorees"]
+        if ecritures_tarif_bl:
+            sauvegarde_tarif = appliquer(rapport.fichier_suivi, ecritures_tarif_bl, dossier_projet / DOSSIER_BACKUPS)
+            resume["sauvegarde"] = resume["sauvegarde"] or sauvegarde_tarif
         resume["lignes_ecrites"] = len(correspondances_a_ecrire)
         resume["montants_recalcules"] = montants_recalcules
         resume["tarif_bl_ecrit_depuis_facture"] = tarif_bl_ecrit
@@ -896,7 +1008,8 @@ def appliquer_et_archiver_factures(dossier_projet, dossier_a_traiter, rapport: R
 
     lignes_rapport = [
         f"Rapprochement factures — {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-        f"{resume['lignes_ecrites']} ligne(s) écrite(s) dans le Suivi commandes.",
+        f"{resume['lignes_ecrites']} ligne(s) rapprochée(s) écrite(s) — {resume['pieces_ecrites']} ligne(s) "
+        f"dans la feuille Pièces (Facture + Frais), {len(resume['pieces_ignorees'])} déjà présente(s) (ID pièce).",
         f"{len(resume['factures_archivees'])} facture(s) archivée(s) : "
         + ", ".join(f for f, _ in resume["factures_archivees"]),
         f"{len(resume['factures_a_verifier'])} facture(s) déplacée(s) vers "

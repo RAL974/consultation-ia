@@ -159,10 +159,15 @@ les envoie directement en PDF) dans `a_traiter/Factures/`.
    Inconnues / Blocs non rapprochés) — même logique de vérification avant
    de cocher.
 
-Les 5 colonnes nécessaires (**N° facture**, **Date facture**, **Qté
-facturée**, **PU facturé**, **Montant facturé HT**) existent désormais pour
-de vrai dans le Suivi commandes (créées par l'outil lui-même le
-01/09/2026, sans aucune manipulation Excel de ta part).
+Depuis le 04/09/2026, chaque ligne de facture (et chaque ligne de BL) est
+écrite dans le nouvel onglet **« Pièces »** du Suivi commandes (juste
+après Commandes : une ligne par ligne de document, avec un lien vers le
+PDF archivé) ; les 5 colonnes de Commandes (**N° facture**, **Date
+facture**, **Qté facturée**, **PU facturé**, **Montant facturé HT**) et les
+4 nouvelles (**Reste à facturer HT**, **Écart facture €**, **Qté
+retournée**, **Statut facture**) se calculent toutes seules à partir de
+Pièces — rien à saisir, rien à coller. Seule la colonne « Commentaire »
+de Pièces est à toi.
 
 **Étape 3 — écrire**
 Même déroulé que pour les BL : Suivi fermé dans Excel, clic sur "Écrire les

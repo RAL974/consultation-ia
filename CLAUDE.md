@@ -1628,6 +1628,12 @@ feuille — puisqu'il n'existe aucune colonne "facture reçue" explicite à
 cocher — reste une question ouverte pour l'acheteur (voir session R1,
 tableau de flux) : probablement une correction de "Tarif BL" si la facture
 diffère du BL, à confirmer.
+*Mise à jour P1 (2026-09-04, voir « Feuille Pièces — modèle, socles,
+migration ») : les 5 colonnes facture créées le 2026-09-01 ne sont PLUS
+des colonnes saisies mais des formules ; la feuille « Pièces » (une ligne
+par ligne de document) est ÉCRITE PAR L'OUTIL, pas saisie — seule sa
+colonne « Commentaire » est humaine. Les 3+1 colonnes BL ci-dessus restent
+les seules cellules de Commandes que l'outil écrit.*
 
 **Écriture sécurisée (`moteur/rapprochement/ecriture.py`)** : openpyxl
 (`load_workbook()` + `save()`) a été essayé en premier sur une COPIE du
@@ -5243,6 +5249,247 @@ probables en tête, feuille dédiée déjà prête dans
 l'acheteur ; les 412 factures en `À vérifier/`. Parsers facture toujours
 manquants : Cominter (scan, 34 fichiers de ce lot), EDOI (2 fichiers,
 toujours en attente de plus de pièces réelles, voir session F4).
+
+## Feuille Pièces — modèle, socles, migration (P1, 2026-09-04)
+
+Session P1 du dossier « Pièces » (règles de conduite 0.4 : un seul plan
+exécuté dans l'ordre, tout prouvé sur une COPIE avant le vivant, chaque
+étape vérifiée PAR L'OUTIL). Vendredi soir, acheteur parti après « tu as
+full access sur les tableaux, rien n'est ouvert » : les contrôles
+[HUMAIN] « aucun message de réparation » ont été faits par l'outil avec
+Excel lui-même (voir `verification_excel.py` ci-dessous), l'ouverture
+humaine du vivant reste à faire lundi (voir « Reste à faire »).
+
+### Modèle
+
+Nouvelle feuille **« Pièces »** (onglet juste après Commandes), tableau
+structuré **`Pieces`**, UNE ligne = UNE ligne de DOCUMENT (BL / Retour /
+Facture / Avoir / Frais / Demande d'avoir), 26 colonnes dans l'ordre du
+plan (`moteur/rapprochement/pieces.py::COLONNES_PIECES`) : ID pièce, Type,
+Fournisseur (nom Suivi via `MAPPING_FOURNISSEURS`), N° pièce, Date pièce,
+N° de commande, Chantier, Sous-Chantier (copiés de Commandes à l'écriture),
+Référence Suivi (valeur EXACTE de Commandes, type conservé — un nombre reste
+un nombre, sinon les formules `=` de Commandes ne matchent pas), Référence
+fournisseur, Désignation, Qté (signée), PU HT, Montant HT, N° BL lié,
+N° facture liée, Prix de référence / Source prix / Écart PU / Écart ligne €
+/ Contrôle prix (vides, P2), Mode de rapprochement (Auto / Confirmé /
+Équivalence / Migré / Migré sans PDF), Demande d'avoir (P4), Fichier
+(`=HYPERLINK("<chemin archive>","<nom>")`, une formule — jamais une
+relation OOXML), Date d'écriture, Commentaire (seule colonne humaine).
+**Écrite par l'outil, jamais saisie.** `ID pièce` =
+`<Fournisseur>|<Type>|<N° pièce>|<N° de commande>|<Référence Suivi>|<N° BL lié>`
+(Frais sans ligne Suivi : `F:<réf fournisseur>` à la place de la référence
+Suivi ; doublons stricts au sein d'un lot suffixés `#2`, `#3`… de façon
+déterministe — `dedoublonner_ids`, JAMAIS par rapport aux ID déjà écrits :
+un ID présent EST la même ligne, c'est l'idempotence).
+
+Dans Commandes, les 5 colonnes facture (51–55) sont devenues CALCULÉES
+(`FORMULES_COMMANDES_BASCULE`, formules anglaises stockées avec leurs
+préfixes `_xlfn.`/`_xlws.`, références structurées en forme longue
+`Commandes[[#This Row],[X]]`, la même chaîne sur toutes les lignes) :
+Qté facturée / Montant facturé HT = `SUMIFS` sur Pieces (Facture + Avoir,
+critères N° de commande + Référence Suivi), N° facture =
+`TEXTJOIN("; ",TRUE,UNIQUE(FILTER(…)))` (formule matricielle, `cm="1"`
+comme Excel l'écrit lui-même dans ce classeur), Date facture = `MAXIFS`
+(vide si 0 — sinon Excel afficherait 00/01/1900, seul écart au sketch du
+plan), PU facturé = `IFERROR(Montant/Qté,"")` = moyen pondéré. 4 colonnes
+NOUVELLES en fin de tableau (56–59, `FORMULES_COMMANDES_NOUVELLES`) : Reste
+à facturer HT, Écart facture €, Qté retournée, Statut facture (vide /
+🔵 En attente facture / 🟠 Partiellement facturée / ✅ Facturée /
+⛔ Sur-facturée = Qté facturée > Qté livrée). « Statut commande » n'a pas
+été touché. Limite structurelle à connaître : les formules agrègent par
+(N° de commande, Référence) — deux lignes Commandes portant le MÊME couple
+verraient toutes deux le total (aucun cas parmi les 1 059 lignes facturées
+le 2026-09-04) ; et SUMIFS coerce les critères numériques (« 06620 » et
+« 6620 » seraient confondus dans une même commande — aucun cas non plus).
+
+### Socles génériques (`moteur/rapprochement/ecriture.py`, fin de fichier)
+
+Tous par patch XML du zip (jamais `openpyxl.save()`), paramétrés par le
+chemin du classeur pour resservir tels quels à M1 (registre BdC manuels)
+et T1 (Tableau1 du .xlsm) :
+
+1. **`ajouter_feuille_tableau(fichier, nom_feuille, nom_table, colonnes,
+   dossier_backups, feuille_modele="Commandes", apres_feuille=None,
+   largeurs=None)`** : nouvelle part `xl/worksheets/sheetN.xml` (en-têtes
+   inlineStr, style d'en-tête copié de A1 du modèle, volet figé sur la
+   ligne 1), `sheetN.xml.rels`, `xl/tables/tableN.xml` (id/numéros libres,
+   `tableStyleInfo` copié du tableau modèle, **ref `A1:<fin>2`** — Excel
+   exige au moins UNE ligne de données sous l'en-tête, un ref `A1:Z1` n'a
+   pas été tenté), `<sheet>` inséré juste après le modèle dans
+   `workbook.xml` (`localSheetId`/`activeTab` décalés), `workbook.xml.rels`,
+   `[Content_Types].xml`. `_patcher_parties_xlsx` sait désormais AJOUTER une
+   partie et en SUPPRIMER une (valeur None).
+2. **`ajouter_lignes_tableau(fichier, feuille, table, lignes, backups,
+   colonne_id=None, styles_colonnes=None)`** : `<row>` appendues en fin de
+   `<sheetData>`, textes inlineStr (sharedStrings jamais touché), nombres
+   `<v>`, dates en nombre de série avec un style logique (`_STYLES_LOGIQUES`
+   : date 14, datetime 22, monnaie 44, monnaie4 = numFmt 164 du Suivi ;
+   l'`<xf>` manquant est ajouté en fin de `cellXfs`, jamais de réindexation),
+   `Formule(texte, cache, array)` en `<f>` (+ `<v>` cache : le libellé du
+   HYPERLINK s'affiche avant tout recalcul). `<dimension>`, `ref` du tableau
+   et de l'autoFilter étendus. **Idempotence par `colonne_id`** : les
+   valeurs existantes sont relues dans le XML brut — inlineStr ET chaînes
+   partagées (Excel réécrit les inlineStr en sharedStrings à sa prochaine
+   sauvegarde, testé en simulant cette réécriture).
+3. **`ajouter_colonnes_calculees()` / `basculer_colonnes_en_formules()`**
+   (`_appliquer_formules_colonnes`) : `<calculatedColumnFormula>` (attribut
+   `array="1"` pour une formule matricielle) dans la définition du tableau
+   + la même `<f>` sur CHAQUE ligne du tableau, en UNE SEULE passe sur
+   `<sheetData>` (`_reecrire_lignes` — la feuille Commandes pèse 58 Mo, une
+   recherche par ligne serait quadratique ; ~6 s pour 6 556 lignes), style
+   de cellule existant conservé, `spans` ajustés. **calcChain jamais
+   complété à la main** : `xl/calcChain.xml` supprimé proprement (partie +
+   relation + Override) et `fullCalcOnLoad="1"` posé sur `<calcPr>` — Excel
+   recalcule tout et régénère la chaîne à l'ouverture (vérifié : ouverture
+   sans réparation, formules calculées).
+4. **`reparer_formules_ligne(fichier, backups, colonnes, ligne=2,
+   ligne_modele=3)`** : recopie dans les cellules LISTÉES de la ligne 2 la
+   formule de la ligne 3, références relatives décalées (`H3` -> `H2`,
+   `_decaler_references_ligne`), formules matricielles conservées, refus si
+   la cellule modèle n'a pas de formule ou est une formule partagée.
+   Constat sur le vivant : le plan citait les colonnes 25–30 (Y..AD) ; les
+   colonnes **22 à 30** (V..AD : Reliquat, RAL, Soldé, PU prévisionnel,
+   Prix ligne prévisionnel, Montant total commande, Reste à facturer, Délai
+   de livraison, Ecart tarifaire) portaient TOUTES la formule « Statut
+   commande » recopiée avec des références décalées. Les 9 ont été réparées
+   (`installation_pieces.COLONNES_LIGNE2_CONSTATEES`) — décision par défaut
+   de [HUMAIN-P1-a], acheteur absente ; conséquence chiffrée : la ligne 2
+   (coupe-câble 218,54 €) compte désormais dans « Engagé total » /
+   « Reste à recevoir » / « Attente livraison » du Dashboard (+218,54 €
+   chacun, valeur correcte de la ligne 2 auparavant perdue).
+
+**`moteur/rapprochement/verification_excel.py`** (nouveau, sans dépendance
+au moteur) : `verifier_dans_excel(copie, recalculer, cellules,
+enregistrer_sous)` — Excel COM invisible (pywin32, Excel 16 sur ce poste),
+détection d'une réparation par les journaux `%TEMP%\error*.xml`,
+`CalculateFullRebuild`, lecture feuilles/tableaux/cellules, copie
+RECALCULÉE en `SaveAs` (relisible avec openpyxl `data_only` = la « copie
+ouverte-fermée » du plan). Toujours sur une COPIE, jamais le vivant. Piège
+constaté : le cache du fichier d'origine était PÉRIMÉ (B9 58 -> 61, E9
+1 272,05 -> 1 316,80, K9 177 -> 174 au simple recalcul de l'original
+intact) — comparer les KPI à l'original RECALCULÉ, pas au cache.
+
+### Migration (`moteur/rapprochement/migration_pieces.py`, étape 4)
+
+`migrer_factures_vers_pieces(fichier, dossier_projet, backups, limite=None)`
+: pour chaque ligne Commandes avec N° facture (source de vérité = les 5
+colonnes + les PDF archivés), le PDF est retrouvé (`Traités/<commande>/…
+- Facture <n°> - BC …`, sinon `a_traiter/Factures/À vérifier/` et la racine
+par n° dans le nom — 85 des 363 factures n'étaient QUE là, écrites
+partiellement puis laissées à la décision de l'acheteur) et relu en lecture
+seule avec `lecture_facture.lire_facture` (aucune règle de parsing dans ce
+module) ; la ligne est retrouvée par référence (`matching._cle`), sinon par
+(qté, PU, montant) unique ; **Qté/PU/Montant viennent de Commandes** (ce
+sont les valeurs écrites à l'époque — c'est ce qui garantit le centime), le
+PDF donne N° BL lié, référence fournisseur, désignation ; une ligne
+Commandes qui agrégeait plusieurs BL (agreger_lignes_meme_reference)
+redevient une ligne Pièces par BL si les parts se somment exactement ;
+montant PDF ≠ Commandes -> Commentaire, jamais substitué. PDF introuvable /
+n° absent / ligne non retrouvée / ambiguë -> « Migré sans PDF », Commentaire
+explicite. Contrôle au centime par fournisseur (nom Suivi normalisé —
+« Coredime »/« COREDIME », « 109 DISTRIBUTION »/« 109 Distribution » sont
+saisis mélangés dans Commandes) AVANT écriture (sinon rien n'est écrit) ET
+APRÈS, relu du classeur (`controler_sommes`). Rapport dans
+`rapports/migration_pieces_<ts>.txt`.
+
+Résultat (copie puis vivant, identiques) : **1 059 lignes Commandes ->
+1 076 lignes Pièces** (1 055 « Migré » dont 14 éclatées en plusieurs BL ;
+3 « PDF introuvable », 1 « ligne ambiguë » ; 358 PDF lus, 0 erreur ; ~20
+min, OCR compris), au centime pour les 6 fournisseurs : 109 Distribution
+35 960,18 € / COMINTER 29 412,03 € / COMINTER Mayotte 8 732,34 € /
+COREDIME 102 222,22 € / GMR 19 752,05 € / STAND 64 18 868,70 € (total
+214 947,52 €). Après bascule et recalcul Excel : **0 écart** sur N° facture,
+Qté, Montant, Date pour les 1 059 lignes ; 177 écarts de PU ≤ 0,0049 €
+(PU moyen pondéré exact vs PU arrondi à 4 décimales écrit à l'époque —
+prévu par le plan) ; aucune ligne sans facture devenue non vide. Statut
+facture : 937 ✅ Facturée, 3 936 🔵 En attente facture, 122 ⛔ Sur-facturée
+— TOUTES les 122 avec Qté livrée = 0 (facture reçue avant que son BL soit
+rapproché, cas normal dixit l'acheteur — libellé à affiner en P2), aucune
+avec facturé > livré > 0.
+
+### Pipelines (étape 6)
+
+- `pipeline_facture.appliquer_et_archiver_factures()` écrit désormais des
+  lignes **Pièces** (`pieces_pour_facture` : Facture — Avoir si le document
+  en est un —, + les Frais des factures écrites, Mode Auto / Confirmé /
+  Équivalence selon statut et cause, Fichier = chemin d'archive PRÉDIT
+  `_chemin_archive_facture` — le même quel que soit le sort du fichier,
+  archivé tout de suite ou après un passage par À vérifier/) et plus jamais
+  les 5 colonnes ; conserve l'écriture « Tarif BL » (liste blanche
+  COREDIME), Pièces d'abord (refus net `FeuillePiecesAbsente` si la feuille
+  manque), Tarif BL ensuite. `resume["pieces_ecrites"]`/`["pieces_ignorees"]`.
+- « Déjà à jour » = le n° de facture est déjà écrit dans Pièces pour cette
+  ligne de commande (`LigneSuiviFacture.numeros_factures`, relu depuis la
+  feuille Pièces — `IndexPieces`, lue UNE fois par lot — et non plus depuis
+  les cellules de Commandes, dont la valeur en cache n'est rafraîchie qu'à
+  l'ouverture Excel ; repli sur les 5 colonnes si la feuille n'existe pas).
+- **Garde-fou double facturation** (`matching_facture._comparer_facture`) :
+  le CUMUL (déjà facturé dans Pièces + cette facture) > Qté livrée ->
+  « à confirmer », cause `QTE_SUPERIEURE` (facture citée) ; une ligne
+  facturée en plusieurs fois qui complète exactement le livré est « sûre »
+  (l'ancien blocage « autre n° de facture déjà présent » n'a plus lieu
+  d'être). **`DOUBLON_FACTURE`** au niveau document
+  (`pipeline_facture._doublon_facture`) : même n° chez le même fournisseur
+  déjà dans Pièces depuis un document d'identité différente (préfixe
+  « <date> - <fournisseur> - Facture <n°> » du libellé Fichier) -> anomalie,
+  jamais rapprochée ni écrite ; un redépôt du même document n'est pas un
+  doublon (ses lignes ressortent déjà à jour).
+- `pipeline_bl.appliquer_et_archiver()` écrit EN PLUS une ligne Pièces de
+  type BL par ligne rapprochée (`pieces_pour_bl` ; Qté livrée reste écrite
+  en cumul dans Commandes) ; feuille Pièces exigée AVANT toute écriture.
+- `LigneSuivi`/`LigneSuiviFacture` portent Chantier/Sous-Chantier ;
+  `ecriture.ENTETES_FACTURE` supprimé (`pieces.COLONNES_FACTURE_CALCULEES`
+  pour la lecture) ; GUI : `FeuillePiecesAbsente` remontée proprement,
+  message de fin avec le nombre de lignes Pièces.
+
+### Tests
+
+`tests/test_rapprochement_ecriture.py` (+13 : 3 socles + réparation sur
+classeur synthétique, faux calcChain injecté, idempotence après réécriture
+en sharedStrings ; 2 sur une copie du vivant : 16 -> 17 tableaux, colonne
+calculée sur 6 556 lignes, U100/AV100 identiques),
+`tests/test_rapprochement_pieces.py` (modèle, ID, formules, IndexPieces,
+lecture/écriture), `tests/test_migration_pieces.py` (logique pure,
+migration synthétique au centime + idempotence + bascule, extrait de 50
+lignes sur une copie du vivant), pipelines BL/facture adaptés (lignes
+Pièces, FeuillePiecesAbsente, doublon, cumul). Pytest complet du 2026-09-04 soir : **490 passed** (451 avant P1), 22 min 44.
+
+### Exécution sur le vivant (étape 7, 2026-09-04 soir)
+
+**NON EXÉCUTÉE ce soir** : tout est prouvé sur la copie (`Suivi - TEST P1
+.xlsx`, mêmes 1 059 lignes que le vivant, hash MD5 826ADCB3… identique au
+backup permanent `backups/permanents/Suivi commandes - 2026 - AVANT PIECES
+2026-09-04 1714.xlsx`), pytest vert, mais le lancement du script qui écrit
+dans le classeur VIVANT a été refusé par le garde-fou d'exécution de la
+session Claude Code (auto mode classifier) — pas contourné. **Le vivant
+est INTACT** (aucune écriture, vérifié : hash identique, pas de verrou).
+Le script est dans le dépôt, à lancer depuis `Consultation AI/`, Suivi
+FERMÉ, dans cet ordre (chaque commande s'arrête d'elle-même à la 1re
+anomalie et laisse un journal à l'écran) :
+
+    py -3 installer_pieces.py vivant   # ~25 min : 0d -> 1 -> 3 -> 4 -> 5 + Excel
+    py -3 installer_pieces.py lot      # puis un lot de factures (lignes sûres)
+
+`installer_pieces.py vivant` refuse de démarrer si le hash du vivant n'est
+plus celui du backup permanent (classeur modifié entre-temps : refaire un
+backup permanent d'abord, puis relancer) ; la comparaison des KPI Dashboard
+attend les valeurs de l'original recalculé +218,54 € sur B6/N6/H9.
+
+### Reste à faire / [HUMAIN] lundi
+
+- [HUMAIN-P1-e] ouvrir le vivant dans Excel : aucun message de réparation
+  attendu (prouvé par l'outil sur une copie du vivant écrit), onglet
+  « Pièces » juste après Commandes, filtres, colonnes 56–59 de Commandes.
+  Dashboard : mêmes valeurs que l'original recalculé, à +218,54 € près
+  (ligne 2 réparée) sur Engagé total / Reste à recevoir / Attente livraison.
+- P2 : Prix de référence / Source prix / Écart PU / Écart ligne € /
+  Contrôle prix, et libellés de « Statut facture » (les 122 ⛔ à Qté livrée
+  = 0 sont des factures avant BL, pas des sur-facturations).
+- `moteur/fnp.py` lit toujours « N° facture »/« Date facture » de Commandes
+  (valeurs en cache du dernier recalcul Excel ; « N° facture » peut désormais
+  contenir « F1; F2 ») — à basculer sur Pièces dans une session dédiée.
+- Les 412 factures d'À vérifier/ : inchangées, à reprendre par la GUI.
 
 ## Tests
 

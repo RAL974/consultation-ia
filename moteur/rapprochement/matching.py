@@ -74,6 +74,11 @@ class LigneSuivi:
     # paramètre.
     numero_commande: str = ""
 
+    # Copiés dans la feuille Pièces à l'écriture (compta analytique, voir
+    # moteur.rapprochement.pieces) — None si la colonne n'existe pas.
+    chantier: object = None
+    sous_chantier: object = None
+
 
 class Statut(Enum):
     SUR = "sûr"                # à écrire après OK global
@@ -236,6 +241,8 @@ def _ligne_suivi_depuis_row(i, row, entetes, avec_commande=False) -> LigneSuivi:
         statut=row[entetes["Statut commande"]] or "",
         note=row[entetes["Note"]] or "",
         numero_commande=str(row[entetes["N° de commande"]] or "").strip() if avec_commande else "",
+        chantier=row[entetes["Chantier"]] if "Chantier" in entetes else None,
+        sous_chantier=row[entetes["Sous-Chantier"]] if "Sous-Chantier" in entetes else None,
     )
 
 

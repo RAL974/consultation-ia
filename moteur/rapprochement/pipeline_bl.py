@@ -35,6 +35,17 @@ import fitz
 from moteur.referentiel import Referentiel
 from moteur.rapprochement.ecriture import Ecriture, appliquer
 from moteur.rapprochement.lecture_bl import analyser_dossier
+from moteur.rapprochement.pieces import (
+    COMMENTAIRE_MONTANT_RECALCULE,
+    MODE_AUTO,
+    MODE_CONFIRME,
+    TYPE_BL,
+    FeuillePiecesAbsente,
+    dedoublonner_ids,
+    ecrire_pieces,
+    feuille_pieces_presente,
+    nouvelle_piece,
+)
 from moteur.rapprochement.matching import (
     Correspondance,
     Statut,
@@ -436,6 +447,38 @@ def ecritures_pour(correspondances) -> list[Ecriture]:
     return ecritures
 
 
+def pieces_pour_bl(correspondances, dossier_traites) -> list:
+    """Depuis P1 (feuille Pièces) : UNE ligne de type BL par ligne
+    rapprochée écrite (voir ecritures_pour — « Qté livrée » reste écrite en
+    cumul dans Commandes comme avant, Pièces garde le détail document par
+    document). Qté = quantité livrée par CE BL, PU HT = prix net du BL,
+    Montant HT = montant imprimé (sinon Qté × PU, Commentaire « montant
+    recalculé »), Chantier/Sous-Chantier/Référence Suivi copiés de la
+    ligne Commandes, Fichier = chemin d'archive du BL
+    (Traités/<commande>/<nom d'archive>, voir _nom_archive_bl — le même
+    nom que produira l'archivage qui suit l'écriture). Une correspondance
+    « déjà à jour » ne produit rien."""
+
+    pieces = []
+    for bl, c in correspondances:
+        if c.statut is Statut.DEJA_A_JOUR or c.ligne_suivi is None:
+            continue
+        lb, ls = c.ligne_bl, c.ligne_suivi
+        montant, commentaire = lb.montant, None
+        if montant is None and lb.prix_net:
+            montant = round(lb.quantite_livree * lb.prix_net, 2)
+            commentaire = COMMENTAIRE_MONTANT_RECALCULE
+        suffixe = Path(bl.fichier or "").suffix or ".pdf"
+        chemin = _dossier_pour_commande(Path(dossier_traites), bl.numero_commande) / f"{_nom_archive_bl(bl)}{suffixe}"
+        pieces.append(nouvelle_piece(
+            TYPE_BL, bl.fournisseur, bl.numero_bl, _parser_date_bl(bl.date_bl) or date.today(),
+            bl.numero_commande, ls.chantier, ls.sous_chantier, ls.reference,
+            lb.reference_fournisseur, lb.designation, lb.quantite_livree, lb.prix_net, montant,
+            mode=MODE_AUTO if c.statut is Statut.SUR else MODE_CONFIRME, fichier=chemin, commentaire=commentaire,
+        ))
+    return dedoublonner_ids(pieces)
+
+
 def _nom_archive_bl(bl) -> str:
     """"<date> - <fournisseur> - <n° BL> - BC <n° commande>" — pour
     s'y retrouver sans avoir à ouvrir chaque fichier. Partagé par
@@ -757,17 +800,30 @@ def appliquer_et_archiver(dossier_projet, dossier_a_traiter, rapport: RapportRap
     dossier_commandes_bc = trouver_dossier_commandes(dossier_projet)
 
     resume = {
-        "sauvegarde": None, "lignes_ecrites": 0,
+        "sauvegarde": None, "lignes_ecrites": 0, "pieces_ecrites": 0, "pieces_ignorees": [],
         "bl_archives": [], "bl_a_verifier": [],
         "archivage_echoue": [], "chemin_rapport": None,
     }
 
     if correspondances_a_ecrire:
+        # Depuis P1 : la feuille Pièces doit exister AVANT toute écriture
+        # (jamais une Qté livrée écrite sans sa ligne de document en face).
+        if not feuille_pieces_presente(rapport.fichier_suivi):
+            raise FeuillePiecesAbsente(
+                f"« {Path(rapport.fichier_suivi).name} » n'a pas de feuille Pièces — rien n'a été écrit."
+            )
         ecritures = ecritures_pour(correspondances_a_ecrire)
         resume["sauvegarde"] = appliquer(
             rapport.fichier_suivi, ecritures, dossier_projet / DOSSIER_BACKUPS,
         )
         resume["lignes_ecrites"] = len(correspondances_a_ecrire)
+        resultat_pieces = ecrire_pieces(
+            rapport.fichier_suivi,
+            pieces_pour_bl(correspondances_a_ecrire, Path(dossier_a_traiter) / DOSSIER_TRAITES),
+            dossier_projet / DOSSIER_BACKUPS,
+        )
+        resume["pieces_ecrites"] = resultat_pieces["ajoutees"]
+        resume["pieces_ignorees"] = resultat_pieces["ignorees"]
 
     cles_ecrites = {id(c) for _, c in correspondances_a_ecrire}
     groupes = regrouper_par_bl(rapport)
@@ -859,7 +915,8 @@ def appliquer_et_archiver(dossier_projet, dossier_a_traiter, rapport: RapportRap
 
     lignes_rapport = [
         f"Rapprochement BL — {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-        f"{resume['lignes_ecrites']} ligne(s) écrite(s) dans le Suivi commandes.",
+        f"{resume['lignes_ecrites']} ligne(s) écrite(s) dans le Suivi commandes — {resume['pieces_ecrites']} ligne(s) BL "
+        f"dans la feuille Pièces, {len(resume['pieces_ignorees'])} déjà présente(s) (ID pièce).",
         f"{len(resume['bl_archives'])} BL archivé(s) : " + ", ".join(f for f, _ in resume["bl_archives"]),
         f"{len(resume['bl_a_verifier'])} BL déplacé(s) vers {DOSSIER_A_TRAITER_BL}/{DOSSIER_A_VERIFIER}/ "
         "(décision humaine nécessaire) :",

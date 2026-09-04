@@ -25,17 +25,24 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from moteur.rapprochement.ecriture import (
     COLONNES_MODIFIABLES,
-    ENTETES_FACTURE,
     Ecriture,
     ClasseurVerrouille,
     ColonneNonModifiable,
+    Formule,
+    _decaler_references_ligne,
+    ajouter_colonnes_calculees,
     ajouter_entetes_saisie,
+    ajouter_feuille_tableau,
+    ajouter_lignes_tableau,
     appliquer,
+    basculer_colonnes_en_formules,
     est_verrouille,
     lire_entetes,
+    reparer_formules_ligne,
     sauvegarder,
     simuler,
 )
+from moteur.rapprochement.pieces import COLONNES_FACTURE_CALCULEES
 from moteur.panier import trouver_fichier_suivi
 from moteur.rapprochement.pipeline_bl import trouver_fichier_suivi_vivant
 
@@ -154,20 +161,19 @@ def test_sauvegarde_purge_les_anciennes(classeur, tmp_path):
     assert recente.exists()
 
 
-def test_colonnes_facture_modifiables():
-    """4 colonnes facture (voir CLAUDE.md, session F2, Volet 1) — même
-    statut que les 4 colonnes BL déjà là : saisie brute, jamais une
-    formule."""
+def test_colonnes_facture_plus_jamais_modifiables():
+    """Depuis P1 (feuille Pièces, voir CLAUDE.md) les 5 colonnes facture de
+    Commandes sont des colonnes CALCULÉES : l'outil n'y écrit plus jamais
+    une valeur — seules les 4 colonnes BL historiques restent saisissables."""
 
-    assert set(("N° facture", "Date facture", "Qté facturée", "PU facturé")) <= set(COLONNES_MODIFIABLES)
+    assert set(COLONNES_MODIFIABLES) == {"Date de livraison", "Qté livrée", "Tarif BL", "Note"}
+    assert not set(COLONNES_FACTURE_CALCULEES) & set(COLONNES_MODIFIABLES)
 
 
-def test_appliquer_ecrit_les_colonnes_facture(tmp_path):
-    """Le classeur synthétique existant n'a pas les colonnes facture — un
-    2e classeur, dédié, les ajoute pour prouver que le patch chirurgical
-    fonctionne aussi pour elles (le vrai Suivi ne les a pas encore créées à
-    ce jour, voir CLAUDE.md — ce test tourne donc sur un classeur qui, lui,
-    les a)."""
+def test_appliquer_refuse_les_colonnes_facture(tmp_path):
+    """Même présentes dans la feuille, les 5 colonnes facture sont refusées
+    par appliquer() (elles portent une formule depuis P1) — rien n'est
+    écrit, aucune sauvegarde créée."""
 
     from openpyxl import Workbook
 
@@ -178,22 +184,12 @@ def test_appliquer_ecrit_les_colonnes_facture(tmp_path):
     ws.append(["ART1", 10, 5.0, None, None, None, None])
     chemin = tmp_path / "suivi_facture.xlsx"
     wb.save(chemin)
+    avant = chemin.read_bytes()
 
-    appliquer(
-        chemin,
-        [
-            Ecriture(2, "N° facture", "360311"),
-            Ecriture(2, "Qté facturée", 10.0),
-            Ecriture(2, "PU facturé", 5.0),
-        ],
-        tmp_path / "backups",
-    )
-
-    wb2 = load_workbook(chemin, data_only=True)
-    ws2 = wb2["Commandes"]
-    assert ws2["D2"].value == "360311"
-    assert ws2["F2"].value == 10.0
-    assert ws2["G2"].value == 5.0
+    with pytest.raises(ColonneNonModifiable):
+        appliquer(chemin, [Ecriture(2, "N° facture", "360311")], tmp_path / "backups")
+    assert chemin.read_bytes() == avant
+    assert not (tmp_path / "backups").exists()
 
 
 def test_ajouter_entetes_saisie_integre_les_colonnes_dans_le_tableau(classeur, tmp_path):
@@ -433,52 +429,20 @@ def test_ajouter_entetes_saisie_sur_le_vrai_suivi_commandes_vivant(tmp_path):
     trouver_fichier_suivi_vivant(ROOT) is None,
     reason="Classeur Suivi commandes VIVANT introuvable depuis ce poste",
 )
-def test_appliquer_ecrit_les_colonnes_facture_sur_le_vrai_suivi_vivant(tmp_path):
-    """Étape 3 (voir CLAUDE.md) : une fois les 5 colonnes facture réellement
-    créées dans le classeur vivant par ajouter_entetes_saisie() (étape 2),
-    appliquer() doit pouvoir y écrire comme dans n'importe quelle colonne de
-    COLONNES_MODIFIABLES — même patch chirurgical (une seule partie du zip
-    modifiée), aucune autre partie touchée."""
+def test_appliquer_refuse_les_colonnes_facture_sur_le_vrai_suivi_vivant():
+    """Les 5 colonnes facture existent bien dans le vivant (créées le
+    2026-09-01) mais, depuis P1, appliquer() les REFUSE : ce sont des
+    colonnes calculées depuis la feuille Pièces. Lecture seule des en-têtes
+    du vivant, refus AVANT toute sauvegarde/écriture."""
 
     fichier_reel = trouver_fichier_suivi_vivant(ROOT)
-    copie = tmp_path / fichier_reel.name
-    shutil.copy2(fichier_reel, copie)
+    entetes = lire_entetes(fichier_reel)
+    assert set(COLONNES_FACTURE_CALCULEES) <= set(entetes)
 
-    entetes = lire_entetes(copie)
-    assert set(ENTETES_FACTURE) <= set(entetes)  # les 5 colonnes existent bien désormais
-
-    with zipfile.ZipFile(copie) as z:
-        contenu_avant = {n: z.read(n) for n in z.namelist()}
-
-    appliquer(
-        copie,
-        [
-            Ecriture(2, "N° facture", "TEST-360999"),
-            Ecriture(2, "Date facture", date(2026, 9, 1)),
-            Ecriture(2, "Qté facturée", 7.0),
-            Ecriture(2, "PU facturé", 12.5),
-            Ecriture(2, "Montant facturé HT", 87.5),
-        ],
-        tmp_path / "backups",
-    )
-
-    with zipfile.ZipFile(copie) as z:
-        contenu_apres = {n: z.read(n) for n in z.namelist()}
-
-    chemin_feuille = "xl/worksheets/sheet1.xml"
-    assert set(contenu_avant) == set(contenu_apres)
-    for nom in contenu_avant:
-        if nom == chemin_feuille:
-            assert contenu_avant[nom] != contenu_apres[nom]
-        else:
-            assert contenu_avant[nom] == contenu_apres[nom], f"partie modifiée à tort : {nom}"
-
-    wb = load_workbook(copie, data_only=True)
-    ws = wb["Commandes"]
-    assert ws.cell(row=2, column=entetes["N° facture"]).value == "TEST-360999"
-    assert ws.cell(row=2, column=entetes["Qté facturée"]).value == 7.0
-    assert ws.cell(row=2, column=entetes["PU facturé"]).value == 12.5
-    assert ws.cell(row=2, column=entetes["Montant facturé HT"]).value == 87.5
+    mtime_avant = fichier_reel.stat().st_mtime
+    with pytest.raises(ColonneNonModifiable):
+        appliquer(fichier_reel, [Ecriture(2, "N° facture", "TEST-360999")], ROOT / "backups")
+    assert fichier_reel.stat().st_mtime == mtime_avant
 
 
 @pytest.mark.skipif(
@@ -521,3 +485,389 @@ def test_ecriture_chirurgicale_sur_le_vrai_suivi_commandes(tmp_path):
     assert wb["Commandes"]["P2"].value == 12345
     # les 16 Excel Tables du vrai classeur doivent toutes survivre :
     assert len(wb["Commandes"].tables) >= 1
+
+
+# ===========================================================================
+# Socles P1 (feuille Pièces) — voir CLAUDE.md « Feuille Pièces — modèle,
+# socles, migration » : 1. feuille + tableau, 2. lignes en fin de tableau,
+# 3. colonnes calculées / bascule ; plus la réparation d'une ligne.
+# Sur le classeur SYNTHÉTIQUE d'abord, puis sur une COPIE du vivant.
+# ===========================================================================
+
+
+def _parties(chemin):
+    with zipfile.ZipFile(chemin) as z:
+        return {n: z.read(n) for n in z.namelist()}
+
+
+def _xml_bien_forme(contenu: dict):
+    import xml.etree.ElementTree as ET
+
+    for nom, donnees in contenu.items():
+        if nom.endswith(".xml") or nom.endswith(".rels"):
+            ET.fromstring(donnees)  # lève si mal formé
+
+
+COLONNES_TEST = ["ID", "Type", "Date", "Qté", "Montant", "Fichier", "Écrit le"]
+
+
+def test_ajouter_feuille_tableau_cree_feuille_et_tableau(classeur, tmp_path):
+    avant = _parties(classeur)
+    sauvegarde = ajouter_feuille_tableau(
+        classeur, "Pièces", "Pieces", COLONNES_TEST, tmp_path / "backups", largeurs={"Fichier": 40},
+    )
+    assert sauvegarde.exists()
+    apres = _parties(classeur)
+    _xml_bien_forme(apres)
+
+    nouvelles = set(apres) - set(avant)
+    assert nouvelles == {"xl/worksheets/sheet2.xml", "xl/worksheets/_rels/sheet2.xml.rels", "xl/tables/table2.xml"}
+    modifiees = {n for n in avant if avant[n] != apres[n]}
+    assert modifiees == {"xl/workbook.xml", "xl/_rels/workbook.xml.rels", "[Content_Types].xml"}
+
+    wb = load_workbook(classeur)
+    assert wb.sheetnames == ["Commandes", "Pièces"]  # juste après la feuille modèle
+    ws = wb["Pièces"]
+    assert [c.value for c in ws[1]] == COLONNES_TEST
+    table = ws.tables["Pieces"]
+    assert table.ref == "A1:G2"  # une ligne de données vide sous l'en-tête
+    assert [c.name for c in table.tableColumns] == COLONNES_TEST
+    assert table.tableStyleInfo.name == wb["Commandes"].tables["Commandes"].tableStyleInfo.name
+    assert wb["Commandes"].tables["Commandes"].ref == "A1:F3"  # tableau modèle intact
+
+
+def test_ajouter_feuille_tableau_refuse_doublons(classeur, tmp_path):
+    ajouter_feuille_tableau(classeur, "Pièces", "Pieces", COLONNES_TEST, tmp_path / "backups")
+    avant = classeur.read_bytes()
+    with pytest.raises(ValueError):
+        ajouter_feuille_tableau(classeur, "Pièces", "Autre", COLONNES_TEST, tmp_path / "backups")
+    with pytest.raises(ValueError):
+        ajouter_feuille_tableau(classeur, "Autre", "Pieces", COLONNES_TEST, tmp_path / "backups")
+    with pytest.raises(ValueError):
+        ajouter_feuille_tableau(classeur, "Autre", "Nom invalide", COLONNES_TEST, tmp_path / "backups")
+    assert classeur.read_bytes() == avant
+
+
+def test_ajouter_feuille_tableau_bloque_si_verrouille(classeur, tmp_path):
+    (classeur.parent / f"~${classeur.name}").write_text("")
+    with pytest.raises(ClasseurVerrouille):
+        ajouter_feuille_tableau(classeur, "Pièces", "Pieces", COLONNES_TEST, tmp_path / "backups")
+
+
+def _trois_lignes():
+    from datetime import datetime as _dt
+
+    return [
+        {"ID": "A|1", "Type": "Facture", "Date": date(2026, 9, 4), "Qté": 3, "Montant": 12.5,
+         "Fichier": Formule('HYPERLINK("X:\\\\dossier\\\\f1.pdf","f1.pdf")', cache="f1.pdf"),
+         "Écrit le": _dt(2026, 9, 4, 18, 30, 0)},
+        {"ID": "A|2", "Type": "BL", "Date": date(2026, 9, 1), "Qté": -1, "Montant": 0},
+        {"ID": "A|3", "Type": "Frais", "Qté": 1, "Montant": 7.2, "Écrit le": _dt(2026, 9, 4, 18, 30, 5)},
+    ]
+
+
+def test_ajouter_lignes_tableau_ajoute_trois_lignes_et_etend_le_tableau(classeur, tmp_path):
+    ajouter_feuille_tableau(classeur, "Pièces", "Pieces", COLONNES_TEST, tmp_path / "backups")
+    avant = _parties(classeur)
+
+    resultat = ajouter_lignes_tableau(
+        classeur, "Pièces", "Pieces", _trois_lignes(), tmp_path / "backups",
+        colonne_id="ID", styles_colonnes={"Montant": "monnaie"},
+    )
+    assert resultat["ajoutees"] == 3
+    assert resultat["ignorees"] == []
+    assert (resultat["premiere_ligne"], resultat["derniere_ligne"]) == (2, 4)
+
+    apres = _parties(classeur)
+    _xml_bien_forme(apres)
+    modifiees = {n for n in avant if avant[n] != apres[n]}
+    assert modifiees == {"xl/worksheets/sheet2.xml", "xl/tables/table2.xml", "xl/styles.xml"}
+    # aucune chaîne partagée ajoutée : textes en inlineStr
+    assert avant.get("xl/sharedStrings.xml") == apres.get("xl/sharedStrings.xml")
+
+    wb = load_workbook(classeur)
+    ws = wb["Pièces"]
+    assert ws.tables["Pieces"].ref == "A1:G4"
+    assert ws.tables["Pieces"].autoFilter.ref == "A1:G4"
+    assert ws["A2"].value == "A|1" and ws["B2"].value == "Facture"
+    assert ws["C2"].value == date(2026, 9, 4) or ws["C2"].value.date() == date(2026, 9, 4)
+    assert ws["C2"].number_format != "General"  # style date appliqué
+    assert ws["D3"].value == -1
+    assert ws["E2"].value == 12.5 and ws["E2"].number_format != "General"
+    assert str(ws["F2"].value).startswith("=HYPERLINK(")
+    assert ws["G2"].value.hour == 18 and ws["G2"].number_format != "General"  # datetime
+    assert ws["A4"].value == "A|3" and ws["C4"].value is None
+
+    wb_v = load_workbook(classeur, data_only=True)
+    assert wb_v["Pièces"]["F2"].value == "f1.pdf"  # cache de la formule HYPERLINK
+
+
+def test_ajouter_lignes_tableau_est_idempotent_par_colonne_cle(classeur, tmp_path):
+    ajouter_feuille_tableau(classeur, "Pièces", "Pieces", COLONNES_TEST, tmp_path / "backups")
+    ajouter_lignes_tableau(classeur, "Pièces", "Pieces", _trois_lignes(), tmp_path / "backups", colonne_id="ID")
+    avant = classeur.read_bytes()
+
+    lignes = _trois_lignes() + [{"ID": "A|4", "Type": "Avoir", "Qté": -2, "Montant": -3.0}, {"ID": "A|4", "Type": "x"}]
+    resultat = ajouter_lignes_tableau(classeur, "Pièces", "Pieces", lignes, tmp_path / "backups", colonne_id="ID")
+    assert resultat["ajoutees"] == 1
+    assert resultat["ignorees"] == ["A|1", "A|2", "A|3", "A|4"]  # 3 déjà là + 1 doublon dans le lot
+    wb = load_workbook(classeur)
+    assert wb["Pièces"].tables["Pieces"].ref == "A1:G5"
+    assert wb["Pièces"]["A5"].value == "A|4"
+
+    # tout déjà présent -> rien n'est écrit, pas de sauvegarde
+    resultat = ajouter_lignes_tableau(classeur, "Pièces", "Pieces", _trois_lignes(), tmp_path / "backups", colonne_id="ID")
+    assert resultat["ajoutees"] == 0 and resultat["sauvegarde"] is None
+
+
+def test_ajouter_lignes_tableau_refuse_colonne_inconnue_et_id_vide(classeur, tmp_path):
+    ajouter_feuille_tableau(classeur, "Pièces", "Pieces", COLONNES_TEST, tmp_path / "backups")
+    avant = classeur.read_bytes()
+    with pytest.raises(ValueError):
+        ajouter_lignes_tableau(classeur, "Pièces", "Pieces", [{"ID": "x", "Fantôme": 1}], tmp_path / "backups", colonne_id="ID")
+    with pytest.raises(ValueError):
+        ajouter_lignes_tableau(classeur, "Pièces", "Pieces", [{"Type": "x"}], tmp_path / "backups", colonne_id="ID")
+    assert classeur.read_bytes() == avant
+
+
+def test_ajouter_lignes_tableau_relit_les_id_meme_reecrits_en_chaines_partagees(classeur, tmp_path):
+    """Excel, à sa prochaine sauvegarde, transforme les inlineStr en
+    chaînes partagées : l'idempotence doit survivre à cette réécriture."""
+
+    ajouter_feuille_tableau(classeur, "Pièces", "Pieces", COLONNES_TEST, tmp_path / "backups")
+    ajouter_lignes_tableau(classeur, "Pièces", "Pieces", _trois_lignes(), tmp_path / "backups", colonne_id="ID")
+    wb = load_workbook(classeur)
+    wb.save(classeur)  # openpyxl réécrit tout en sharedStrings (comme Excel)
+
+    resultat = ajouter_lignes_tableau(classeur, "Pièces", "Pieces", _trois_lignes(), tmp_path / "backups", colonne_id="ID")
+    assert resultat["ajoutees"] == 0
+    assert resultat["ignorees"] == ["A|1", "A|2", "A|3"]
+
+
+def _injecter_faux_calc_chain(chemin):
+    """Le classeur synthétique (openpyxl) n'a pas de calcChain — on en
+    fabrique un, relié et déclaré comme Excel le ferait."""
+
+    contenu = _parties(chemin)
+    contenu["xl/calcChain.xml"] = (
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="E2" i="1"/></calcChain>'
+    )
+    rels = contenu["xl/_rels/workbook.xml.rels"].decode("utf-8").replace(
+        "</Relationships>",
+        '<Relationship Id="rId99" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" '
+        'Target="calcChain.xml"/></Relationships>',
+    )
+    contenu["xl/_rels/workbook.xml.rels"] = rels.encode("utf-8")
+    ct = contenu["[Content_Types].xml"].decode("utf-8").replace(
+        "</Types>",
+        '<Override PartName="/xl/calcChain.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/></Types>',
+    )
+    contenu["[Content_Types].xml"] = ct.encode("utf-8")
+    with zipfile.ZipFile(chemin, "w", zipfile.ZIP_DEFLATED) as z:
+        for nom, donnees in contenu.items():
+            z.writestr(nom, donnees)
+
+
+def test_ajouter_colonnes_calculees_formule_sur_chaque_ligne_et_calc_chain_supprime(classeur, tmp_path):
+    _injecter_faux_calc_chain(classeur)
+    avant = _parties(classeur)
+    assert "xl/calcChain.xml" in avant
+
+    formules = {
+        "Reste": 'IFERROR(N(Commandes[[#This Row],[Qté commandée]])-N(Commandes[[#This Row],[Qté livrée]]),"")',
+        "Libellés": Formule(
+            '_xlfn.TEXTJOIN("; ",TRUE,_xlfn.UNIQUE(_xlfn._xlws.FILTER(Commandes[Référence],'
+            'Commandes[Qté livrée]=Commandes[[#This Row],[Qté livrée]],"")))', array=True,
+        ),
+    }
+    sauvegarde = ajouter_colonnes_calculees(
+        classeur, "Commandes", "Commandes", formules, tmp_path / "backups", styles_colonnes={"Reste": "monnaie"},
+    )
+    assert sauvegarde.exists()
+
+    apres = _parties(classeur)
+    _xml_bien_forme(apres)
+    assert "xl/calcChain.xml" not in apres
+    assert "calcChain" not in apres["xl/_rels/workbook.xml.rels"].decode("utf-8")
+    assert "calcChain" not in apres["[Content_Types].xml"].decode("utf-8")
+    assert 'fullCalcOnLoad="1"' in apres["xl/workbook.xml"].decode("utf-8")
+
+    wb = load_workbook(classeur)
+    ws = wb["Commandes"]
+    assert ws["G1"].value == "Reste" and ws["H1"].value == "Libellés"
+    assert ws["G2"].value == "=" + formules["Reste"]
+    assert ws["G3"].value == "=" + formules["Reste"]  # la MÊME chaîne sur chaque ligne
+    assert ws["H2"].value.text == "=" + formules["Libellés"].texte  # ArrayFormula (t="array")
+    assert ws["H2"].value.ref == "H2"
+    table = ws.tables["Commandes"]
+    assert table.ref == "A1:H3"
+    cols = {c.name: c for c in table.tableColumns}
+    assert cols["Reste"].calculatedColumnFormula.attr_text == formules["Reste"]
+    assert cols["Libellés"].calculatedColumnFormula.array is True
+    assert str(ws["E2"].value).startswith("=IF(")  # formule voisine intacte
+    assert len(ws.data_validations.dataValidation) == 1
+    assert ws["G2"].number_format != "General"
+
+
+def test_ajouter_colonnes_calculees_refuse_colonne_existante(classeur, tmp_path):
+    avant = classeur.read_bytes()
+    with pytest.raises(ValueError):
+        ajouter_colonnes_calculees(classeur, "Commandes", "Commandes", {"Note": "1+1"}, tmp_path / "backups")
+    assert classeur.read_bytes() == avant
+
+
+def test_basculer_colonnes_en_formules_remplace_les_valeurs_saisies(classeur, tmp_path):
+    formule = "N(Commandes[[#This Row],[Qté commandée]])*2"
+    basculer_colonnes_en_formules(classeur, "Commandes", "Commandes", {"Qté livrée": formule}, tmp_path / "backups")
+
+    wb = load_workbook(classeur)
+    ws = wb["Commandes"]
+    assert ws["C2"].value == "=" + formule  # cellule absente avant (ART1 sans Qté livrée) : créée
+    assert ws["C3"].value == "=" + formule  # valeur 5 remplacée
+    cols = {c.name: c for c in ws.tables["Commandes"].tableColumns}
+    assert cols["Qté livrée"].calculatedColumnFormula.attr_text == formule
+    assert ws.tables["Commandes"].ref == "A1:F3"  # pas de colonne ajoutée
+    assert 'fullCalcOnLoad="1"' in _parties(classeur)["xl/workbook.xml"].decode("utf-8")
+
+    with pytest.raises(ValueError):
+        basculer_colonnes_en_formules(classeur, "Commandes", "Commandes", {"Fantôme": formule}, tmp_path / "backups")
+
+
+def test_decaler_references_ligne():
+    assert _decaler_references_ligne("SUMIF(Commandes[N° de commande],H3,Commandes[Facturé BL])", 3, 2) == (
+        "SUMIF(Commandes[N° de commande],H2,Commandes[Facturé BL])"
+    )
+    assert _decaler_references_ligne("$A$3+A3+A30+AB3+'Feuille'!C3", 3, 2) == "$A$3+A2+A30+AB2+'Feuille'!C2"
+    assert _decaler_references_ligne("Commandes[[#This Row],[Tarif BL]]*1.15", 3, 2) == "Commandes[[#This Row],[Tarif BL]]*1.15"
+    assert _decaler_references_ligne("LOG10(3)", 3, 2) == "LOG10(3)"
+
+
+def test_reparer_formules_ligne_recopie_la_formule_modele(classeur, tmp_path):
+    """Ligne 2 : formule décalée (celle du Statut) à la place de la bonne ;
+    ligne 3 = modèle. Seules les cellules listées sont touchées."""
+
+    contenu = _parties(classeur)
+    xml = contenu["xl/worksheets/sheet1.xml"].decode("utf-8")
+    xml = re.sub(
+        r'(<c r="E2"[^>]*>)<f>.*?</f>', r'\1<f>IF(D2="","x","y")</f>', xml, count=1, flags=re.S,
+    )
+    contenu["xl/worksheets/sheet1.xml"] = xml.encode("utf-8")
+    with zipfile.ZipFile(classeur, "w", zipfile.ZIP_DEFLATED) as z:
+        for nom, donnees in contenu.items():
+            z.writestr(nom, donnees)
+    assert load_workbook(classeur)["Commandes"]["E2"].value == '=IF(D2="","x","y")'
+
+    ecrit = reparer_formules_ligne(classeur, tmp_path / "backups", colonnes=[5])
+    assert ecrit == {5: 'IF(C2="","attente","reçu")'}  # C3 -> C2
+
+    wb = load_workbook(classeur)
+    ws = wb["Commandes"]
+    assert ws["E2"].value == '=IF(C2="","attente","reçu")'
+    assert ws["E3"].value == '=IF(C3="","attente","reçu")'
+    assert ws["A2"].value == "ART1" and ws["B2"].value == 10  # voisines intactes
+
+    assert reparer_formules_ligne(classeur, tmp_path / "backups", colonnes=[5]) == {}  # déjà identique
+    with pytest.raises(ValueError):
+        reparer_formules_ligne(classeur, tmp_path / "backups", colonnes=[1])  # A3 : pas une formule
+
+
+# --- Sur une COPIE du classeur vivant ----------------------------------------
+
+
+@pytest.mark.skipif(
+    trouver_fichier_suivi_vivant(ROOT) is None,
+    reason="Classeur Suivi commandes VIVANT introuvable depuis ce poste",
+)
+def test_socles_feuille_et_lignes_sur_une_copie_du_vrai_suivi_vivant(tmp_path):
+    """Socles 1 et 2 sur une copie du vrai classeur : 16 -> 17 tableaux,
+    onglet juste après Commandes, seules les parties attendues changent,
+    XML bien formé partout, lignes relues par openpyxl."""
+
+    fichier_reel = trouver_fichier_suivi_vivant(ROOT)
+    copie = tmp_path / fichier_reel.name
+    shutil.copy2(fichier_reel, copie)
+    avant = _parties(copie)
+    nb_tables_avant = len([n for n in avant if re.match(r"xl/tables/table\d+\.xml$", n)])
+    onglets_avant = re.findall(r'<sheet\b[^>]*\bname="([^"]*)"', avant["xl/workbook.xml"].decode("utf-8"))
+
+    nom_feuille, nom_table = "Test P1 socle", "TestP1Socle"
+    ajouter_feuille_tableau(copie, nom_feuille, nom_table, COLONNES_TEST, tmp_path / "backups")
+
+    apres = _parties(copie)
+    _xml_bien_forme({n: d for n, d in apres.items() if n != "xl/worksheets/sheet1.xml"})  # sheet1 = 58 Mo, inchangée (vérifié ci-dessous)
+    assert len([n for n in apres if re.match(r"xl/tables/table\d+\.xml$", n)]) == nb_tables_avant + 1
+    nouvelles = set(apres) - set(avant)
+    assert len(nouvelles) == 3
+    modifiees = {n for n in avant if avant[n] != apres[n]}
+    assert modifiees == {"xl/workbook.xml", "xl/_rels/workbook.xml.rels", "[Content_Types].xml"}
+    onglets_apres = re.findall(r'<sheet\b[^>]*\bname="([^"]*)"', apres["xl/workbook.xml"].decode("utf-8"))
+    assert onglets_apres == [onglets_avant[0], nom_feuille] + onglets_avant[1:]
+    assert avant["xl/calcChain.xml"] == apres["xl/calcChain.xml"]  # socle 1 : aucune formule, calcChain intact
+
+    resultat = ajouter_lignes_tableau(copie, nom_feuille, nom_table, _trois_lignes(), tmp_path / "backups", colonne_id="ID")
+    assert resultat["ajoutees"] == 3
+
+    wb = load_workbook(copie, read_only=True)
+    assert wb.sheetnames[1] == nom_feuille
+    ws = wb[nom_feuille]
+    lignes = list(ws.iter_rows(values_only=True))
+    assert list(lignes[0]) == COLONNES_TEST
+    assert lignes[1][0] == "A|1" and lignes[3][0] == "A|3"
+    wb.close()
+
+
+@pytest.mark.skipif(
+    trouver_fichier_suivi_vivant(ROOT) is None,
+    reason="Classeur Suivi commandes VIVANT introuvable depuis ce poste",
+)
+def test_socle_colonnes_calculees_sur_une_copie_du_vrai_suivi_vivant(tmp_path):
+    """Socle 3 sur une copie du vrai classeur (feuille de 58 Mo, 6 500+
+    lignes) : la formule est posée sur CHAQUE ligne du tableau Commandes,
+    calcChain retiré proprement, les formules existantes (Statut commande
+    U100, Facturé BL AV100) strictement identiques."""
+
+    fichier_reel = trouver_fichier_suivi_vivant(ROOT)
+    copie = tmp_path / fichier_reel.name
+    shutil.copy2(fichier_reel, copie)
+    avant = _parties(copie)
+    xml_avant = avant["xl/worksheets/sheet1.xml"].decode("utf-8")
+    ref_avant = re.search(r'<table\b[^>]*\sref="([^"]*)"', avant["xl/tables/table1.xml"].decode("utf-8")).group(1)
+    derniere_ligne = int(re.match(r"[A-Z]+\d+:[A-Z]+(\d+)", ref_avant).group(1))
+    nb_cols_avant = len(lire_entetes(copie))
+
+    def _formule(xml, ref):
+        m = re.search(rf'<c r="{ref}"[^>]*>.*?<f[^>]*>(.*?)</f>', xml, re.S)
+        return m.group(1) if m else None
+
+    u100_avant, av100_avant = _formule(xml_avant, "U100"), _formule(xml_avant, "AV100")
+    assert u100_avant and av100_avant
+
+    nom = "Test P1 calcul"
+    formule = 'IFERROR(N(Commandes[[#This Row],[Qté commandée]])-N(Commandes[[#This Row],[Qté livrée]]),"")'
+    ajouter_colonnes_calculees(copie, "Commandes", "Commandes", {nom: formule}, tmp_path / "backups")
+
+    apres = _parties(copie)
+    assert "xl/calcChain.xml" not in apres
+    assert "calcChain" not in apres["xl/_rels/workbook.xml.rels"].decode("utf-8")
+    assert "calcChain" not in apres["[Content_Types].xml"].decode("utf-8")
+    modifiees = {n for n in avant if n in apres and avant[n] != apres[n]}
+    assert modifiees == {
+        "xl/worksheets/sheet1.xml", "xl/tables/table1.xml", "xl/workbook.xml",
+        "xl/_rels/workbook.xml.rels", "[Content_Types].xml",
+    }
+    _xml_bien_forme({n: apres[n] for n in modifiees})
+
+    xml_apres = apres["xl/worksheets/sheet1.xml"].decode("utf-8")
+    assert _formule(xml_apres, "U100") == u100_avant
+    assert _formule(xml_apres, "AV100") == av100_avant
+    lettre = get_column_letter(nb_cols_avant + 1)
+    attendu = formule.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    assert _formule(xml_apres, f"{lettre}2") == attendu
+    assert _formule(xml_apres, f"{lettre}{derniere_ligne}") == attendu
+    assert len(re.findall(rf'<c r="{lettre}\d+"', xml_apres)) == derniere_ligne  # en-tête + une par ligne
+    assert lire_entetes(copie)[nom] == nb_cols_avant + 1
+    xml_table = apres["xl/tables/table1.xml"].decode("utf-8")
+    assert f"<calculatedColumnFormula>{attendu}</calculatedColumnFormula>" in xml_table
+    assert re.search(r'<table\b[^>]*\sref="A1:' + lettre + str(derniere_ligne) + '"', xml_table)

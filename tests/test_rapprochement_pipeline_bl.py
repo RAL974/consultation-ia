@@ -10,9 +10,11 @@ qui l'exercent — un fichier factice ne suffit pas à fitz.
 
 from datetime import date
 
+import pytest
 from openpyxl import Workbook
 
 from moteur.rapprochement.ecriture import Ecriture
+from moteur.rapprochement.pieces import FeuillePiecesAbsente, installer_feuille_pieces, lire_pieces
 from moteur.rapprochement.matching import LigneSuivi, Statut, Correspondance
 from moteur.rapprochement.modele_bl import BonLivraison, LigneBL
 from moteur.rapprochement import pipeline_bl
@@ -23,6 +25,7 @@ from moteur.rapprochement.pipeline_bl import (
     archiver_bl,
     appliquer_et_archiver,
     ecritures_pour,
+    pieces_pour_bl,
     regrouper_par_bl,
     trouver_bon_de_commande,
 )
@@ -252,6 +255,7 @@ def test_appliquer_et_archiver_une_archive_qui_echoue_nempeche_pas_le_reste(tmp_
     ws.append(["REF2", 5, 0, None, None, None])
     chemin_suivi = tmp_path / "suivi.xlsx"
     wb.save(chemin_suivi)
+    installer_feuille_pieces(chemin_suivi, tmp_path / "backups")  # P1 : la feuille Pièces doit exister
 
     dossier_a_traiter = tmp_path / "a_traiter" / "BL"
     dossier_a_traiter.mkdir(parents=True)
@@ -286,6 +290,17 @@ def test_appliquer_et_archiver_une_archive_qui_echoue_nempeche_pas_le_reste(tmp_
     resume = appliquer_et_archiver(tmp_path, dossier_a_traiter, rapport, rapport.surs)
 
     assert resume["lignes_ecrites"] == 2
+    # P1 : une ligne Pièces de type BL par ligne écrite, Fichier = chemin
+    # d'archive (même nom que l'archivage qui suit), y compris pour le BL
+    # dont l'archivage a ensuite échoué (la ligne de document existe).
+    assert resume["pieces_ecrites"] == 2
+    pieces = lire_pieces(chemin_suivi)
+    assert [p["Type"] for p in pieces] == ["BL", "BL"]
+    assert [p["N° pièce"] for p in pieces] == ["735136", "735136"]
+    assert [p["N° de commande"] for p in pieces] == ["C1", "C2"]
+    assert pieces[0]["Référence Suivi"] == "REF1" and pieces[0]["Qté"] == 10.0 and pieces[0]["Montant HT"] == 10.0
+    assert pieces[0]["Fichier"] == "2026-08-06 - 109 DISTRIBUTION - 735136 - BC C1.pdf"
+    assert pieces[0]["Mode de rapprochement"] == "Auto"
     assert [f for f, _ in resume["bl_archives"]] == ["bl_ok.pdf"]
     assert [f for f, _ in resume["archivage_echoue"]] == ["bl_verrouille.pdf"]
     assert resume["chemin_rapport"].exists()
@@ -306,6 +321,7 @@ def test_appliquer_et_archiver_deplace_les_bl_a_confirmer_vers_a_verifier(tmp_pa
     ws.append(["Référence", "Qté commandée", "Qté livrée", "Tarif BL", "Date de livraison", "Note"])
     chemin_suivi = tmp_path / "suivi.xlsx"
     wb.save(chemin_suivi)
+    installer_feuille_pieces(chemin_suivi, tmp_path / "backups")  # P1 : la feuille Pièces doit exister
 
     dossier_a_traiter = tmp_path / "a_traiter" / "BL"
     dossier_a_traiter.mkdir(parents=True)
@@ -356,6 +372,7 @@ def test_appliquer_et_archiver_fichier_multi_bl_archive_le_resolu_sans_attendre_
     ws.append(["REF1", 10, 10, 1.0, "2026-08-13", None])
     chemin_suivi = tmp_path / "suivi.xlsx"
     wb.save(chemin_suivi)
+    installer_feuille_pieces(chemin_suivi, tmp_path / "backups")  # P1 : la feuille Pièces doit exister
 
     dossier_a_traiter = tmp_path / "a_traiter" / "BL"
     dossier_a_traiter.mkdir(parents=True)
@@ -430,6 +447,7 @@ def test_appliquer_et_archiver_fichier_multi_bl_supprime_la_source_une_fois_tout
     ws.append(["REF2", 5, 0, None, None, None])
     chemin_suivi = tmp_path / "suivi.xlsx"
     wb.save(chemin_suivi)
+    installer_feuille_pieces(chemin_suivi, tmp_path / "backups")  # P1 : la feuille Pièces doit exister
 
     dossier_a_traiter = tmp_path / "a_traiter" / "BL"
     dossier_a_traiter.mkdir(parents=True)
@@ -489,6 +507,7 @@ def test_appliquer_et_archiver_un_seul_bl_mais_pages_partielles_est_decoupe_pas_
     ws.append(["REF1", 10, 10, 1.0, "2026-08-13", None])
     chemin_suivi = tmp_path / "suivi.xlsx"
     wb.save(chemin_suivi)
+    installer_feuille_pieces(chemin_suivi, tmp_path / "backups")  # P1 : la feuille Pièces doit exister
 
     dossier_a_traiter = tmp_path / "a_traiter" / "BL"
     dossier_a_traiter.mkdir(parents=True)
@@ -543,6 +562,7 @@ def test_appliquer_et_archiver_anomalie_de_lecture_necoupe_pas_les_bl_resolus_du
     ws.append(["REF1", 10, 10, 1.0, "2026-08-13", None])
     chemin_suivi = tmp_path / "suivi.xlsx"
     wb.save(chemin_suivi)
+    installer_feuille_pieces(chemin_suivi, tmp_path / "backups")  # P1 : la feuille Pièces doit exister
 
     dossier_a_traiter = tmp_path / "a_traiter" / "BL"
     dossier_a_traiter.mkdir(parents=True)
@@ -745,6 +765,7 @@ def test_appliquer_et_archiver_bon_de_retour_rejoint_traites_avec_sa_commande(tm
     ws.append(["Référence", "Qté commandée", "Qté livrée", "Tarif BL", "Date de livraison", "Note"])
     chemin_suivi = tmp_path / "suivi.xlsx"
     wb.save(chemin_suivi)
+    installer_feuille_pieces(chemin_suivi, tmp_path / "backups")  # P1 : la feuille Pièces doit exister
 
     dossier_a_traiter = tmp_path / "a_traiter" / "BL"
     dossier_a_traiter.mkdir(parents=True)
@@ -770,3 +791,62 @@ def test_appliquer_et_archiver_bon_de_retour_rejoint_traites_avec_sa_commande(tm
     assert cible.parent.parent.name == "Traités"
     assert "RETOUR" in cible.name
     assert resume["bl_a_verifier"] == []
+
+
+# --- P1 : lignes Pièces de type BL -------------------------------------------
+
+
+def test_pieces_pour_bl_une_ligne_par_ligne_ecrite(tmp_path):
+    bl = _bl("bl.pdf", numero_commande="123.096", numero_bl="735136", date_bl="06/08/2026")
+    ls = LigneSuivi(5, "81000298", "", 2, 0, None, None, "", "", chantier="Chantier A", sous_chantier="SC1")
+    c_sur = Correspondance(_ligne_bl(), ls, Statut.SUR)
+    c_confirme = Correspondance(LigneBL("X1", "Désig", 3.0, None, None), ls, Statut.A_CONFIRMER, ["tarif"])
+    c_deja = Correspondance(_ligne_bl(), ls, Statut.DEJA_A_JOUR)
+
+    pieces = pieces_pour_bl([(bl, c_sur), (bl, c_confirme), (bl, c_deja)], tmp_path / "Traités")
+
+    assert len(pieces) == 2  # « déjà à jour » ne produit rien
+    p = pieces[0]
+    assert p["Type"] == "BL" and p["Fournisseur"] == "109 Distribution"  # nom Suivi via MAPPING_FOURNISSEURS
+    assert p["N° pièce"] == "735136" and p["Date pièce"] == date(2026, 8, 6)
+    assert p["N° de commande"] == "123.096" and p["Chantier"] == "Chantier A" and p["Sous-Chantier"] == "SC1"
+    assert p["Référence Suivi"] == "81000298" and p["Référence fournisseur"] == "81000298"
+    assert p["Qté"] == 2.0 and p["PU HT"] == 32.0 and p["Montant HT"] == 64.0
+    assert p["Mode de rapprochement"] == "Auto" and p["Commentaire"] is None
+    assert p["Fichier"].texte.endswith('123.096\\2026-08-06 - 109 DISTRIBUTION - 735136 - BC 123.096.pdf","2026-08-06 - 109 DISTRIBUTION - 735136 - BC 123.096.pdf")')
+    assert p["ID pièce"] == "109 Distribution|BL|735136|123.096|81000298|"
+    q = pieces[1]
+    assert q["Mode de rapprochement"] == "Confirmé"
+    assert q["Montant HT"] is None and q["PU HT"] is None  # aucun prix sur le BL : rien d'inventé
+
+
+def test_pieces_pour_bl_montant_recalcule_est_commente():
+    bl = _bl("bl.pdf")
+    c = Correspondance(LigneBL("R", "", 4.0, 2.5, None), _ligne_suivi(5), Statut.SUR)
+    [p] = pieces_pour_bl([(bl, c)], "Traités")
+    assert p["Montant HT"] == 10.0 and p["Commentaire"] == "montant recalculé"
+
+
+def test_appliquer_et_archiver_refuse_sans_feuille_pieces(tmp_path):
+    """P1 : sans feuille Pièces, rien n'est écrit (ni Commandes ni Pièces),
+    rien n'est déplacé — jamais une Qté livrée sans sa ligne de document."""
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Commandes"
+    ws.append(["Référence", "Qté commandée", "Qté livrée", "Tarif BL", "Date de livraison", "Note"])
+    ws.append(["REF1", 10, 0, None, None, None])
+    chemin_suivi = tmp_path / "suivi.xlsx"
+    wb.save(chemin_suivi)
+    avant = chemin_suivi.read_bytes()
+
+    dossier_a_traiter = tmp_path / "a_traiter" / "BL"
+    dossier_a_traiter.mkdir(parents=True)
+    (dossier_a_traiter / "bl.pdf").write_bytes(b"1")
+    c = Correspondance(_ligne_bl(), _ligne_suivi(2), Statut.SUR)
+    rapport = RapportRapprochement(surs=[(_bl("bl.pdf"), c)], fichier_suivi=chemin_suivi)
+
+    with pytest.raises(FeuillePiecesAbsente):
+        appliquer_et_archiver(tmp_path, dossier_a_traiter, rapport, rapport.surs)
+    assert chemin_suivi.read_bytes() == avant
+    assert (dossier_a_traiter / "bl.pdf").exists()

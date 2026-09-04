@@ -43,7 +43,7 @@ from openpyxl import load_workbook
 
 from moteur.outils import to_float
 from moteur.panier import MAPPING_FOURNISSEURS
-from moteur.rapprochement.ecriture import ENTETES_FACTURE
+from moteur.rapprochement.pieces import COLONNES_FACTURE_CALCULEES, IndexPieces, lire_pieces
 from moteur.rapprochement.matching import (
     _cle,
     _memes_references,
@@ -67,7 +67,7 @@ _COLONNES_REQUISES_FACTURE = (
 # OPTIONNELLES à la LECTURE (leur absence ne bloque pas le diagnostic en
 # lecture seule) mais dans moteur.rapprochement.ecriture.COLONNES_MODIFIABLES
 # pour l'écriture réelle (qui, elle, échoue proprement si elles manquent).
-COLONNES_FACTURE_OPTIONNELLES = ENTETES_FACTURE
+COLONNES_FACTURE_OPTIONNELLES = COLONNES_FACTURE_CALCULEES
 
 
 @dataclass
@@ -91,6 +91,22 @@ class LigneSuiviFacture:
     date_facture: object = None
     qte_facturee: float | None = None
     pu_facture: float | None = None
+
+    # Depuis P1 (feuille Pièces, voir moteur.rapprochement.pieces) : la
+    # source de vérité de "déjà facturé" est la feuille Pièces, pas les
+    # cellules de Commandes (devenues des formules dont la valeur en cache
+    # n'est rafraîchie qu'à la prochaine ouverture Excel). Quand la feuille
+    # existe, numero_facture/date_facture/qte_facturee/pu_facture sont
+    # RECALCULÉS depuis Pièces (voir _ligne_suivi_facture_depuis_row) ;
+    # numeros_factures = tous les n° de facture déjà écrits sur cette ligne
+    # de commande (idempotence : DEJA_A_JOUR si le n° courant y est).
+    chantier: object = None
+    sous_chantier: object = None
+    numeros_factures: list = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.numeros_factures and self.numero_facture:
+            self.numeros_factures = [n.strip() for n in str(self.numero_facture).split(";") if n.strip()]
 
 
 class StatutFacture(Enum):
@@ -230,35 +246,72 @@ def _valeur_texte(v):
     return v or None
 
 
-def _ligne_suivi_facture_depuis_row(i, row, entetes, avec_commande=False) -> LigneSuiviFacture:
+def _ligne_suivi_facture_depuis_row(i, row, entetes, avec_commande=False, index_pieces=None) -> LigneSuiviFacture:
 
     facture_ok = colonnes_facture_disponibles(entetes)
+    numero_commande = str(row[entetes["N° de commande"]] or "").strip()
+    reference = row[entetes["Référence"]]
+
+    if index_pieces is not None and index_pieces.disponible:
+        # Source de vérité = feuille Pièces (voir LigneSuiviFacture).
+        numeros = index_pieces.numeros_factures(numero_commande, reference)
+        qte_facturee = index_pieces.qte_facturee(numero_commande, reference)
+        montant = index_pieces.montant_facture(numero_commande, reference)
+        numero_facture = "; ".join(numeros) or None
+        date_facture = index_pieces.date_facture(numero_commande, reference)
+        qte_facturee = qte_facturee if numeros else None
+        pu_facture = round(montant / qte_facturee, 4) if qte_facturee else None
+    else:
+        numero_facture = _valeur_texte(row[entetes["N° facture"]]) if facture_ok else None
+        numeros = [n.strip() for n in str(numero_facture).split(";") if n.strip()] if numero_facture else []
+        date_facture = row[entetes["Date facture"]] if facture_ok else None
+        date_facture = date_facture if date_facture not in ("",) else None
+        qte_facturee = (
+            to_float(row[entetes["Qté facturée"]])
+            if facture_ok and row[entetes["Qté facturée"]] not in (None, "") else None
+        )
+        pu_facture = (
+            to_float(row[entetes["PU facturé"]])
+            if facture_ok and row[entetes["PU facturé"]] not in (None, "") else None
+        )
 
     return LigneSuiviFacture(
         ligne_excel=i,
-        reference=row[entetes["Référence"]],
+        reference=reference,
         designation=row[entetes["Désignation"]],
         qte_commandee=to_float(row[entetes["Qté commandée"]]),
         qte_livree=to_float(row[entetes["Qté livrée"]]),
         tarif_bl=row[entetes["Tarif BL"]],
         tarif_convenu=row[entetes["Tarif convenu"]],
-        numero_commande=str(row[entetes["N° de commande"]] or "").strip() if avec_commande else "",
-        numero_facture=_valeur_texte(row[entetes["N° facture"]]) if facture_ok else None,
-        date_facture=row[entetes["Date facture"]] if facture_ok else None,
-        qte_facturee=(
-            to_float(row[entetes["Qté facturée"]]) if facture_ok and row[entetes["Qté facturée"]] is not None else None
-        ),
-        pu_facture=(
-            to_float(row[entetes["PU facturé"]]) if facture_ok and row[entetes["PU facturé"]] is not None else None
-        ),
+        numero_commande=numero_commande if avec_commande else "",
+        numero_facture=numero_facture,
+        date_facture=date_facture,
+        qte_facturee=qte_facturee,
+        pu_facture=pu_facture,
+        chantier=row[entetes["Chantier"]] if "Chantier" in entetes else None,
+        sous_chantier=row[entetes["Sous-Chantier"]] if "Sous-Chantier" in entetes else None,
+        numeros_factures=numeros,
     )
 
 
-def lire_lignes_commande_facture(chemin_suivi, fournisseur: str, numero_commande: str) -> list[LigneSuiviFacture]:
+def index_pieces_du_suivi(chemin_suivi) -> IndexPieces:
+    """Index de la feuille Pièces du classeur (vide, `disponible` False, si
+    la feuille n'existe pas encore — les 5 colonnes de Commandes servent
+    alors de repli, comme avant P1)."""
+    return IndexPieces(lire_pieces(chemin_suivi))
+
+
+def lire_lignes_commande_facture(chemin_suivi, fournisseur: str, numero_commande: str,
+                                 index_pieces=None) -> list[LigneSuiviFacture]:
     """Même principe que moteur.rapprochement.matching.lire_lignes_commande
-    (conversion MAPPING_FOURNISSEURS comprise), pour les colonnes facture."""
+    (conversion MAPPING_FOURNISSEURS comprise), pour les colonnes facture.
+    `index_pieces` (voir index_pieces_du_suivi) : construit ici s'il n'est
+    pas fourni — les pipelines le passent pour ne lire la feuille Pièces
+    qu'une fois par lot."""
 
     fournisseur = MAPPING_FOURNISSEURS.get(fournisseur.upper(), fournisseur)
+    if index_pieces is None:
+        index_pieces = index_pieces_du_suivi(chemin_suivi)
 
     wb, ws, entetes = _ouvrir_feuille_commandes_facture(chemin_suivi)
     try:
@@ -276,19 +329,21 @@ def lire_lignes_commande_facture(chemin_suivi, fournisseur: str, numero_commande
             if fourn is None or _cle(fourn) != _cle(fournisseur):
                 continue
 
-            resultat.append(_ligne_suivi_facture_depuis_row(i, row, entetes))
+            resultat.append(_ligne_suivi_facture_depuis_row(i, row, entetes, index_pieces=index_pieces))
 
         return resultat
     finally:
         wb.close()
 
 
-def lire_lignes_fournisseur_facture(chemin_suivi, fournisseur: str) -> list[LigneSuiviFacture]:
+def lire_lignes_fournisseur_facture(chemin_suivi, fournisseur: str, index_pieces=None) -> list[LigneSuiviFacture]:
     """Même principe que moteur.rapprochement.matching.lire_lignes_fournisseur
     — utilisé pour la déduction de commande par contenu quand l'en-tête de
     la facture (N°Réf.Client) ne suffit pas (voir pipeline_facture.py)."""
 
     fournisseur = MAPPING_FOURNISSEURS.get(fournisseur.upper(), fournisseur)
+    if index_pieces is None:
+        index_pieces = index_pieces_du_suivi(chemin_suivi)
 
     wb, ws, entetes = _ouvrir_feuille_commandes_facture(chemin_suivi)
     try:
@@ -301,7 +356,7 @@ def lire_lignes_fournisseur_facture(chemin_suivi, fournisseur: str) -> list[Lign
             if fourn is None or _cle(fourn) != _cle(fournisseur):
                 continue
 
-            resultat.append(_ligne_suivi_facture_depuis_row(i, row, entetes, avec_commande=True))
+            resultat.append(_ligne_suivi_facture_depuis_row(i, row, entetes, avec_commande=True, index_pieces=index_pieces))
 
         return resultat
     finally:
@@ -505,30 +560,37 @@ def _comparer_facture(ligne_facture: LigneFacture, ligne_suivi: LigneSuiviFactur
     raisons = []
     cause = None
 
-    if ligne_suivi.numero_facture:
-        if ligne_suivi.numero_facture == numero_facture:
-            # Idempotence : ce même n° de facture est déjà enregistré sur
-            # cette ligne — un doublon de dépôt/traitement, rien à réécrire
-            # (même principe que côté BL, voir moteur.rapprochement.matching._comparer).
-            return CorrespondanceFacture(ligne_facture, ligne_suivi, StatutFacture.DEJA_A_JOUR)
-        raisons.append(
-            f"Cette ligne porte déjà un autre n° de facture ({ligne_suivi.numero_facture}) "
-            "— doublon de dépôt ou litige de facturation à vérifier avant d'écraser"
-        )
-        return CorrespondanceFacture(
-            ligne_facture, ligne_suivi, StatutFacture.A_CONFIRMER, raisons, CauseFacture.DOUBLON_FACTURE,
-        )
+    if numero_facture in ligne_suivi.numeros_factures:
+        # Idempotence : ce même n° de facture est déjà enregistré sur
+        # cette ligne (feuille Pièces) — un doublon de dépôt/traitement,
+        # rien à réécrire (même principe que côté BL, voir
+        # moteur.rapprochement.matching._comparer).
+        return CorrespondanceFacture(ligne_facture, ligne_suivi, StatutFacture.DEJA_A_JOUR)
 
-    if ligne_suivi.qte_livree > 0 and abs(ligne_facture.quantite_facturee - ligne_suivi.qte_livree) > 0.001:
-        raisons.append(
-            f"Qté facturée ({ligne_facture.quantite_facturee:g}) différente de la Qté livrée "
-            f"déjà enregistrée ({ligne_suivi.qte_livree:g}) — facturation partielle/multiple ?"
+    # Depuis P1 : une ligne peut être facturée en PLUSIEURS fois (feuille
+    # Pièces, une ligne par document) — une autre facture déjà présente
+    # n'est plus un blocage en soi. Le garde-fou double facturation est le
+    # CUMUL : si l'ajout de cette facture porte la Qté facturée cumulée
+    # au-delà de la Qté livrée -> "à confirmer", cause QTE_SUPERIEURE.
+    deja_facture = ligne_suivi.qte_facturee or 0.0
+    if ligne_suivi.qte_livree > 0:
+        cumul = round(deja_facture + ligne_facture.quantite_facturee, 4)
+        detail_deja = (
+            f" (déjà facturé {deja_facture:g} par {', '.join(ligne_suivi.numeros_factures)})"
+            if deja_facture and ligne_suivi.numeros_factures else ""
         )
-        cause = (
-            CauseFacture.QTE_SUPERIEURE
-            if ligne_facture.quantite_facturee > ligne_suivi.qte_livree
-            else CauseFacture.QTE_PARTIELLE
-        )
+        if cumul > ligne_suivi.qte_livree + 0.001:
+            raisons.append(
+                f"Qté facturée cumulée ({cumul:g}) supérieure à la Qté livrée enregistrée "
+                f"({ligne_suivi.qte_livree:g}){detail_deja} — double facturation ?"
+            )
+            cause = CauseFacture.QTE_SUPERIEURE
+        elif cumul < ligne_suivi.qte_livree - 0.001:
+            raisons.append(
+                f"Qté facturée ({ligne_facture.quantite_facturee:g}) différente de la Qté livrée "
+                f"déjà enregistrée ({ligne_suivi.qte_livree:g}){detail_deja} — facturation partielle/multiple ?"
+            )
+            cause = CauseFacture.QTE_PARTIELLE
 
     statut = StatutFacture.A_CONFIRMER if raisons else StatutFacture.SUR
     return CorrespondanceFacture(ligne_facture, ligne_suivi, statut, raisons, cause)

@@ -26,6 +26,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from moteur.rapprochement.ecriture import ClasseurVerrouille, ColonneNonModifiable
+from moteur.rapprochement.pieces import FeuillePiecesAbsente
 from moteur.rapprochement.pipeline_facture import (
     DOSSIER_A_TRAITER_FACTURES,
     appliquer_et_archiver_factures,
@@ -239,7 +240,7 @@ class FenetreRapprochementFacture(tk.Toplevel):
             resume = appliquer_et_archiver_factures(
                 self.dossier_projet, self.dossier_a_traiter, self.rapport, selection,
             )
-        except (ClasseurVerrouille, ColonneNonModifiable) as e:
+        except (ClasseurVerrouille, ColonneNonModifiable, FeuillePiecesAbsente) as e:
             self.file_attente.put(("erreur_ecriture", str(e)))
             return
         except Exception:
@@ -268,7 +269,8 @@ class FenetreRapprochementFacture(tk.Toplevel):
 
         messagebox.showinfo(
             "Rapprochement terminé",
-            f"{resume['lignes_ecrites']} ligne(s) écrite(s) dans le Suivi commandes.\n"
+            f"{resume['lignes_ecrites']} ligne(s) rapprochée(s) — {resume.get('pieces_ecrites', 0)} ligne(s) écrite(s) "
+            f"dans la feuille Pièces du Suivi commandes.\n"
             f"Sauvegarde : {resume['sauvegarde']}\n\n"
             f"{len(resume['factures_archivees'])} facture(s) archivée(s) dans a_traiter/BL/Traités/.\n"
             f"{len(resume['factures_a_verifier'])} facture(s) déplacée(s) vers a_traiter/Factures/À vérifier/ "

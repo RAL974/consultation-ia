@@ -19,6 +19,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from moteur.rapprochement.ecriture import ClasseurVerrouille, ColonneNonModifiable
+from moteur.rapprochement.pieces import FeuillePiecesAbsente
 from moteur.rapprochement.pipeline_bl import (
     DOSSIER_A_TRAITER_BL,
     appliquer_et_archiver,
@@ -249,7 +250,7 @@ class FenetreRapprochementBL(tk.Toplevel):
             resume = appliquer_et_archiver(
                 self.dossier_projet, self.dossier_a_traiter, self.rapport, selection,
             )
-        except (ClasseurVerrouille, ColonneNonModifiable) as e:
+        except (ClasseurVerrouille, ColonneNonModifiable, FeuillePiecesAbsente) as e:
             self.file_attente.put(("erreur_ecriture", str(e)))
             return
         except Exception:
